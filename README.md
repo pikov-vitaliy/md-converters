@@ -1,5 +1,8 @@
 # Конвертеры документов → Markdown
 
+[![CI](https://github.com/pikov-vitaliy/md-converters/actions/workflows/ci.yml/badge.svg)](https://github.com/pikov-vitaliy/md-converters/actions/workflows/ci.yml)
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
+
 Универсальный инструмент перевода документов в Markdown. Одна команда `tomd`
 понимает формат по расширению и конвертирует **что угодно**:
 
@@ -75,7 +78,7 @@ md-converters\
 | `tomd --help` | полная справка |
 
 ```text
-PS C:\reports> tomd * 
+PS C:\reports> tomd *
 Конвертирую vulnerability-report.html ...
 Готово: C:\reports\vulnerability-report.md
 Конвертирую асессмент.docx ...
@@ -193,6 +196,24 @@ Markdown прибирается (хвостовые пробелы, лишние
 
 ---
 
+## Особенности форматов
+
+- **Таблицы.** HTML, Word (`.docx`) и Excel (`.xlsx`) хранят настоящую
+  структуру таблиц — они переводятся в аккуратные Markdown-таблицы. У Word
+  есть мелкий нюанс: верхняя строка-заголовок может выйти пустой, а сами
+  заголовки встанут первой строкой тела (данные при этом все на месте).
+- **PDF — таблицы ненадёжно.** В PDF нет структуры таблиц, только текст с
+  координатами на странице. Поэтому таблица из PDF может выйти и нормальной
+  Markdown-таблицей, и обычным текстом построчно — как повезёт с конкретным
+  файлом. Это ограничение самого формата PDF, а не утилиты. Если для каких-то
+  PDF таблицы критичны, можно подключить отдельный извлекатель
+  (pdfplumber / camelot) — скажите, добавлю.
+- **Картинки.** Встроенные картинки (base64) по умолчанию сворачиваются в
+  плейсхолдер `![...]()`, чтобы `.md` оставался читаемым. Флаг `--keep-images`
+  оставляет сырые данные.
+
+---
+
 ## Перенос на другой компьютер
 
 1. **Скопируйте всю папку** `md-converters` куда удобно. Путь любой —
@@ -266,3 +287,36 @@ powershell -ExecutionPolicy Bypass -File .\install.ps1
 - **Python 3.10+** (на Windows — с галочкой «Add to PATH»).
 - Пакет **`markitdown[all]`** — ставится установщиком автоматически.
 - Для команд и пункта Send To на Windows — **PowerShell** (есть по умолчанию).
+
+---
+
+## In English
+
+`md-converters` is a universal **document → Markdown** tool built on
+[MarkItDown](https://github.com/microsoft/markitdown). One command — `tomd` —
+detects the format by extension and converts PDF, HTML, Word (`.docx`),
+Excel (`.xlsx`), PowerPoint (`.pptx`), CSV, JSON, XML, EPUB, Outlook `.msg`,
+Jupyter notebooks, RSS, and web pages by URL.
+
+**Install (Windows):** run `install.ps1` — it installs `markitdown[all]`,
+registers the `tomd` / `pdf2md` / `html2md` commands in your PowerShell
+profile, and adds a right-click *Send to → Convert to Markdown* entry.
+
+**Install (any OS):** `pip install .` exposes `tomd`, `pdf2md`, `html2md`.
+
+**Usage:**
+
+```text
+tomd report.docx                # one file (output next to it)
+tomd *                          # every document in the folder
+tomd C:\reports -r -o C:\vault  # whole tree into one folder
+tomd https://site/page          # a web page
+tomd folder --only docx,xlsx    # filter by type
+```
+
+Glob / folder / recursive input (skips `node_modules`, `.git`), overwrite
+protection (`-f`), YAML front-matter, HTML encoding auto-detection, base64
+image collapsing (`--keep-images` keeps raw), tidy output, and a summary with
+a list of failures. `pdf2md` / `html2md` are the same tool restricted to one
+format. Tables convert cleanly from HTML / Word / Excel; PDF tables are
+best-effort (PDF stores no table structure).
