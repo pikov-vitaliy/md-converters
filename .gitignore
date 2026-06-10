@@ -1,0 +1,15 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+
+# Windows / macOS
+Thumbs.db
+desktop.ini
+.DS_Store
+
+# Локальные результаты конвертации (примеры в examples/ остаются в репозитории)
+/*.md
+!README.md

@@ -1,0 +1,40 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+  <meta charset="utf-8">
+  <title>Пример отчёта об уязвимостях — demo-project</title>
+  <style>
+    body { font-family: sans-serif; }
+    table { border-collapse: collapse; }
+    th, td { border: 1px solid #ccc; padding: 4px 8px; }
+  </style>
+</head>
+<body>
+  <h1>Отчёт об уязвимостях — demo-project</h1>
+  <p>Сформирован: 2026-06-10</p>
+  <p>Источник: npm-audit</p>
+
+  <h2>Сводка</h2>
+  <ul>
+    <li>Всего находок: 3</li>
+    <li>Критических: 1</li>
+    <li>Высоких: 0</li>
+    <li>Средних: 2</li>
+  </ul>
+
+  <h2>Находки</h2>
+  <table>
+    <thead>
+      <tr><th>Пакет</th><th>Уровень</th><th>Описание</th><th>Исправление</th></tr>
+    </thead>
+    <tbody>
+      <tr><td>left-pad</td><td>критический</td><td>Удалённое выполнение кода</td><td>обновить до 1.3.0</td></tr>
+      <tr><td>lodash</td><td>средний</td><td>Загрязнение прототипа</td><td>обновить до 4.17.21</td></tr>
+      <tr><td>minimist</td><td>средний</td><td>Загрязнение прототипа</td><td>обновить до 1.2.6</td></tr>
+    </tbody>
+  </table>
+
+  <h2>Рекомендации</h2>
+  <p>Выполните <code>npm audit fix</code> и пересоберите проект.</p>
+</body>
+</html>
