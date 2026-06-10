@@ -4,6 +4,11 @@ __pycache__/
 *.egg-info/
 .venv/
 venv/
+build/
+dist/
+
+# Генерируется install.ps1 под конкретный компьютер
+sendto-convert.cmd
 
 # Windows / macOS
 Thumbs.db

@@ -1,0 +1,25 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "md-converters"
+version = "1.0.0"
+description = "Конвертация документов (PDF, HTML, Word, Excel, PowerPoint и др.) в Markdown на базе MarkItDown"
+readme = "README.md"
+requires-python = ">=3.10"
+license = { text = "MIT" }
+authors = [{ name = "Vitaly Pikov" }]
+keywords = ["markdown", "pdf", "html", "docx", "xlsx", "converter", "markitdown"]
+dependencies = ["markitdown[all]>=0.1.0"]
+
+[project.urls]
+Homepage = "https://github.com/pikov-vitaliy/md-converters"
+
+[project.scripts]
+tomd = "convert_to_md:cli_tomd"
+pdf2md = "convert_to_md:cli_pdf"
+html2md = "convert_to_md:cli_html"
+
+[tool.setuptools]
+py-modules = ["convert_to_md"]

@@ -2,7 +2,7 @@
 title: "Пример отчёта об уязвимостях — demo-project"
 source: "sample-report.html"
 converted: 2026-06-10
-generator: html2md (MarkItDown)
+generator: tomd (MarkItDown)
 ---
 
 # Отчёт об уязвимостях — demo-project
