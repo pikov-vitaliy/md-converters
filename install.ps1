@@ -5,7 +5,7 @@
 .DESCRIPTION
     Делает четыре вещи:
       1) находит Python (или подсказывает, где скачать);
-      2) ставит зависимость markitdown[all] (PDF, Word, Excel и др.);
+      2) ставит зависимость markitdown (PDF, Word, Excel и др.);
       3) прописывает команды tomd / pdf2md / html2md в профиль PowerShell,
          указывая на ту папку, ИЗ КОТОРОЙ запущен этот скрипт;
       4) добавляет пункт «Конвертировать в Markdown» в меню правого клика
@@ -61,14 +61,17 @@ Write-Host "Python найден: $python" -ForegroundColor Green
 & $python --version
 
 # --- 2) Ставим зависимость ------------------------------------------------
-Write-Host "`nУстанавливаю markitdown[all] (это может занять пару минут)..." -ForegroundColor Cyan
+# Не [all]: его youtube-transcript-api не ставится на Python 3.14, и pip
+# молча откатывается на древний markitdown 0.0.2 (без CSV-таблиц и пр.).
+$mdExtras = "markitdown[pdf,docx,pptx,xlsx,xls,outlook]"
+Write-Host "`nУстанавливаю markitdown (это может занять пару минут)..." -ForegroundColor Cyan
 & $python -m pip install --upgrade pip
-& $python -m pip install --upgrade "markitdown[all]"
+& $python -m pip install --upgrade $mdExtras
 & $python -c "import markitdown" 2>$null
 if ($LASTEXITCODE -ne 0) {
     Write-Host "Не удалось установить/импортировать markitdown." -ForegroundColor Red
     Write-Host "Проверьте интернет и попробуйте вручную:" -ForegroundColor Red
-    Write-Host "  `"$python`" -m pip install `"markitdown[all]`""
+    Write-Host "  `"$python`" -m pip install `"$mdExtras`""
     exit 1
 }
 Write-Host "Зависимость установлена." -ForegroundColor Green

@@ -4,14 +4,16 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "md-converters"
-version = "1.0.0"
+version = "1.0.1"
 description = "Конвертация документов (PDF, HTML, Word, Excel, PowerPoint и др.) в Markdown на базе MarkItDown"
 readme = "README.md"
 requires-python = ">=3.10"
 license = { text = "MIT" }
 authors = [{ name = "Vitaly Pikov" }]
 keywords = ["markdown", "pdf", "html", "docx", "xlsx", "converter", "markitdown"]
-dependencies = ["markitdown[all]>=0.1.0"]
+# Не [all]: его youtube-transcript-api требует Python < 3.14, из-за чего
+# pip на 3.14 молча откатывается на древний markitdown 0.0.2.
+dependencies = ["markitdown[pdf,docx,pptx,xlsx,xls,outlook]>=0.1.0"]
 
 [project.urls]
 Homepage = "https://github.com/pikov-vitaliy/md-converters"

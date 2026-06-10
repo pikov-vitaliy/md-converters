@@ -20,8 +20,9 @@ RSS, а также веб-страницы по URL.
     -o, --output DIR   складывать .md в эту папку, а не рядом с исходником.
     --only EXT[,EXT]   при маске/папке брать только эти расширения
                        (например: --only pdf  или  --only docx,xlsx).
-    --keep-images      оставлять встроенные картинки как base64 (по
-                       умолчанию заменяются компактным плейсхолдером).
+    --keep-images      не трогать картинки: оставить base64 и ссылки-
+                       заглушки картинок из .pptx (по умолчанию они
+                       сворачиваются в компактный плейсхолдер).
     --no-frontmatter   не добавлять YAML-блок (source/converted) в начало.
 
 Результат: то же имя, расширение .md (рядом с исходником или в папке -o).
@@ -35,9 +36,14 @@ import re
 import shlex
 import sys
 import tempfile
+import warnings
 from datetime import date
 from pathlib import Path
 from urllib.parse import urlparse
+
+# markitdown тянет pydub, а тот при импорте предупреждает, что нет
+# ffmpeg — для конвертации документов он не нужен, глушим.
+warnings.filterwarnings("ignore", message="Couldn't find ffmpeg")
 
 try:
     from markitdown import MarkItDown
@@ -66,6 +72,18 @@ EXCLUDE_DIRS = {
 
 # Встроенная картинка в виде data-URI: огромный base64 в Markdown.
 _DATA_IMG = re.compile(r"!\[(?P<alt>[^\]]*)\]\(data:image/[^)]*\)")
+
+# Картинка из PPTX: MarkItDown пишет ![alt](ИмяФигуры.jpg), но сам файл
+# из презентации не извлекает — ссылка всегда битая, и просмотрщики
+# рисуют вместо неё ошибку (EntryNotFound / ENOENT).
+_PHANTOM_IMG = re.compile(r"!\[(?P<alt>[^\]]*)\]\((?!data:)[^)]*\)")
+
+# Управляющие символы в тексте офисных форматов: PowerPoint хранит
+# перенос строки внутри абзаца (<a:br/>) как vertical tab \x0b — в
+# Markdown он виден «квадратиком». Меняем разделители строк на пробел,
+# прочий невидимый мусор (C0, DEL, soft hyphen, ZWSP, BOM) убираем.
+_CTRL_TO_SPACE = re.compile("[\x0b\x0c\x85\u2028\u2029]")
+_CTRL_DROP = re.compile("[\x00-\x08\x0e-\x1f\x7f\xad\u200b\ufeff]")
 
 _converter = None
 
@@ -200,14 +218,20 @@ def front_matter(source: str, title: "str | None", tool: str) -> str:
     return "\n".join(lines) + "\n\n"
 
 
-def tidy(text: str, keep_images: bool) -> str:
-    """Прибирает вывод: убирает хвостовые пробелы, схлопывает пустые
-    строки, обрезает края и (по умолчанию) сворачивает base64-картинки."""
+def _img_placeholder(match: "re.Match") -> str:
+    return f"![{match.group('alt') or 'встроенное изображение'}]()"
+
+
+def tidy(text: str, keep_images: bool, phantom_images: bool = False) -> str:
+    """Прибирает вывод: чистит управляющие символы, убирает хвостовые
+    пробелы, схлопывает пустые строки, обрезает края и (по умолчанию)
+    сворачивает base64-картинки и битые картинки-заглушки из PPTX."""
+    text = _CTRL_TO_SPACE.sub(" ", text)
+    text = _CTRL_DROP.sub("", text)
     if not keep_images:
-        text = _DATA_IMG.sub(
-            lambda m: f"![{m.group('alt') or 'встроенное изображение'}]()",
-            text,
-        )
+        text = _DATA_IMG.sub(_img_placeholder, text)
+        if phantom_images:
+            text = _PHANTOM_IMG.sub(_img_placeholder, text)
     out: list[str] = []
     blank = False
     for line in text.replace("\r\n", "\n").replace("\r", "\n").split("\n"):
@@ -240,8 +264,9 @@ def _plan_target(stem: str, dest_dir: Path, flatten: bool,
 
 
 def _emit(target: Path, result, source: str, frontmatter: bool,
-          keep_images: bool, tool: str, note: "str | None") -> None:
-    text = tidy(result.text_content, keep_images)
+          keep_images: bool, tool: str, note: "str | None",
+          phantom_images: bool = False) -> None:
+    text = tidy(result.text_content, keep_images, phantom_images)
     if frontmatter:
         title = getattr(result, "title", None)
         text = front_matter(source, title, tool) + text
@@ -314,7 +339,8 @@ def convert_file(path: Path, opts: dict) -> str:
         return "fail"
     try:
         _emit(target, result, path.name, opts["frontmatter"],
-              opts["keep_images"], opts["tool"], note)
+              opts["keep_images"], opts["tool"], note,
+              phantom_images=(suffix == ".pptx"))
     except OSError as exc:
         print(f"[ошибка] Не удалось записать {target.name}: {exc}")
         return "fail"
