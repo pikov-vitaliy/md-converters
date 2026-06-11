@@ -11,7 +11,8 @@ jobs:
     runs-on: ubuntu-latest
     strategy:
       matrix:
-        python-version: ["3.11", "3.12"]
+        # 3.10 — минимум из requires-python, 3.14 — версия на машине автора.
+        python-version: ["3.10", "3.12", "3.14"]
 
     steps:
       - uses: actions/checkout@v4
@@ -24,19 +25,77 @@ jobs:
       - name: Compile check
         run: python -m py_compile convert_to_md.py
 
+      - name: Lint (ruff)
+        run: |
+          pip install ruff
+          ruff check convert_to_md.py
+
       - name: Install package
         run: pip install .
 
+      # Вывод через -o в /tmp, чтобы не трогать tracked-файл examples/*.md.
       - name: Smoke — HTML to Markdown
         run: |
-          tomd examples/sample-report.html --force
-          test -f examples/sample-report.md
-          grep -q "Отчёт об уязвимостях" examples/sample-report.md
+          tomd examples/sample-report.html -o /tmp/out
+          test -f /tmp/out/sample-report.md
+          grep -q "Отчёт об уязвимостях" /tmp/out/sample-report.md
           echo "OK: HTML сконвертирован"
 
       - name: Smoke — CSV to Markdown via tomd
         run: |
           printf 'a,b\n1,2\n' > /tmp/t.csv
-          tomd /tmp/t.csv --no-frontmatter --force
+          tomd /tmp/t.csv --no-frontmatter
           grep -q "| a | b |" /tmp/t.md
           echo "OK: CSV сконвертирован в таблицу"
+
+      - name: Smoke — повтор без --force пропускает существующий .md
+        run: |
+          tomd /tmp/t.csv --no-frontmatter | grep -q "пропуск"
+          echo "OK: без --force существующий .md не перезаписан"
+
+      # «! cmd» под дефолтным bash -e не роняет шаг — нужен явный exit 1.
+      - name: Smoke — флаг без значения даёт ошибку
+        run: |
+          if tomd /tmp/t.csv -o; then
+            echo "FAIL: -o без значения принят молча"; exit 1
+          fi
+          if tomd /tmp/t.csv --only=; then
+            echo "FAIL: --only= принят молча"; exit 1
+          fi
+          echo "OK: -o и --only без значения не игнорируются молча"
+
+      - name: Unit — плейсхолдер data-URI не задевает соседнюю разметку
+        run: |
+          python - <<'EOF'
+          from convert_to_md import tidy
+          out = tidy("[![l](data:image/png;base64,A)](https://e.com/x)\n",
+                     keep_images=False)
+          assert "[![l]()](https://e.com/x)" in out, out
+          out = tidy("![a](data:image/png;base64,A)"
+                     "![b](data:image/png;base64,B)\n", keep_images=False)
+          assert "![a]()" in out and "![b]()" in out, out
+          out = tidy("![s](data:image/svg+xml;utf8,%3Csvg%3E(x)%3C/svg%3E)\n",
+                     keep_images=False)
+          assert "![s]()" in out, out
+          EOF
+          echo "OK: регексп data-URI не жадничает"
+
+  smoke-windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install package
+        run: pip install .
+
+      - name: Smoke — HTML to Markdown
+        shell: bash
+        run: |
+          tomd examples/sample-report.html -o out
+          test -f out/sample-report.md
+          grep -q "Отчёт об уязвимостях" out/sample-report.md
+          echo "OK: HTML сконвертирован на Windows"

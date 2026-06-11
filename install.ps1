@@ -15,10 +15,19 @@
     аккуратно убирает и прописывает заново (идемпотентно).
 
 .EXAMPLE
-    powershell -ExecutionPolicy Bypass -File .\install.ps1
+    pwsh -ExecutionPolicy Bypass -File .\install.ps1
 #>
 
 $ErrorActionPreference = 'Stop'
+
+# Скрипту нужен PowerShell 7.2+: -Encoding utf8BOM/utf8NoBOM и поведение
+# stderr нативных команд в 5.1 другие, а профиль 5.1 — вообще другой файл.
+if ($PSVersionTable.PSVersion -lt [version]'7.2') {
+    Write-Host "Нужен PowerShell 7.2+ (pwsh). Запустите так:" -ForegroundColor Red
+    Write-Host "  pwsh -ExecutionPolicy Bypass -File .\install.ps1"
+    Write-Host "Если pwsh не установлен: winget install Microsoft.PowerShell"
+    exit 1
+}
 
 # Папка комплекта = там, где лежит этот скрипт (работает после переноса).
 $kit = $PSScriptRoot
@@ -63,11 +72,18 @@ Write-Host "Python найден: $python" -ForegroundColor Green
 # --- 2) Ставим зависимость ------------------------------------------------
 # Не [all]: его youtube-transcript-api не ставится на Python 3.14, и pip
 # молча откатывается на древний markitdown 0.0.2 (без CSV-таблиц и пр.).
-$mdExtras = "markitdown[pdf,docx,pptx,xlsx,xls,outlook]"
+# Потолок <1.0.0 — чтобы мажорный релиз не прилетел молча.
+$mdExtras = "markitdown[pdf,docx,pptx,xlsx,xls,outlook]>=0.1.0,<1.0.0"
 Write-Host "`nУстанавливаю markitdown (это может занять пару минут)..." -ForegroundColor Cyan
 & $python -m pip install --upgrade pip
 & $python -m pip install --upgrade $mdExtras
 & $python -c "import markitdown" 2>$null
+if ($LASTEXITCODE -ne 0) {
+    # Системный Python без прав на site-packages — пробуем профиль.
+    Write-Host "Не вышло в site-packages, пробую установку с --user..." -ForegroundColor Yellow
+    & $python -m pip install --user --upgrade $mdExtras
+    & $python -c "import markitdown" 2>$null
+}
 if ($LASTEXITCODE -ne 0) {
     Write-Host "Не удалось установить/импортировать markitdown." -ForegroundColor Red
     Write-Host "Проверьте интернет и попробуйте вручную:" -ForegroundColor Red

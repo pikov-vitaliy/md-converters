@@ -14,7 +14,8 @@
 
 Под капотом — [MarkItDown](https://github.com/microsoft/markitdown) от Microsoft.
 Результат по умолчанию кладётся **рядом с исходником**: то же имя, расширение
-`.md` (или в отдельную папку — флаг `-o`).
+`.md` (или в отдельную папку — флаг `-o`). При совпадении имён результата
+(например, `report.docx` и `report.pdf` рядом) добавляется суффикс `(2)`.
 
 Команды-синонимы для привычки: `pdf2md` (только PDF) и `html2md` (только HTML)
 — это тот же `tomd` с фильтром формата.
@@ -45,7 +46,7 @@ md-converters\
 2. Выполните установщик:
 
    ```powershell
-   powershell -ExecutionPolicy Bypass -File .\install.ps1
+   pwsh -ExecutionPolicy Bypass -File .\install.ps1
    ```
 
 3. Откройте **новое** окно PowerShell (чтобы команды подхватились).
@@ -147,8 +148,11 @@ generator: tomd (MarkItDown)
 ### 3. Папка вывода `-o`
 
 `-o C:\vault` складывает все `.md` в одну папку вместо «рядом с исходником» —
-удобно конвертировать дерево отчётов прямо в базу знаний / Obsidian. При
-совпадении имён добавляется ` (2)`, ` (3)`.
+удобно конвертировать дерево отчётов прямо в базу знаний / Obsidian.
+
+При совпадении имён результата добавляется суффикс `(2)`, `(3)` — это
+работает и без `-o`: `report.docx` и `report.pdf` в одной папке дадут
+`report.md` и `report (2).md`, а не затрут друг друга.
 
 ### 4. Автоопределение кодировки (HTML)
 
@@ -235,7 +239,7 @@ Markdown прибирается (хвостовые пробелы, лишние
 3. **Запустите установщик** из папки комплекта:
 
    ```powershell
-   powershell -ExecutionPolicy Bypass -File .\install.ps1
+   pwsh -ExecutionPolicy Bypass -File .\install.ps1
    ```
 
    Он сам: найдёт Python → поставит `markitdown` → пропишет команды
@@ -264,7 +268,7 @@ tomd path/to/file.docx
 **`install.ps1 нельзя запустить, политика выполнения...`**
 Запускайте с обходом политики только для этого файла:
 ```powershell
-powershell -ExecutionPolicy Bypass -File .\install.ps1
+pwsh -ExecutionPolicy Bypass -File .\install.ps1
 ```
 
 **`Python не найден`** — установите Python с галочкой «Add to PATH» и запустите
@@ -278,7 +282,7 @@ powershell -ExecutionPolicy Bypass -File .\install.ps1
 
 **Excel/Word не конвертируются** — нужна установка зависимостей с
 формат-экстрами (это делает установщик):
-`python -m pip install "markitdown[pdf,docx,pptx,xlsx,xls,outlook]"`.
+`python -m pip install "markitdown[pdf,docx,pptx,xlsx,xls,outlook]>=0.1.0,<1.0.0"`.
 
 ---
 
@@ -295,8 +299,11 @@ powershell -ExecutionPolicy Bypass -File .\install.ps1
 ## Что нужно для работы (кратко)
 
 - **Python 3.10+** (на Windows — с галочкой «Add to PATH»).
-- Пакет **`markitdown[all]`** — ставится установщиком автоматически.
-- Для команд и пункта Send To на Windows — **PowerShell** (есть по умолчанию).
+- Пакет **`markitdown[pdf,docx,pptx,xlsx,xls,outlook]`** (0.1.x) — ставится
+  установщиком автоматически. Не `[all]`: на Python 3.14 из-за него pip
+  молча откатывается на древний markitdown 0.0.2.
+- Для команд и пункта Send To на Windows — **PowerShell 7.2+** (`pwsh`,
+  ставится: `winget install Microsoft.PowerShell`).
 
 ---
 
@@ -308,9 +315,10 @@ detects the format by extension and converts PDF, HTML, Word (`.docx`),
 Excel (`.xlsx`), PowerPoint (`.pptx`), CSV, JSON, XML, EPUB, Outlook `.msg`,
 Jupyter notebooks, RSS, and web pages by URL.
 
-**Install (Windows):** run `install.ps1` — it installs `markitdown[all]`,
-registers the `tomd` / `pdf2md` / `html2md` commands in your PowerShell
-profile, and adds a right-click *Send to → Convert to Markdown* entry.
+**Install (Windows):** run `install.ps1` (PowerShell 7.2+) — it installs
+`markitdown[pdf,docx,pptx,xlsx,xls,outlook]>=0.1.0,<1.0.0`, registers the
+`tomd` / `pdf2md` / `html2md` commands in your PowerShell profile, and adds
+a right-click *Send to → Convert to Markdown* entry.
 
 **Install (any OS):** `pip install .` exposes `tomd`, `pdf2md`, `html2md`.
 

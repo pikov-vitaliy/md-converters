@@ -25,10 +25,13 @@ RSS, а также веб-страницы по URL.
                        сворачиваются в компактный плейсхолдер).
     --no-frontmatter   не добавлять YAML-блок (source/converted) в начало.
 
-Результат: то же имя, расширение .md (рядом с исходником или в папке -o).
+Результат: то же имя, расширение .md (рядом с исходником или в папке -o);
+при совпадении имён результата добавляется суффикс " (2)", " (3)"...
 Расширение при вводе можно не указывать. Кодировка HTML (UTF-8, cp1251 и
 др.) определяется автоматически.
 """
+
+from __future__ import annotations
 
 import glob
 import os
@@ -48,8 +51,10 @@ warnings.filterwarnings("ignore", message="Couldn't find ffmpeg")
 try:
     from markitdown import MarkItDown
 except ImportError:
-    print("Библиотека markitdown не установлена.")
-    print('Установите командой:  pip install "markitdown[all]"')
+    # Не [all]: на Python 3.14 pip из-за него молча откатывается на 0.0.2.
+    print("Библиотека markitdown не установлена. Установите командой:")
+    print('  pip install "markitdown[pdf,docx,pptx,xlsx,xls,outlook]'
+          '>=0.1.0,<1.0.0"')
     sys.exit(1)
 
 # Windows-консоль бывает в cp1252/cp866 — переключаем вывод на UTF-8.
@@ -71,7 +76,12 @@ EXCLUDE_DIRS = {
 }
 
 # Встроенная картинка в виде data-URI: огромный base64 в Markdown.
-_DATA_IMG = re.compile(r"!\[(?P<alt>[^\]]*)\]\(data:image/[^)]*\)")
+# URI допускает парные скобки (бывают в SVG), но обрывается на первой
+# непарной «)» — иначе жадный матч съедал бы соседнюю разметку
+# (картинку-ссылку [![alt](data:...)](url), смежные картинки и т.п.).
+_DATA_IMG = re.compile(
+    r"!\[(?P<alt>[^\]]*)\]"
+    r"\(data:image/[^()\s]*(?:\([^()\s]*\)[^()\s]*)*\)")
 
 # Картинка из PPTX: MarkItDown пишет ![alt](ИмяФигуры.jpg), но сам файл
 # из презентации не извлекает — ссылка всегда битая, и просмотрщики
@@ -88,7 +98,7 @@ _CTRL_DROP = re.compile("[\x00-\x08\x0e-\x1f\x7f\xad\u200b\ufeff]")
 _converter = None
 
 
-def _md() -> "MarkItDown":
+def _md() -> MarkItDown:
     global _converter
     if _converter is None:
         _converter = MarkItDown()
@@ -102,18 +112,18 @@ def _is_url(token) -> bool:
     return bool(re.match(r"(?i)^https?://", clean))
 
 
-def _suffix_set(spec: str) -> set:
+def _suffix_set(spec: str) -> set[str]:
     """'pdf,docx' -> {'.pdf', '.docx'}."""
     result = set()
     for part in spec.split(","):
-        part = part.strip().lower().lstrip("*")
+        part = part.strip().lower().strip("*")
         if not part:
             continue
         result.add(part if part.startswith(".") else "." + part)
     return result
 
 
-def _tool_name(restrict: "set | None") -> str:
+def _tool_name(restrict: set[str] | None) -> str:
     """Имя для поля generator во front-matter — по набору расширений."""
     if restrict == {".pdf"}:
         return "pdf2md"
@@ -130,7 +140,8 @@ def _excluded(path: Path) -> bool:
     return any(part in EXCLUDE_DIRS for part in path.parts)
 
 
-def scan_dir(root: Path, recursive: bool, suffixes: set) -> list[Path]:
+def scan_dir(root: Path, recursive: bool,
+             suffixes: set[str]) -> list[Path]:
     files: list[Path] = []
     if recursive:
         for dirpath, dirnames, filenames in os.walk(root):
@@ -148,7 +159,8 @@ def scan_dir(root: Path, recursive: bool, suffixes: set) -> list[Path]:
     return sorted(files)
 
 
-def _gather_glob(pattern: str, recursive: bool, suffixes: set) -> list[Path]:
+def _gather_glob(pattern: str, recursive: bool,
+                 suffixes: set[str]) -> list[Path]:
     matches = [Path(p) for p in glob.glob(pattern, recursive=recursive)]
     files = [
         p for p in matches
@@ -165,7 +177,8 @@ def _gather_glob(pattern: str, recursive: bool, suffixes: set) -> list[Path]:
     return sorted(set(files))
 
 
-def collect(token: str, recursive: bool, suffixes: set) -> list[Path]:
+def collect(token: str, recursive: bool,
+            suffixes: set[str]) -> list[Path]:
     """Раскрывает имя/папку/маску в список путей к файлам."""
     token = token.strip().strip('"').strip("'")
     if not token:
@@ -174,6 +187,8 @@ def collect(token: str, recursive: bool, suffixes: set) -> list[Path]:
     path = Path(token)
     if path.is_dir():
         return scan_dir(path, recursive, suffixes)
+    if path.is_file():  # литеральное имя важнее маски: бывают файлы с [
+        return [path]
 
     if any(ch in token for ch in "*?["):
         pattern = token
@@ -202,12 +217,12 @@ def collect(token: str, recursive: bool, suffixes: set) -> list[Path]:
 # --------------------------------------------------------------------------
 
 def _yaml_str(value: str) -> str:
-    value = value.replace("\n", " ").strip()
+    value = re.sub(r"[\r\n\t]+", " ", value).strip()
     value = value.replace("\\", "\\\\").replace('"', '\\"')
     return f'"{value}"'
 
 
-def front_matter(source: str, title: "str | None", tool: str) -> str:
+def front_matter(source: str, title: str | None, tool: str) -> str:
     lines = ["---"]
     if title:
         lines.append(f"title: {_yaml_str(title)}")
@@ -218,7 +233,7 @@ def front_matter(source: str, title: "str | None", tool: str) -> str:
     return "\n".join(lines) + "\n\n"
 
 
-def _img_placeholder(match: "re.Match") -> str:
+def _img_placeholder(match: re.Match) -> str:
     return f"![{match.group('alt') or 'встроенное изображение'}]()"
 
 
@@ -250,21 +265,47 @@ def tidy(text: str, keep_images: bool, phantom_images: bool = False) -> str:
     return "\n".join(out) + "\n"
 
 
-def _plan_target(stem: str, dest_dir: Path, flatten: bool,
-                 planned: set) -> Path:
-    """Путь к .md; при flatten разводит совпадения именами (2), (3)..."""
+def _existing_source(target: Path) -> str | None:
+    """Значение source из front-matter готового .md (или None)."""
+    try:
+        with target.open(encoding="utf-8") as fh:
+            head = [fh.readline() for _ in range(8)]
+    except OSError:
+        return None
+    if not head or head[0].strip() != "---":
+        return None
+    for line in head[1:]:
+        if line.startswith("source: "):
+            value = line[len("source: "):].strip()
+            if value.startswith('"') and value.endswith('"'):
+                return re.sub(r"\\(.)", r"\1", value[1:-1])
+            return value
+    return None
+
+
+def _plan_target(stem: str, dest_dir: Path, planned: set[str],
+                 source: str | None = None) -> Path:
+    """Путь к .md; совпадения имён (report.docx и report.pdf рядом)
+    разводит суффиксами (2), (3)..., чтобы не затирать друг друга.
+    Сверяет и план текущего запуска, и source в уже лежащих на диске
+    .md — чтобы повторный прогон части файлов попал в «свои» цели."""
     target = dest_dir / (stem + ".md")
-    if flatten:
-        n = 2
-        while str(target).lower() in planned:
-            target = dest_dir / f"{stem} ({n}).md"
-            n += 1
+    n = 2
+    while True:
+        if str(target).lower() not in planned:
+            if not target.exists():
+                break
+            src = _existing_source(target)
+            if src is None or source is None or src == source:
+                break  # наш же файл (или сверять нечего) — берём
+        target = dest_dir / f"{stem} ({n}).md"
+        n += 1
     planned.add(str(target).lower())
     return target
 
 
 def _emit(target: Path, result, source: str, frontmatter: bool,
-          keep_images: bool, tool: str, note: "str | None",
+          keep_images: bool, tool: str, note: str | None,
           phantom_images: bool = False) -> None:
     text = tidy(result.text_content, keep_images, phantom_images)
     if frontmatter:
@@ -280,7 +321,7 @@ def _emit(target: Path, result, source: str, frontmatter: bool,
 # Конвертация
 # --------------------------------------------------------------------------
 
-def _convert_reencoded(raw: bytes):
+def _convert_reencoded(raw: bytes) -> tuple:
     """HTML не в UTF-8: определяем кодировку и гоним через UTF-8 temp."""
     try:
         from charset_normalizer import from_bytes
@@ -294,7 +335,9 @@ def _convert_reencoded(raw: bytes):
     fd, tmp = tempfile.mkstemp(suffix=".html")
     try:
         os.write(fd, text.encode("utf-8"))
-        os.close(fd)
+    finally:
+        os.close(fd)  # иначе при ошибке записи утёк бы дескриптор
+    try:
         result = _md().convert(tmp)
     finally:
         try:
@@ -304,7 +347,7 @@ def _convert_reencoded(raw: bytes):
     return result, f"перекодировано из {enc}"
 
 
-def _convert_file_data(path: Path):
+def _convert_file_data(path: Path) -> tuple:
     """(result, note). Для HTML — с автоопределением кодировки."""
     if path.suffix.lower() in (".html", ".htm"):
         raw = path.read_bytes()
@@ -324,8 +367,7 @@ def convert_file(path: Path, opts: dict) -> str:
         print(f"[внимание] {path.name} — формат вне списка, пробую как есть.")
 
     dest = opts["out_dir"] or path.parent
-    target = _plan_target(path.stem, dest, opts["out_dir"] is not None,
-                          opts["planned"])
+    target = _plan_target(path.stem, dest, opts["planned"], path.name)
     if target.exists() and not opts["force"]:
         print(f"[пропуск] {target.name} уже есть "
               "(-f / --force для перезаписи)")
@@ -357,7 +399,7 @@ def _url_stem(url: str) -> str:
 
 def convert_url(url: str, opts: dict) -> str:
     dest = opts["out_dir"] or Path.cwd()
-    target = _plan_target(_url_stem(url), dest, True, opts["planned"])
+    target = _plan_target(_url_stem(url), dest, opts["planned"], url)
     if target.exists() and not opts["force"]:
         print(f"[пропуск] {target.name} уже есть "
               "(-f / --force для перезаписи)")
@@ -410,8 +452,9 @@ def run(items: list, opts: dict) -> list:
 # Разбор аргументов / режимы
 # --------------------------------------------------------------------------
 
-def _parse(tokens: list):
+def _parse(tokens: list) -> dict:
     patterns = []
+    errors: list[str] = []
     force = recursive = keep_images = False
     frontmatter = True
     out_dir = None
@@ -432,18 +475,28 @@ def _parse(tokens: list):
             frontmatter = False
         elif t == "--keep-images":
             keep_images = True
-        elif t in ("-o", "--output"):
-            i += 1
-            if i < len(tokens):
-                out_dir = Path(tokens[i].strip().strip('"').strip("'"))
-        elif t.startswith("--output="):
-            out_dir = Path(t.split("=", 1)[1].strip('"').strip("'"))
-        elif t == "--only":
-            i += 1
-            if i < len(tokens):
-                only = _suffix_set(tokens[i])
-        elif t.startswith("--only="):
-            only = _suffix_set(t.split("=", 1)[1])
+        elif t in ("-o", "--output") or t.startswith("--output="):
+            if t.startswith("--output="):
+                val = t.split("=", 1)[1]
+            else:
+                i += 1
+                val = tokens[i] if i < len(tokens) else ""
+            val = val.strip().strip('"').strip("'")
+            if val:
+                out_dir = Path(val)
+            else:
+                errors.append(
+                    "[ошибка] Флагу -o/--output нужен путь к папке.")
+        elif t == "--only" or t.startswith("--only="):
+            if t.startswith("--only="):
+                spec = t.split("=", 1)[1]
+            else:
+                i += 1
+                spec = tokens[i] if i < len(tokens) else ""
+            only = _suffix_set(spec) or None
+            if only is None:
+                errors.append("[ошибка] Флагу --only нужны расширения, "
+                              "например: --only pdf,docx.")
         elif t in ("-h", "--help"):
             print(__doc__)
             sys.exit(0)
@@ -453,11 +506,11 @@ def _parse(tokens: list):
     return {
         "patterns": patterns, "force": force, "recursive": recursive,
         "frontmatter": frontmatter, "keep_images": keep_images,
-        "out_dir": out_dir, "only": only,
+        "out_dir": out_dir, "only": only, "errors": errors,
     }
 
 
-def _build_opts(parsed: dict, default_only: "list | None") -> dict:
+def _build_opts(parsed: dict, default_only: list | None) -> dict:
     only = parsed["only"]
     if only is None and default_only:
         only = _suffix_set(",".join(default_only))
@@ -488,7 +541,7 @@ def _items_from(patterns: list, recursive: bool, scan: set) -> list:
     return items
 
 
-def interactive(default_only: "list | None") -> None:
+def interactive(default_only: list | None) -> None:
     print("=== Универсальный конвертер -> Markdown ===")
     print("Введите файл, папку, маску или URL и нажмите Enter.")
     print("Форматы: PDF, HTML, Word, Excel, PowerPoint, CSV и др.")
@@ -510,6 +563,10 @@ def interactive(default_only: "list | None") -> None:
         except ValueError:
             tokens = line.split()
         parsed = _parse(tokens)
+        if parsed["errors"]:
+            for msg in parsed["errors"]:
+                print(msg)
+            continue
         opts = _build_opts(parsed, default_only)
         items = _items_from(parsed["patterns"], parsed["recursive"],
                             opts["scan"])
@@ -518,12 +575,19 @@ def interactive(default_only: "list | None") -> None:
 
         force = parsed["force"]
         if not force:
-            file_items = [i for i in items if not _is_url(i)]
-            dest = opts["out_dir"]
-            existing = [
-                i for i in file_items
-                if ((dest or i.parent) / (i.stem + ".md")).exists()
-            ]
+            # Предсказываем цели той же логикой, что и сам прогон
+            # (черновой planned), иначе вопрос не совпадёт с делом.
+            sim: set[str] = set()
+            existing = []
+            for it in items:
+                if _is_url(it):
+                    _plan_target(_url_stem(it),
+                                 opts["out_dir"] or Path.cwd(), sim, it)
+                    continue
+                t = _plan_target(it.stem, opts["out_dir"] or it.parent,
+                                 sim, it.name)
+                if t.exists():
+                    existing.append(it)
             if existing:
                 answer = input(
                     f"{len(existing)} файл(ов) уже имеют .md. "
@@ -534,8 +598,12 @@ def interactive(default_only: "list | None") -> None:
         run(items, opts)
 
 
-def _main(argv: list, default_only: "list | None" = None) -> int:
+def _main(argv: list, default_only: list | None = None) -> int:
     parsed = _parse(argv)
+    if parsed["errors"]:
+        for msg in parsed["errors"]:
+            print(msg)
+        return 2
     if parsed["patterns"]:
         opts = _build_opts(parsed, default_only)
         items = _items_from(parsed["patterns"], parsed["recursive"],

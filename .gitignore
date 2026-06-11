@@ -10,6 +10,10 @@ dist/
 # Генерируется install.ps1 под конкретный компьютер
 sendto-convert.cmd
 
+# AI tool artifacts
+.gigacode/
+.qwen/
+
 # Windows / macOS
 Thumbs.db
 desktop.ini
