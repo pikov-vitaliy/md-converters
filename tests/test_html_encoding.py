@@ -1,3 +1,6 @@
+import sys
+from types import SimpleNamespace
+
 import convert_to_md
 
 
@@ -44,3 +47,25 @@ def test_decode_utf8_bom_html():
     assert text.startswith("<html>")
     assert "Привет" in text
     assert encoding == "utf-8-sig"
+
+
+def test_decode_fallback_reports_replacement(monkeypatch):
+    class EmptyDetector:
+        def best(self):
+            return None
+
+    monkeypatch.setattr(
+        convert_to_md,
+        "_best_cyrillic_decode",
+        lambda raw: None,
+    )
+    monkeypatch.setitem(
+        sys.modules,
+        "charset_normalizer",
+        SimpleNamespace(from_bytes=lambda raw: EmptyDetector()),
+    )
+
+    text, encoding = convert_to_md.decode_html_bytes(b"\xff\xfe\x00")
+
+    assert text
+    assert encoding == "cp1251-replace"

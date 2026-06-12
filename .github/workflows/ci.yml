@@ -18,7 +18,7 @@ jobs:
     strategy:
       matrix:
         # 3.10 — минимум из requires-python, 3.14 — версия на машине автора.
-        python-version: ["3.10", "3.12", "3.14"]
+        python-version: ["3.10", "3.11", "3.12", "3.14"]
 
     steps:
       - uses: actions/checkout@v4
@@ -141,15 +141,32 @@ jobs:
             --no-dev \
             --no-emit-project \
             --locked \
-            --output-file requirements-audit.txt
+            --output-file requirements-runtime-audit.txt
 
-      - name: Generate CycloneDX SBOM
+      - name: Export locked development requirements
+        run: |
+          uv --quiet export \
+            --format requirements.txt \
+            --all-groups \
+            --no-emit-project \
+            --locked \
+            --output-file requirements-dev-audit.txt
+
+      - name: Generate runtime CycloneDX SBOM
         run: |
           uv --quiet export \
             --format cyclonedx1.5 \
             --no-dev \
             --locked \
-            --output-file cyclonedx-sbom.json
+            --output-file cyclonedx-runtime-sbom.json
+
+      - name: Generate development CycloneDX SBOM
+        run: |
+          uv --quiet export \
+            --format cyclonedx1.5 \
+            --all-groups \
+            --locked \
+            --output-file cyclonedx-dev-sbom.json
 
       - name: Sync runtime environment
         run: uv sync --frozen --no-dev --python 3.12
@@ -161,13 +178,24 @@ jobs:
             --fail-on-forbidden
 
       - name: Audit runtime dependencies
-        run: uvx pip-audit --progress-spinner off -r requirements-audit.txt
+        run: |
+          uv run --frozen pip-audit \
+            --progress-spinner off \
+            -r requirements-runtime-audit.txt
+
+      - name: Audit development dependencies
+        run: |
+          uv run --frozen pip-audit \
+            --progress-spinner off \
+            -r requirements-dev-audit.txt
 
       - name: Upload supply-chain artifacts
         uses: actions/upload-artifact@v4
         with:
           name: supply-chain
           path: |
-            cyclonedx-sbom.json
-            requirements-audit.txt
+            cyclonedx-runtime-sbom.json
+            cyclonedx-dev-sbom.json
+            requirements-runtime-audit.txt
+            requirements-dev-audit.txt
             supply-chain-licenses.json

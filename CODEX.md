@@ -409,7 +409,8 @@ ISO/IEC 27001 A.8.8.
 - локальные файлы имеют лимит размера и worker-процесс с timeout;
 - добавлен `uv.lock`;
 - CI синхронизируется через `uv sync --frozen`;
-- CI формирует CycloneDX SBOM, license inventory и запускает `pip-audit`;
+- CI формирует runtime/development CycloneDX SBOM, license inventory и
+  запускает `pip-audit` через locked dev environment;
 - Dependabot настроен для Python и GitHub Actions.
 
 Оставшиеся работы перед финальной отметкой DoD:

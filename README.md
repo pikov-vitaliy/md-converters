@@ -380,17 +380,25 @@ uv run --frozen pytest -q
 
 ```powershell
 uv lock --check
-uv --quiet export --format requirements.txt --no-dev --no-emit-project --locked --output-file requirements-audit.txt
-uv --quiet export --format cyclonedx1.5 --no-dev --locked --output-file cyclonedx-sbom.json
+uv --quiet export --format requirements.txt --no-dev --no-emit-project --locked --output-file requirements-runtime-audit.txt
+uv --quiet export --format requirements.txt --all-groups --no-emit-project --locked --output-file requirements-dev-audit.txt
+uv --quiet export --format cyclonedx1.5 --no-dev --locked --output-file cyclonedx-runtime-sbom.json
+uv --quiet export --format cyclonedx1.5 --all-groups --locked --output-file cyclonedx-dev-sbom.json
 uv sync --frozen --no-dev
 uv run --frozen --no-dev python tools/supply_chain_report.py --output supply-chain-licenses.json --fail-on-forbidden
-uvx pip-audit --progress-spinner off -r requirements-audit.txt
+uv run --frozen pip-audit --progress-spinner off -r requirements-runtime-audit.txt
+uv run --frozen pip-audit --progress-spinner off -r requirements-dev-audit.txt
 ```
 
 Что получается:
 
-- `cyclonedx-sbom.json` — CycloneDX SBOM по runtime-зависимостям;
-- `requirements-audit.txt` — lock-экспорт для `pip-audit`;
+- `cyclonedx-runtime-sbom.json` — CycloneDX SBOM по runtime-зависимостям;
+- `cyclonedx-dev-sbom.json` — CycloneDX SBOM для среды разработки
+  (runtime + dev tools);
+- `requirements-runtime-audit.txt` — lock-экспорт runtime-графа для
+  `pip-audit`;
+- `requirements-dev-audit.txt` — lock-экспорт development-графа для
+  `pip-audit`;
 - `supply-chain-licenses.json` — инвентаризация лицензий из metadata
   установленных runtime-пакетов.
 

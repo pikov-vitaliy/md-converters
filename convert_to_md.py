@@ -144,12 +144,19 @@ _REMAINING_DANGEROUS_NO_DATA = re.compile(
     r"(?i)\b(?:javascript|vbscript|file)\s*:[^\s)\]>]*")
 _DANGEROUS_SCHEMES = {"javascript", "vbscript", "file", "data"}
 _SAFE_DATA_IMAGE = re.compile(
-    r"(?i)^data:image/(png|jpeg|jpg|gif|webp|bmp);base64,[a-z0-9+/=\s]+$")
+    r"^data:image/(?:png|jpeg|jpg|gif|webp|bmp);base64,"
+    r"(?:[A-Za-z0-9+/]{4})*"
+    r"(?:[A-Za-z0-9+/]{4}|[A-Za-z0-9+/]{3}=|[A-Za-z0-9+/]{2}==)$",
+    re.IGNORECASE,
+)
 _MAX_REDIRECTS = 5
 _DEFAULT_URL_TIMEOUT = 20.0
 _DEFAULT_MAX_URL_MB = 50.0
 _DEFAULT_MAX_INPUT_MB = 100.0
 _DEFAULT_CONVERSION_TIMEOUT = 120.0
+_SOURCE_ID_HEX_LEN = 32
+_LEGACY_SOURCE_ID_HEX_LEN = 16
+_SOURCE_ID_RE = re.compile(r"^(?P<kind>[a-z]+):(?P<digest>[0-9a-f]+)$")
 _HTML_META_CHARSET = re.compile(
     rb"(?is)<meta[^>]+charset\s*=\s*['\"]?\s*([a-zA-Z0-9._-]+)")
 _HTML_HTTP_EQUIV_CHARSET = re.compile(
@@ -298,7 +305,8 @@ def _yaml_str(value: str) -> str:
 
 
 def _source_id(kind: str, value: str) -> str:
-    digest = hashlib.sha256(value.encode("utf-8")).hexdigest()[:16]
+    digest = hashlib.sha256(value.encode("utf-8")).hexdigest()
+    digest = digest[:_SOURCE_ID_HEX_LEN]
     return f"{kind}:{digest}"
 
 
@@ -309,6 +317,30 @@ def _source_id_for_path(path: Path) -> str:
 
 def _source_id_for_url(url: str) -> str:
     return _source_id("url", url.strip())
+
+
+def _source_id_matches(existing: str | None, expected: str | None) -> bool:
+    if not existing or not expected:
+        return False
+    if existing == expected:
+        return True
+    existing_match = _SOURCE_ID_RE.fullmatch(existing)
+    expected_match = _SOURCE_ID_RE.fullmatch(expected)
+    if not existing_match or not expected_match:
+        return False
+    if existing_match.group("kind") != expected_match.group("kind"):
+        return False
+    existing_digest = existing_match.group("digest")
+    expected_digest = expected_match.group("digest")
+    shorter, longer = sorted(
+        (existing_digest, expected_digest),
+        key=len,
+    )
+    return (
+        len(shorter) >= _LEGACY_SOURCE_ID_HEX_LEN
+        and len(shorter) < len(longer)
+        and longer.startswith(shorter)
+    )
 
 
 def front_matter(source: str, title: str | None, tool: str,
@@ -486,7 +518,7 @@ def _plan_target(stem: str, dest_dir: Path, planned: set[str],
             if not target.exists():
                 break
             existing_id = _existing_source_id(target)
-            if source_id and existing_id == source_id:
+            if _source_id_matches(existing_id, source_id):
                 break  # наш же файл (или сверять нечего) — берём
             src = _existing_source(target)
             if (not source_id and source and src == source):
@@ -629,7 +661,7 @@ def decode_html_bytes(raw: bytes) -> tuple[str, str]:
     if best is not None:
         return str(best), best.encoding
 
-    return raw.decode("cp1251", errors="replace"), "cp1251"
+    return raw.decode("cp1251", errors="replace"), "cp1251-replace"
 
 
 def _convert_reencoded(raw: bytes) -> tuple:
@@ -839,7 +871,7 @@ def _convert_file_subprocess(path: Path, target: Path, opts: dict,
             command,
             text=True,
             encoding="utf-8",
-            errors="replace",
+            errors="strict",
             capture_output=True,
             timeout=opts["conversion_timeout"],
             check=False,
@@ -849,6 +881,9 @@ def _convert_file_subprocess(path: Path, target: Path, opts: dict,
             f"[ошибка] Таймаут конвертации {path.name} "
             f"({opts['conversion_timeout']} сек.)"
         )
+        return "fail"
+    except UnicodeDecodeError as exc:
+        print(f"[ошибка] Worker {path.name} вывел не UTF-8 данные: {exc}")
         return "fail"
     if completed.stdout:
         print(completed.stdout, end="")

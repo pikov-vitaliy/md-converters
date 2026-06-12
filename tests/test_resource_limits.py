@@ -96,3 +96,35 @@ def test_subprocess_runner_uses_hidden_worker_and_timeout(
     assert status == "ok"
     assert "--_worker-convert" in calls["command"]
     assert calls["kwargs"]["timeout"] == 9
+    assert calls["kwargs"]["errors"] == "strict"
+
+
+def test_subprocess_runner_fails_on_non_utf8_worker_output(
+    tmp_path,
+    monkeypatch,
+):
+    src = tmp_path / "doc.html"
+    target = tmp_path / "doc.md"
+    src.write_text("<h1>ok</h1>", encoding="utf-8")
+
+    def fake_run(command, **kwargs):
+        raise UnicodeDecodeError("utf-8", b"\xff", 0, 1, "invalid start")
+
+    monkeypatch.setattr(convert_to_md.subprocess, "run", fake_run)
+    opts = {
+        "frontmatter": True,
+        "keep_images": False,
+        "unsafe_raw_markdown": False,
+        "tool": "tomd",
+        "conversion_timeout": 9,
+    }
+
+    status = convert_to_md._convert_file_subprocess(
+        src,
+        target,
+        opts,
+        ".html",
+        "path:abc",
+    )
+
+    assert status == "fail"

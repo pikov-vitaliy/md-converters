@@ -89,3 +89,15 @@ def test_emit_can_preserve_raw_markdown_when_explicit(tmp_path):
 
     out = target.read_text(encoding="utf-8").lower()
     assert "javascript:" in out
+
+
+def test_safe_data_image_requires_strict_base64_when_images_kept():
+    text = (
+        "![ok](data:image/png;base64,QUJDRA==)\n"
+        "![bad](data:image/png;base64,QUJD RA==)\n"
+    )
+
+    out = convert_to_md.sanitize_markdown(text, keep_images=True)
+
+    assert "QUJDRA==" in out
+    assert "QUJD RA==" not in out

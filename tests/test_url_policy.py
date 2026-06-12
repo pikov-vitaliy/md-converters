@@ -1,3 +1,4 @@
+import sys
 from types import SimpleNamespace
 
 import pytest
@@ -87,3 +88,75 @@ def test_parse_rejects_invalid_url_policy_numbers():
     ])
 
     assert parsed["errors"]
+
+
+def test_download_url_follows_checked_redirect(monkeypatch):
+    class Response:
+        def __init__(self, status_code, headers, url, body=b""):
+            self.status_code = status_code
+            self.headers = headers
+            self.url = url
+            self._body = body
+            self.closed = False
+
+        def iter_content(self, chunk_size):
+            return [self._body]
+
+        def raise_for_status(self):
+            if self.status_code >= 400:
+                raise AssertionError("unexpected HTTP error")
+
+        def close(self):
+            self.closed = True
+
+    class Session:
+        def __init__(self):
+            self.trust_env = True
+            self.headers = {}
+            self.urls = []
+
+        def get(self, url, **kwargs):
+            self.urls.append((url, kwargs))
+            if len(self.urls) == 1:
+                return Response(
+                    302,
+                    {"location": "https://example.com/final.html"},
+                    url,
+                )
+            return Response(
+                200,
+                {"content-length": "12"},
+                "https://example.com/final.html",
+                b"<h1>ok</h1>",
+            )
+
+        def close(self):
+            self.closed = True
+
+    session = Session()
+    monkeypatch.setitem(
+        sys.modules,
+        "requests",
+        SimpleNamespace(Session=lambda: session),
+    )
+    monkeypatch.setattr(
+        convert_to_md,
+        "_resolved_ips",
+        lambda hostname: {"93.184.216.34"},
+    )
+
+    data, final_url, suffix = convert_to_md._download_url(
+        "https://example.com/start",
+        timeout=3,
+        max_bytes=100,
+        allow_private=False,
+    )
+
+    assert data == b"<h1>ok</h1>"
+    assert final_url == "https://example.com/final.html"
+    assert suffix == ".html"
+    assert session.trust_env is False
+    assert [url for url, _ in session.urls] == [
+        "https://example.com/start",
+        "https://example.com/final.html",
+    ]

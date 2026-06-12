@@ -1,3 +1,4 @@
+import sys
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -137,3 +138,39 @@ def test_file_target_planner_uses_source_id_for_output_dir_preflight(tmp_path):
 
     assert target == out_dir / "report (2).md"
     assert source_id == source_id_b
+
+
+def test_source_id_uses_128_bits_and_matches_legacy_prefix(tmp_path):
+    src = tmp_path / "doc.html"
+    src.write_text("<h1>x</h1>", encoding="utf-8")
+
+    source_id = convert_to_md._source_id_for_path(src)
+    kind, digest = source_id.split(":", 1)
+
+    assert kind == "path"
+    assert len(digest) == 32
+    assert convert_to_md._source_id_matches(
+        f"path:{digest[:16]}",
+        source_id,
+    )
+
+
+def test_cli_pdf_and_html_pass_default_filters(monkeypatch):
+    calls = []
+
+    def fake_main(argv, default_only):
+        calls.append((argv, default_only))
+        return 0
+
+    monkeypatch.setattr(convert_to_md, "_main", fake_main)
+    monkeypatch.setattr(sys, "argv", ["pdf2md", "report"])
+
+    assert convert_to_md.cli_pdf() == 0
+
+    monkeypatch.setattr(sys, "argv", ["html2md", "page"])
+
+    assert convert_to_md.cli_html() == 0
+    assert calls == [
+        (["report"], ["pdf"]),
+        (["page"], ["html", "htm"]),
+    ]
