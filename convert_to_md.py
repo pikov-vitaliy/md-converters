@@ -30,6 +30,11 @@ RSS, а также веб-страницы по URL.
                        разрешить URL на localhost/private/link-local адреса.
     --url-timeout SEC  timeout сетевой загрузки URL (по умолчанию 20).
     --max-url-mb MB    максимум данных URL-ответа (по умолчанию 50).
+    --max-input-mb MB  максимум размера локального файла (по умолчанию 100).
+    --conversion-timeout SEC
+                       timeout конвертации одного локального файла
+                       (по умолчанию 120).
+    --no-sandbox       конвертировать локальные файлы в основном процессе.
     --no-frontmatter   не добавлять YAML-блок (source/converted) в начало.
 
 Результат: то же имя, расширение .md (рядом с исходником или в папке -o);
@@ -45,10 +50,12 @@ import argparse
 import hashlib
 import io
 import ipaddress
+import json
 import os
 import re
 import shlex
 import socket
+import subprocess
 import sys
 import tempfile
 import warnings
@@ -141,6 +148,8 @@ _SAFE_DATA_IMAGE = re.compile(
 _MAX_REDIRECTS = 5
 _DEFAULT_URL_TIMEOUT = 20.0
 _DEFAULT_MAX_URL_MB = 50.0
+_DEFAULT_MAX_INPUT_MB = 100.0
+_DEFAULT_CONVERSION_TIMEOUT = 120.0
 _HTML_META_CHARSET = re.compile(
     rb"(?is)<meta[^>]+charset\s*=\s*['\"]?\s*([a-zA-Z0-9._-]+)")
 _HTML_HTTP_EQUIV_CHARSET = re.compile(
@@ -748,6 +757,96 @@ def _convert_url_data(url: str, opts: dict) -> tuple:
     return result, final_url
 
 
+def _file_too_large(path: Path, max_bytes: int) -> bool:
+    try:
+        return path.stat().st_size > max_bytes
+    except OSError:
+        return False
+
+
+def _convert_file_to_target(path: Path, target: Path, opts: dict,
+                            suffix: str, source_id: str) -> str:
+    print(f"Конвертирую {path.name} ...")
+    try:
+        result, note = _convert_file_data(path)
+    except Exception as exc:
+        print(f"[ошибка] Не удалось конвертировать {path.name}: {exc}")
+        return "fail"
+    try:
+        _emit(target, result, path.name, opts["frontmatter"],
+              opts["keep_images"], opts["tool"], note,
+              phantom_images=(suffix == ".pptx"),
+              source_path=str(path), source_id=source_id,
+              safe_markdown=not opts.get("unsafe_raw_markdown", False))
+    except OSError as exc:
+        print(f"[ошибка] Не удалось записать {target.name}: {exc}")
+        return "fail"
+    return "ok"
+
+
+def _worker_payload(opts: dict) -> str:
+    payload = {
+        "frontmatter": opts["frontmatter"],
+        "keep_images": opts["keep_images"],
+        "unsafe_raw_markdown": opts.get("unsafe_raw_markdown", False),
+        "tool": opts["tool"],
+    }
+    return json.dumps(payload, ensure_ascii=False)
+
+
+def _convert_file_subprocess(path: Path, target: Path, opts: dict,
+                             suffix: str, source_id: str) -> str:
+    command = [
+        sys.executable,
+        str(Path(__file__).resolve()),
+        "--_worker-convert",
+        str(path),
+        str(target),
+        suffix,
+        source_id,
+        _worker_payload(opts),
+    ]
+    try:
+        completed = subprocess.run(
+            command,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            capture_output=True,
+            timeout=opts["conversion_timeout"],
+            check=False,
+        )
+    except subprocess.TimeoutExpired:
+        print(
+            f"[ошибка] Таймаут конвертации {path.name} "
+            f"({opts['conversion_timeout']} сек.)"
+        )
+        return "fail"
+    if completed.stdout:
+        print(completed.stdout, end="")
+    if completed.stderr:
+        print(completed.stderr, end="", file=sys.stderr)
+    return "ok" if completed.returncode == 0 else "fail"
+
+
+def _worker_convert(argv: list[str]) -> int:
+    if len(argv) != 5:
+        print("[ошибка] Некорректный внутренний worker-вызов")
+        return 2
+    path = Path(argv[0])
+    target = Path(argv[1])
+    suffix = argv[2]
+    source_id = argv[3]
+    try:
+        worker_opts = json.loads(argv[4])
+    except json.JSONDecodeError as exc:
+        print(f"[ошибка] Некорректные worker-настройки: {exc}")
+        return 2
+    status = _convert_file_to_target(path, target, worker_opts,
+                                     suffix, source_id)
+    return 0 if status == "ok" else 1
+
+
 def convert_file(path: Path, opts: dict) -> str:
     if not path.exists():
         print(f"[ошибка] Файл не найден: {path.resolve()}")
@@ -767,22 +866,17 @@ def convert_file(path: Path, opts: dict) -> str:
               "(-f / --force для перезаписи)")
         return "skip"
 
-    print(f"Конвертирую {path.name} ...")
-    try:
-        result, note = _convert_file_data(path)
-    except Exception as exc:
-        print(f"[ошибка] Не удалось конвертировать {path.name}: {exc}")
+    max_bytes = opts.get("max_input_bytes", 0)
+    if max_bytes > 0 and _file_too_large(path, max_bytes):
+        print(
+            f"[ошибка] {path.name} больше лимита "
+            f"({opts['max_input_mb']} МБ)"
+        )
         return "fail"
-    try:
-        _emit(target, result, path.name, opts["frontmatter"],
-              opts["keep_images"], opts["tool"], note,
-              phantom_images=(suffix == ".pptx"),
-              source_path=str(path), source_id=source_id,
-              safe_markdown=not opts.get("unsafe_raw_markdown", False))
-    except OSError as exc:
-        print(f"[ошибка] Не удалось записать {target.name}: {exc}")
-        return "fail"
-    return "ok"
+
+    if opts.get("sandbox", False):
+        return _convert_file_subprocess(path, target, opts, suffix, source_id)
+    return _convert_file_to_target(path, target, opts, suffix, source_id)
 
 
 def _url_stem(url: str) -> str:
@@ -871,6 +965,12 @@ def _parse(tokens: list) -> dict:
                         default=str(_DEFAULT_URL_TIMEOUT))
     parser.add_argument("--max-url-mb",
                         default=str(_DEFAULT_MAX_URL_MB))
+    parser.add_argument("--max-input-mb",
+                        default=str(_DEFAULT_MAX_INPUT_MB))
+    parser.add_argument("--conversion-timeout",
+                        default=str(_DEFAULT_CONVERSION_TIMEOUT))
+    parser.add_argument("--no-sandbox", dest="sandbox",
+                        action="store_false", default=True)
     parser.add_argument("-o", "--output", dest="out_dir")
     parser.add_argument("--only")
     parser.add_argument("-h", "--help", action="store_true")
@@ -919,6 +1019,21 @@ def _parse(tokens: list) -> dict:
         errors.append(f"[ошибка] {exc}")
         max_url_mb = _DEFAULT_MAX_URL_MB
 
+    try:
+        max_input_mb = _positive_float(parsed.max_input_mb, "--max-input-mb")
+    except ValueError as exc:
+        errors.append(f"[ошибка] {exc}")
+        max_input_mb = _DEFAULT_MAX_INPUT_MB
+
+    try:
+        conversion_timeout = _positive_float(
+            parsed.conversion_timeout,
+            "--conversion-timeout",
+        )
+    except ValueError as exc:
+        errors.append(f"[ошибка] {exc}")
+        conversion_timeout = _DEFAULT_CONVERSION_TIMEOUT
+
     return {
         "patterns": parsed.patterns, "force": parsed.force,
         "recursive": parsed.recursive, "frontmatter": parsed.frontmatter,
@@ -927,6 +1042,9 @@ def _parse(tokens: list) -> dict:
         "allow_private_url": parsed.allow_private_url,
         "url_timeout": url_timeout,
         "max_url_mb": max_url_mb,
+        "max_input_mb": max_input_mb,
+        "conversion_timeout": conversion_timeout,
+        "sandbox": parsed.sandbox,
         "out_dir": out_dir, "only": only, "errors": errors,
     }
 
@@ -944,6 +1062,10 @@ def _build_opts(parsed: dict, default_only: list | None) -> dict:
         "allow_private_url": parsed["allow_private_url"],
         "url_timeout": parsed["url_timeout"],
         "max_url_bytes": int(parsed["max_url_mb"] * 1024 * 1024),
+        "max_input_mb": parsed["max_input_mb"],
+        "max_input_bytes": int(parsed["max_input_mb"] * 1024 * 1024),
+        "conversion_timeout": parsed["conversion_timeout"],
+        "sandbox": parsed["sandbox"],
         "out_dir": parsed["out_dir"],
         "scan": scan,
         "tool": _tool_name(only),
@@ -1024,6 +1146,8 @@ def interactive(default_only: list | None) -> None:
 
 
 def _main(argv: list, default_only: list | None = None) -> int:
+    if argv and argv[0] == "--_worker-convert":
+        return _worker_convert(argv[1:])
     parsed = _parse(argv)
     if parsed["errors"]:
         for msg in parsed["errors"]:
