@@ -141,6 +141,11 @@ _SAFE_DATA_IMAGE = re.compile(
 _MAX_REDIRECTS = 5
 _DEFAULT_URL_TIMEOUT = 20.0
 _DEFAULT_MAX_URL_MB = 50.0
+_HTML_META_CHARSET = re.compile(
+    rb"(?is)<meta[^>]+charset\s*=\s*['\"]?\s*([a-zA-Z0-9._-]+)")
+_HTML_HTTP_EQUIV_CHARSET = re.compile(
+    rb"(?is)<meta[^>]+content\s*=\s*['\"][^'\"]*charset=([a-zA-Z0-9._-]+)")
+_CYRILLIC_ENCODINGS = ("cp1251", "koi8-r", "cp866", "mac_cyrillic")
 
 _converter = None
 
@@ -510,17 +515,89 @@ def _emit(target: Path, result, source: str, frontmatter: bool,
 # Конвертация
 # --------------------------------------------------------------------------
 
-def _convert_reencoded(raw: bytes) -> tuple:
-    """HTML не в UTF-8: определяем кодировку и гоним через UTF-8 temp."""
+def _decode_with(raw: bytes, encoding: str) -> str | None:
+    try:
+        return raw.decode(encoding)
+    except (LookupError, UnicodeDecodeError):
+        return None
+
+
+def _meta_charset(raw: bytes) -> str | None:
+    head = raw[:4096]
+    for pattern in (_HTML_META_CHARSET, _HTML_HTTP_EQUIV_CHARSET):
+        match = pattern.search(head)
+        if match:
+            try:
+                return match.group(1).decode("ascii").lower()
+            except UnicodeDecodeError:
+                return None
+    return None
+
+
+def _cyrillic_score(text: str) -> int:
+    letters = [ch for ch in text if "\u0400" <= ch <= "\u04ff"]
+    cyrillic = len(letters)
+    lowercase = sum(1 for ch in letters if ch.islower())
+    uppercase = sum(1 for ch in letters if ch.isupper())
+    non_russian = sum(
+        1 for ch in letters
+        if not ("а" <= ch.lower() <= "я" or ch.lower() == "ё")
+    )
+    replacement = text.count("\ufffd")
+    score = cyrillic * 2 + lowercase - uppercase
+    score -= non_russian * 5 + replacement * 10
+    return score
+
+
+def _best_cyrillic_decode(raw: bytes) -> tuple[str, str] | None:
+    candidates: list[tuple[int, str, str]] = []
+    for encoding in _CYRILLIC_ENCODINGS:
+        text = _decode_with(raw, encoding)
+        if text is not None:
+            candidates.append((_cyrillic_score(text), encoding, text))
+    if not candidates:
+        return None
+    score, encoding, text = max(candidates, key=lambda item: item[0])
+    if score > 0:
+        return text, encoding
+    return None
+
+
+def decode_html_bytes(raw: bytes) -> tuple[str, str]:
+    """Декодирует HTML с приоритетом BOM/meta и русскоязычных кодировок."""
+    if raw.startswith(b"\xef\xbb\xbf"):
+        text = _decode_with(raw, "utf-8-sig")
+        if text is not None:
+            return text, "utf-8-sig"
+    if raw.startswith((b"\xff\xfe", b"\xfe\xff")):
+        text = _decode_with(raw, "utf-16")
+        if text is not None:
+            return text, "utf-16"
+
+    declared = _meta_charset(raw)
+    if declared:
+        text = _decode_with(raw, declared)
+        if text is not None:
+            return text, declared
+
+    cyrillic = _best_cyrillic_decode(raw)
+    if cyrillic is not None:
+        return cyrillic
+
     try:
         from charset_normalizer import from_bytes
         best = from_bytes(raw).best()
     except Exception:
         best = None
     if best is not None:
-        text, enc = str(best), best.encoding
-    else:
-        text, enc = raw.decode("cp1251", errors="replace"), "cp1251"
+        return str(best), best.encoding
+
+    return raw.decode("cp1251", errors="replace"), "cp1251"
+
+
+def _convert_reencoded(raw: bytes) -> tuple:
+    """HTML не в UTF-8: определяем кодировку и гоним через UTF-8 temp."""
+    text, enc = decode_html_bytes(raw)
     fd, tmp = tempfile.mkstemp(suffix=".html")
     try:
         os.write(fd, text.encode("utf-8"))
