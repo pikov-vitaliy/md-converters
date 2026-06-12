@@ -28,6 +28,9 @@ classifiers = [
 # Потолок <1.0.0 — чтобы мажорный релиз не прилетел молча.
 dependencies = [
     "charset-normalizer>=3,<4",
+    # magika 0.6.3 resolves to onnxruntime 1.20.1, which has no cp314 wheels.
+    # Keep 0.6.2 until upstream publishes a 3.14-compatible dependency graph.
+    "magika>=0.6.2,<0.6.3",
     "markitdown[pdf,docx,pptx,xlsx,xls,outlook]>=0.1.0,<1.0.0",
 ]
 

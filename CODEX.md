@@ -49,7 +49,7 @@ RSS и веб-страниц в Markdown.
 - прямых `eval`, `exec`, `pickle`, shell-вызовов в Python-части не найдено;
 - защита от перезаписи по умолчанию есть;
 - `markitdown` ограничен диапазоном `<1.0.0`;
-- CI уже проверяет Linux Python 3.10/3.11/3.12/3.13 и Windows
+- CI уже проверяет Linux Python 3.10/3.11/3.12/3.13/3.14 и Windows
   Python 3.12/3.14;
 - `ruff check convert_to_md.py` проходил без ошибок;
 - smoke HTML -> Markdown проходил во временную папку;

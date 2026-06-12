@@ -1,12 +1,12 @@
 # Vibe Security & Architecture Audit Report
 
 ---
-report-version: 1.1.2
+report-version: 1.1.3
 audit-date: 2026-06-13
 target: md-converters v1.1.0
 auditor: Mistral Vibe (CLI coding agent), verified by Codex
 status: READY FOR PRODUCTION
-previous-audit: 1.1.1
+previous-audit: 1.1.2
 evidence-dir: docs/vibe-audit/evidence/2026-06-13
 ---
 
@@ -27,16 +27,21 @@ This report corrects the v1.1.0 audit-report inaccuracies:
 - `tests/test_entrypoints_and_interactive.py` has 66 lines, not 79;
 - final repository cleanliness is verified after this closing commit is pushed.
 
-It also records two GitHub CI findings discovered after the first closing push:
+It also records three GitHub CI findings discovered after the first closing
+push:
 
-- Linux/Python 3.14 is not installable with the current MarkItDown dependency
-  graph because `magika -> onnxruntime 1.20.1` has no manylinux `cp314`
-  wheel; CI now covers Linux 3.10-3.13 and Windows 3.12/3.14.
+- Python 3.14 initially failed because the resolver selected
+  `magika 0.6.3 -> onnxruntime 1.20.1`, and `onnxruntime 1.20.1` has no
+  `cp314` wheels. The project now constrains `magika>=0.6.2,<0.6.3` and the
+  lock resolves Python >=3.11 to `onnxruntime 1.26.0`; Linux 3.14 and Windows
+  3.14 are both covered.
 - The license gate no longer treats long package notice text as an SPDX-style
   license declaration when a package already provides authoritative
   classifier/expression metadata. This removes a false positive where the Linux
   `pandas` wheel is BSD-licensed but its bundled notices mention GPL in
   historical Python license text.
+- The repeat-without-`--force` smoke check now verifies that the output file
+  hash remains unchanged instead of depending on a localized stdout phrase.
 
 ## Current Product State
 
@@ -48,9 +53,9 @@ It also records two GitHub CI findings discovered after the first closing push:
 | Compilation | `py_compile convert_to_md.py tools/supply_chain_report.py` passed |
 | SBOM | CycloneDX runtime + development SBOM generated |
 | SCA | runtime + development `pip-audit`: no known vulnerabilities |
-| Runtime license policy | 46 packages, 0 unknown, 0 forbidden |
-| Dev license evidence | 70 packages, 0 unknown, 0 forbidden |
-| CI matrix | Linux Python 3.10, 3.11, 3.12, 3.13 + Windows 3.12, 3.14 |
+| Runtime license policy | 41 packages, 0 unknown, 0 forbidden |
+| Dev license evidence | 65 packages, 0 unknown, 0 forbidden |
+| CI matrix | Linux Python 3.10, 3.11, 3.12, 3.13, 3.14 + Windows 3.12, 3.14 |
 
 ## Evidence Files
 
@@ -142,14 +147,12 @@ claiming a clean `cp1251` decode.
 
 Status: fixed.
 
-The Linux matrix now covers Python 3.10, 3.11, 3.12, and 3.13. Windows smoke
-coverage covers Python 3.12 and 3.14.
+The Linux matrix now covers Python 3.10, 3.11, 3.12, 3.13, and 3.14. Windows
+smoke coverage covers Python 3.12 and 3.14.
 
-Python 3.14 is intentionally not in the Linux job while MarkItDown's transitive
-`onnxruntime 1.20.1` dependency lacks a manylinux `cp314` wheel. This is an
-upstream packaging constraint, not an application-code failure. Local Windows
-3.14 installation remains covered by the Windows CI job and by the author's
-machine smoke test.
+Python 3.14 coverage is supported by constraining `magika` below 0.6.3 until
+upstream releases a dependency graph that does not resolve to the
+Python-3.14-incompatible `onnxruntime 1.20.1`.
 
 ### 10. Test Coverage Gaps
 

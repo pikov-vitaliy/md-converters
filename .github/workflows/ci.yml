@@ -18,9 +18,8 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        # Linux 3.14 временно исключен: транзитивный onnxruntime 1.20.1
-        # не публикует cp314 wheel для manylinux. Windows 3.14 покрыт ниже.
-        python-version: ["3.10", "3.11", "3.12", "3.13"]
+        # 3.10 — минимум из requires-python, 3.14 — версия на машине автора.
+        python-version: ["3.10", "3.11", "3.12", "3.13", "3.14"]
 
     steps:
       - uses: actions/checkout@v4
@@ -65,7 +64,10 @@ jobs:
 
       - name: Smoke — повтор без --force пропускает существующий .md
         run: |
-          uv run --frozen tomd /tmp/t.csv --no-frontmatter | grep -q "пропуск"
+          before="$(sha256sum /tmp/t.md | cut -d ' ' -f 1)"
+          uv run --frozen tomd /tmp/t.csv --no-frontmatter
+          after="$(sha256sum /tmp/t.md | cut -d ' ' -f 1)"
+          test "$before" = "$after"
           echo "OK: без --force существующий .md не перезаписан"
 
       # «! cmd» под дефолтным bash -e не роняет шаг — нужен явный exit 1.
