@@ -33,6 +33,11 @@ jobs:
       - name: Install package
         run: pip install .
 
+      - name: Unit tests
+        run: |
+          pip install pytest
+          pytest -q
+
       # Вывод через -o в /tmp, чтобы не трогать tracked-файл examples/*.md.
       - name: Smoke — HTML to Markdown
         run: |
@@ -91,6 +96,11 @@ jobs:
 
       - name: Install package
         run: pip install .
+
+      - name: Unit tests
+        run: |
+          pip install pytest
+          pytest -q
 
       - name: Smoke — HTML to Markdown
         shell: bash

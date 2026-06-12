@@ -1,6 +1,9 @@
 ---
 title: "Пример отчёта об уязвимостях — demo-project"
 source: "sample-report.html"
+source_name: "sample-report.html"
+source_path: "examples\\sample-report.html"
+source_id: "path:..."
 converted: 2026-06-10
 generator: tomd (MarkItDown)
 ---

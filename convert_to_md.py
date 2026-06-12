@@ -34,6 +34,8 @@ RSS, а также веб-страницы по URL.
 from __future__ import annotations
 
 import glob
+import argparse
+import hashlib
 import os
 import re
 import shlex
@@ -51,6 +53,10 @@ warnings.filterwarnings("ignore", message="Couldn't find ffmpeg")
 try:
     from markitdown import MarkItDown
 except ImportError:
+    MarkItDown = None
+
+
+def _missing_markitdown() -> None:
     # Не [all]: на Python 3.14 pip из-за него молча откатывается на 0.0.2.
     print("Библиотека markitdown не установлена. Установите командой:")
     print('  pip install "markitdown[pdf,docx,pptx,xlsx,xls,outlook]'
@@ -68,6 +74,8 @@ SUPPORTED_SUFFIXES = {
     ".pdf", ".html", ".htm", ".docx", ".xlsx", ".pptx",
     ".csv", ".json", ".xml", ".epub", ".msg", ".ipynb", ".rss",
 }
+
+_EXTENSION = re.compile(r"^[a-z0-9]+$")
 
 # Папки, которые при рекурсии не имеют смысла — не заходим туда.
 EXCLUDE_DIRS = {
@@ -100,6 +108,8 @@ _converter = None
 
 def _md() -> MarkItDown:
     global _converter
+    if MarkItDown is None:
+        _missing_markitdown()
     if _converter is None:
         _converter = MarkItDown()
     return _converter
@@ -115,11 +125,23 @@ def _is_url(token) -> bool:
 def _suffix_set(spec: str) -> set[str]:
     """'pdf,docx' -> {'.pdf', '.docx'}."""
     result = set()
-    for part in spec.split(","):
-        part = part.strip().lower().strip("*")
+    for raw in spec.split(","):
+        part = raw.strip().lower()
         if not part:
             continue
-        result.add(part if part.startswith(".") else "." + part)
+        if part.startswith("-"):
+            raise ValueError(f"расширение не может начинаться с '-': {raw}")
+        if any(ch in part for ch in ("/", "\\", ":")):
+            raise ValueError(f"расширение содержит путь: {raw}")
+        if any(ord(ch) < 32 for ch in part):
+            raise ValueError(f"расширение содержит управляющий символ: {raw}")
+        if part.startswith("*."):
+            part = part[1:]
+        if part.startswith("."):
+            part = part[1:]
+        if not _EXTENSION.fullmatch(part):
+            raise ValueError(f"недопустимое расширение: {raw}")
+        result.add("." + part)
     return result
 
 
@@ -222,11 +244,32 @@ def _yaml_str(value: str) -> str:
     return f'"{value}"'
 
 
-def front_matter(source: str, title: str | None, tool: str) -> str:
+def _source_id(kind: str, value: str) -> str:
+    digest = hashlib.sha256(value.encode("utf-8")).hexdigest()[:16]
+    return f"{kind}:{digest}"
+
+
+def _source_id_for_path(path: Path) -> str:
+    normalized = os.path.normcase(str(path.resolve()))
+    return _source_id("path", normalized)
+
+
+def _source_id_for_url(url: str) -> str:
+    return _source_id("url", url.strip())
+
+
+def front_matter(source: str, title: str | None, tool: str,
+                 source_path: str | None = None,
+                 source_id: str | None = None) -> str:
     lines = ["---"]
     if title:
         lines.append(f"title: {_yaml_str(title)}")
     lines.append(f"source: {_yaml_str(source)}")
+    lines.append(f"source_name: {_yaml_str(source)}")
+    if source_path:
+        lines.append(f"source_path: {_yaml_str(source_path)}")
+    if source_id:
+        lines.append(f"source_id: {_yaml_str(source_id)}")
     lines.append(f"converted: {date.today().isoformat()}")
     lines.append(f"generator: {tool} (MarkItDown)")
     lines.append("---")
@@ -265,26 +308,45 @@ def tidy(text: str, keep_images: bool, phantom_images: bool = False) -> str:
     return "\n".join(out) + "\n"
 
 
-def _existing_source(target: Path) -> str | None:
-    """Значение source из front-matter готового .md (или None)."""
+def _yaml_unquote(value: str) -> str:
+    if value.startswith('"') and value.endswith('"'):
+        return re.sub(r"\\(.)", r"\1", value[1:-1])
+    return value
+
+
+def _existing_frontmatter(target: Path) -> dict[str, str]:
+    """Простое чтение YAML front-matter, который пишет эта утилита."""
     try:
         with target.open(encoding="utf-8") as fh:
-            head = [fh.readline() for _ in range(8)]
+            first = fh.readline()
+            if first.strip() != "---":
+                return {}
+            values = {}
+            for line in fh:
+                if line.strip() == "---":
+                    break
+                key, sep, value = line.partition(":")
+                if sep:
+                    values[key.strip()] = _yaml_unquote(value.strip())
+            return values
     except OSError:
-        return None
-    if not head or head[0].strip() != "---":
-        return None
-    for line in head[1:]:
-        if line.startswith("source: "):
-            value = line[len("source: "):].strip()
-            if value.startswith('"') and value.endswith('"'):
-                return re.sub(r"\\(.)", r"\1", value[1:-1])
-            return value
-    return None
+        return {}
+
+
+def _existing_source(target: Path) -> str | None:
+    """Значение source из front-matter готового .md (или None)."""
+    return _existing_frontmatter(target).get("source")
+
+
+def _existing_source_id(target: Path) -> str | None:
+    """Значение source_id из front-matter готового .md (или None)."""
+    return _existing_frontmatter(target).get("source_id")
 
 
 def _plan_target(stem: str, dest_dir: Path, planned: set[str],
-                 source: str | None = None) -> Path:
+                 source: str | None = None,
+                 source_id: str | None = None,
+                 allow_legacy_source_match: bool = False) -> Path:
     """Путь к .md; совпадения имён (report.docx и report.pdf рядом)
     разводит суффиксами (2), (3)..., чтобы не затирать друг друга.
     Сверяет и план текущего запуска, и source в уже лежащих на диске
@@ -295,9 +357,14 @@ def _plan_target(stem: str, dest_dir: Path, planned: set[str],
         if str(target).lower() not in planned:
             if not target.exists():
                 break
-            src = _existing_source(target)
-            if src is None or source is None or src == source:
+            existing_id = _existing_source_id(target)
+            if source_id and existing_id == source_id:
                 break  # наш же файл (или сверять нечего) — берём
+            src = _existing_source(target)
+            if (not source_id and source and src == source):
+                break
+            if allow_legacy_source_match and source and src == source:
+                break
         target = dest_dir / f"{stem} ({n}).md"
         n += 1
     planned.add(str(target).lower())
@@ -306,11 +373,13 @@ def _plan_target(stem: str, dest_dir: Path, planned: set[str],
 
 def _emit(target: Path, result, source: str, frontmatter: bool,
           keep_images: bool, tool: str, note: str | None,
-          phantom_images: bool = False) -> None:
+          phantom_images: bool = False,
+          source_path: str | None = None,
+          source_id: str | None = None) -> None:
     text = tidy(result.text_content, keep_images, phantom_images)
     if frontmatter:
         title = getattr(result, "title", None)
-        text = front_matter(source, title, tool) + text
+        text = front_matter(source, title, tool, source_path, source_id) + text
     target.parent.mkdir(parents=True, exist_ok=True)
     target.write_text(text, encoding="utf-8")
     extra = f" ({note})" if note else ""
@@ -367,7 +436,11 @@ def convert_file(path: Path, opts: dict) -> str:
         print(f"[внимание] {path.name} — формат вне списка, пробую как есть.")
 
     dest = opts["out_dir"] or path.parent
-    target = _plan_target(path.stem, dest, opts["planned"], path.name)
+    source_id = _source_id_for_path(path)
+    target = _plan_target(
+        path.stem, dest, opts["planned"], path.name, source_id,
+        allow_legacy_source_match=opts["out_dir"] is None,
+    )
     if target.exists() and not opts["force"]:
         print(f"[пропуск] {target.name} уже есть "
               "(-f / --force для перезаписи)")
@@ -382,7 +455,8 @@ def convert_file(path: Path, opts: dict) -> str:
     try:
         _emit(target, result, path.name, opts["frontmatter"],
               opts["keep_images"], opts["tool"], note,
-              phantom_images=(suffix == ".pptx"))
+              phantom_images=(suffix == ".pptx"),
+              source_path=str(path), source_id=source_id)
     except OSError as exc:
         print(f"[ошибка] Не удалось записать {target.name}: {exc}")
         return "fail"
@@ -399,7 +473,9 @@ def _url_stem(url: str) -> str:
 
 def convert_url(url: str, opts: dict) -> str:
     dest = opts["out_dir"] or Path.cwd()
-    target = _plan_target(_url_stem(url), dest, opts["planned"], url)
+    source_id = _source_id_for_url(url)
+    target = _plan_target(_url_stem(url), dest, opts["planned"], url,
+                          source_id, allow_legacy_source_match=True)
     if target.exists() and not opts["force"]:
         print(f"[пропуск] {target.name} уже есть "
               "(-f / --force для перезаписи)")
@@ -412,7 +488,8 @@ def convert_url(url: str, opts: dict) -> str:
         return "fail"
     try:
         _emit(target, result, url, opts["frontmatter"],
-              opts["keep_images"], opts["tool"], None)
+              opts["keep_images"], opts["tool"], None,
+              source_path=url, source_id=source_id)
     except OSError as exc:
         print(f"[ошибка] Не удалось записать {target.name}: {exc}")
         return "fail"
@@ -452,60 +529,59 @@ def run(items: list, opts: dict) -> list:
 # Разбор аргументов / режимы
 # --------------------------------------------------------------------------
 
+class _ArgumentParser(argparse.ArgumentParser):
+    def error(self, message: str) -> None:
+        raise ValueError(message)
+
+
 def _parse(tokens: list) -> dict:
-    patterns = []
     errors: list[str] = []
-    force = recursive = keep_images = False
-    frontmatter = True
+    parser = _ArgumentParser(add_help=False, allow_abbrev=False)
+    parser.add_argument("-f", "--force", action="store_true")
+    parser.add_argument("-r", "--recursive", action="store_true")
+    parser.add_argument("--no-frontmatter", dest="frontmatter",
+                        action="store_false", default=True)
+    parser.add_argument("--keep-images", action="store_true")
+    parser.add_argument("-o", "--output", dest="out_dir")
+    parser.add_argument("--only")
+    parser.add_argument("-h", "--help", action="store_true")
+    parser.add_argument("patterns", nargs="*")
+    try:
+        parsed = parser.parse_args(tokens)
+    except ValueError as exc:
+        errors.append(f"[ошибка] Некорректные аргументы: {exc}")
+        parsed = parser.parse_args([])
+
+    if parsed.help:
+        print(__doc__)
+        sys.exit(0)
+
     out_dir = None
+    if parsed.out_dir is not None:
+        val = parsed.out_dir.strip().strip('"').strip("'")
+        if val and not val.startswith("-"):
+            out_dir = Path(val)
+        else:
+            errors.append("[ошибка] Флагу -o/--output нужен путь к папке.")
+
     only = None
-    rest = False
-    i = 0
-    while i < len(tokens):
-        t = tokens[i]
-        if rest:
-            patterns.append(t)
-        elif t == "--":
-            rest = True
-        elif t in ("-f", "--force"):
-            force = True
-        elif t in ("-r", "--recursive"):
-            recursive = True
-        elif t == "--no-frontmatter":
-            frontmatter = False
-        elif t == "--keep-images":
-            keep_images = True
-        elif t in ("-o", "--output") or t.startswith("--output="):
-            if t.startswith("--output="):
-                val = t.split("=", 1)[1]
-            else:
-                i += 1
-                val = tokens[i] if i < len(tokens) else ""
-            val = val.strip().strip('"').strip("'")
-            if val:
-                out_dir = Path(val)
-            else:
-                errors.append(
-                    "[ошибка] Флагу -o/--output нужен путь к папке.")
-        elif t == "--only" or t.startswith("--only="):
-            if t.startswith("--only="):
-                spec = t.split("=", 1)[1]
-            else:
-                i += 1
-                spec = tokens[i] if i < len(tokens) else ""
-            only = _suffix_set(spec) or None
-            if only is None:
+    if parsed.only is not None:
+        spec = parsed.only.strip().strip('"').strip("'")
+        if not spec or spec.startswith("-"):
+            errors.append("[ошибка] Флагу --only нужны расширения, "
+                          "например: --only pdf,docx.")
+        else:
+            try:
+                only = _suffix_set(spec) or None
+            except ValueError as exc:
+                errors.append(f"[ошибка] Некорректный --only: {exc}")
+            if only is None and not errors:
                 errors.append("[ошибка] Флагу --only нужны расширения, "
                               "например: --only pdf,docx.")
-        elif t in ("-h", "--help"):
-            print(__doc__)
-            sys.exit(0)
-        else:
-            patterns.append(t)
-        i += 1
     return {
-        "patterns": patterns, "force": force, "recursive": recursive,
-        "frontmatter": frontmatter, "keep_images": keep_images,
+        "patterns": parsed.patterns, "force": parsed.force,
+        "recursive": parsed.recursive, "frontmatter": parsed.frontmatter,
+        "keep_images": parsed.keep_images,
         "out_dir": out_dir, "only": only, "errors": errors,
     }
 
