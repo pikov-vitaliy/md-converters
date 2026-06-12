@@ -98,3 +98,42 @@ def test_output_dir_rerun_updates_matching_source_id(tmp_path, monkeypatch):
     assert "# a\n" in report_a
     assert "# a-updated" not in report_a
     assert "# b-updated\n" in report_b
+
+
+def test_file_target_planner_uses_source_id_for_output_dir_preflight(tmp_path):
+    out_dir = tmp_path / "out"
+    src_a = tmp_path / "a" / "report.html"
+    src_b = tmp_path / "b" / "report.html"
+    out_dir.mkdir()
+    src_a.parent.mkdir()
+    src_b.parent.mkdir()
+    src_a.write_text("<h1>A</h1>", encoding="utf-8")
+    src_b.write_text("<h1>B</h1>", encoding="utf-8")
+    source_id_a = convert_to_md._source_id_for_path(src_a)
+    source_id_b = convert_to_md._source_id_for_path(src_b)
+    (out_dir / "report.md").write_text(
+        convert_to_md.front_matter(
+            src_a.name,
+            title=None,
+            tool="tomd",
+            source_path=str(src_a),
+            source_id=source_id_a,
+        ),
+        encoding="utf-8",
+    )
+    (out_dir / "report (2).md").write_text(
+        convert_to_md.front_matter(
+            src_b.name,
+            title=None,
+            tool="tomd",
+            source_path=str(src_b),
+            source_id=source_id_b,
+        ),
+        encoding="utf-8",
+    )
+    opts = {"out_dir": out_dir}
+
+    target, source_id = convert_to_md._plan_file_target(src_b, opts, set())
+
+    assert target == out_dir / "report (2).md"
+    assert source_id == source_id_b

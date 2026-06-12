@@ -499,6 +499,34 @@ def _plan_target(stem: str, dest_dir: Path, planned: set[str],
     return target
 
 
+def _plan_file_target(path: Path, opts: dict,
+                      planned: set[str]) -> tuple[Path, str]:
+    source_id = _source_id_for_path(path)
+    target = _plan_target(
+        path.stem,
+        opts["out_dir"] or path.parent,
+        planned,
+        path.name,
+        source_id,
+        allow_legacy_source_match=opts["out_dir"] is None,
+    )
+    return target, source_id
+
+
+def _plan_url_target(url: str, opts: dict,
+                     planned: set[str]) -> tuple[Path, str]:
+    source_id = _source_id_for_url(url)
+    target = _plan_target(
+        _url_stem(url),
+        opts["out_dir"] or Path.cwd(),
+        planned,
+        url,
+        source_id,
+        allow_legacy_source_match=True,
+    )
+    return target, source_id
+
+
 def _emit(target: Path, result, source: str, frontmatter: bool,
           keep_images: bool, tool: str, note: str | None,
           phantom_images: bool = False,
@@ -855,12 +883,7 @@ def convert_file(path: Path, opts: dict) -> str:
     if suffix not in opts["scan"]:
         print(f"[внимание] {path.name} — формат вне списка, пробую как есть.")
 
-    dest = opts["out_dir"] or path.parent
-    source_id = _source_id_for_path(path)
-    target = _plan_target(
-        path.stem, dest, opts["planned"], path.name, source_id,
-        allow_legacy_source_match=opts["out_dir"] is None,
-    )
+    target, source_id = _plan_file_target(path, opts, opts["planned"])
     if target.exists() and not opts["force"]:
         print(f"[пропуск] {target.name} уже есть "
               "(-f / --force для перезаписи)")
@@ -888,10 +911,7 @@ def _url_stem(url: str) -> str:
 
 
 def convert_url(url: str, opts: dict) -> str:
-    dest = opts["out_dir"] or Path.cwd()
-    source_id = _source_id_for_url(url)
-    target = _plan_target(_url_stem(url), dest, opts["planned"], url,
-                          source_id, allow_legacy_source_match=True)
+    target, source_id = _plan_url_target(url, opts, opts["planned"])
     if target.exists() and not opts["force"]:
         print(f"[пропуск] {target.name} уже есть "
               "(-f / --force для перезаписи)")
@@ -1128,11 +1148,9 @@ def interactive(default_only: list | None) -> None:
             existing = []
             for it in items:
                 if _is_url(it):
-                    _plan_target(_url_stem(it),
-                                 opts["out_dir"] or Path.cwd(), sim, it)
+                    _plan_url_target(it, opts, sim)
                     continue
-                t = _plan_target(it.stem, opts["out_dir"] or it.parent,
-                                 sim, it.name)
+                t, _ = _plan_file_target(it, opts, sim)
                 if t.exists():
                     existing.append(it)
             if existing:
