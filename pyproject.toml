@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "md-converters"
-version = "1.0.2"
+version = "1.1.0"
 description = "Конвертация документов (PDF, HTML, Word, Excel, PowerPoint и др.) в Markdown на базе MarkItDown"
 readme = "README.md"
 requires-python = ">=3.10"

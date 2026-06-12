@@ -3,6 +3,8 @@
 [![CI](https://github.com/pikov-vitaliy/md-converters/actions/workflows/ci.yml/badge.svg)](https://github.com/pikov-vitaliy/md-converters/actions/workflows/ci.yml)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 
+Версия: **1.1.0**.
+
 Универсальный инструмент перевода документов в Markdown. Одна команда `tomd`
 понимает формат по расширению и конвертирует **что угодно**:
 
@@ -83,6 +85,7 @@ md-converters\
 | `tomd отчёт.pdf --max-input-mb 200 --conversion-timeout 300` | лимиты файла |
 | `tomd отчёт.pdf --no-sandbox` | без отдельного worker-процесса |
 | `tomd отчёт.html --no-frontmatter` | без YAML-шапки |
+| `tomd --version` | показать версию утилиты |
 | `tomd --help` | полная справка |
 
 ```text
@@ -117,7 +120,7 @@ source_name: "sample-report.html"
 source_path: "examples\\sample-report.html"
 source_id: "path:..."
 converted: 2026-06-10
-generator: tomd (MarkItDown)
+generator: tomd 1.1.0 (MarkItDown)
 ---
 
 # Отчёт об уязвимостях — demo-project
@@ -200,7 +203,7 @@ source_name: "имя-исходного-файла.docx"
 source_path: "путь\\к\\имя-исходного-файла.docx"
 source_id: "path:короткий-хэш-источника"
 converted: 2026-06-10
-generator: tomd (MarkItDown)
+generator: tomd 1.1.0 (MarkItDown)
 ---
 ```
 
@@ -339,7 +342,8 @@ Markdown прибирается (хвостовые пробелы, лишние
    pwsh -ExecutionPolicy Bypass -File .\install.ps1
    ```
 
-   Он сам: найдёт Python → поставит `markitdown` → пропишет команды
+   Он сам: найдёт Python → поставит актуальный комплект `md-converters`
+   из текущей папки вместе с зависимостями → пропишет команды
    `tomd` / `pdf2md` / `html2md` → добавит пункт «Отправить → Конвертировать в
    Markdown» → проверит на примере.
 
@@ -371,6 +375,7 @@ tomd path/to/file.docx
 ```powershell
 python -m pip install "uv>=0.11,<0.12"
 uv sync --frozen
+uv run --frozen tomd --version
 uv run --frozen python -m py_compile convert_to_md.py tools/supply_chain_report.py
 uv run --frozen ruff check convert_to_md.py tests tools
 uv run --frozen pytest -q

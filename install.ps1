@@ -5,7 +5,8 @@
 .DESCRIPTION
     Делает четыре вещи:
       1) находит Python (или подсказывает, где скачать);
-      2) ставит зависимость markitdown (PDF, Word, Excel и др.);
+      2) ставит текущий комплект md-converters и его зависимости
+         (MarkItDown для PDF, Word, Excel и др.);
       3) прописывает команды tomd / pdf2md / html2md в профиль PowerShell,
          указывая на ту папку, ИЗ КОТОРОЙ запущен этот скрипт;
       4) добавляет пункт «Конвертировать в Markdown» в меню правого клика
@@ -69,28 +70,26 @@ if (-not $python) {
 Write-Host "Python найден: $python" -ForegroundColor Green
 & $python --version
 
-# --- 2) Ставим зависимость ------------------------------------------------
-# Не [all]: его youtube-transcript-api не ставится на Python 3.14, и pip
-# молча откатывается на древний markitdown 0.0.2 (без CSV-таблиц и пр.).
-# Потолок <1.0.0 — чтобы мажорный релиз не прилетел молча.
-$mdExtras = "markitdown[pdf,docx,pptx,xlsx,xls,outlook]>=0.1.0,<1.0.0"
-Write-Host "`nУстанавливаю markitdown (это может занять пару минут)..." -ForegroundColor Cyan
+# --- 2) Ставим комплект и зависимости -------------------------------------
+# Диапазон MarkItDown закреплен в pyproject.toml; ставим именно локальный
+# пакет, чтобы на машине была та же версия md-converters, что и в репозитории.
+Write-Host "`nУстанавливаю md-converters из текущей папки..." -ForegroundColor Cyan
 & $python -m pip install --upgrade pip
-& $python -m pip install --upgrade $mdExtras
-& $python -c "import markitdown" 2>$null
+& $python -m pip install --upgrade $kit
+& $python -c "import convert_to_md, markitdown" 2>$null
 if ($LASTEXITCODE -ne 0) {
     # Системный Python без прав на site-packages — пробуем профиль.
     Write-Host "Не вышло в site-packages, пробую установку с --user..." -ForegroundColor Yellow
-    & $python -m pip install --user --upgrade $mdExtras
-    & $python -c "import markitdown" 2>$null
+    & $python -m pip install --user --upgrade $kit
+    & $python -c "import convert_to_md, markitdown" 2>$null
 }
 if ($LASTEXITCODE -ne 0) {
-    Write-Host "Не удалось установить/импортировать markitdown." -ForegroundColor Red
+    Write-Host "Не удалось установить/импортировать md-converters." -ForegroundColor Red
     Write-Host "Проверьте интернет и попробуйте вручную:" -ForegroundColor Red
-    Write-Host "  `"$python`" -m pip install `"$mdExtras`""
+    Write-Host "  `"$python`" -m pip install --upgrade `"$kit`""
     exit 1
 }
-Write-Host "Зависимость установлена." -ForegroundColor Green
+Write-Host "Комплект установлен." -ForegroundColor Green
 
 # --- 3) Прописываем команды в профиль PowerShell --------------------------
 $profilePath = $PROFILE

@@ -164,6 +164,7 @@ _HTML_HTTP_EQUIV_CHARSET = re.compile(
 _CYRILLIC_ENCODINGS = ("cp1251", "koi8-r", "cp866", "mac_cyrillic")
 
 _converter = None
+__version__ = "1.1.0"
 
 
 def _md() -> MarkItDown:
@@ -356,7 +357,7 @@ def front_matter(source: str, title: str | None, tool: str,
     if source_id:
         lines.append(f"source_id: {_yaml_str(source_id)}")
     lines.append(f"converted: {date.today().isoformat()}")
-    lines.append(f"generator: {tool} (MarkItDown)")
+    lines.append(f"generator: {tool} {__version__} (MarkItDown)")
     lines.append("---")
     return "\n".join(lines) + "\n\n"
 
@@ -1029,6 +1030,7 @@ def _parse(tokens: list) -> dict:
     parser.add_argument("-o", "--output", dest="out_dir")
     parser.add_argument("--only")
     parser.add_argument("-h", "--help", action="store_true")
+    parser.add_argument("--version", action="store_true")
     parser.add_argument("patterns", nargs="*")
     try:
         parsed = parser.parse_args(tokens)
@@ -1038,6 +1040,9 @@ def _parse(tokens: list) -> dict:
 
     if parsed.help:
         print(__doc__)
+        sys.exit(0)
+    if parsed.version:
+        print(f"md-converters {__version__}")
         sys.exit(0)
 
     out_dir = None

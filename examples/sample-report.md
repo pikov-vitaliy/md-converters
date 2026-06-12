@@ -2,10 +2,10 @@
 title: "Пример отчёта об уязвимостях — demo-project"
 source: "sample-report.html"
 source_name: "sample-report.html"
-source_path: "examples\\sample-report.html"
-source_id: "path:..."
-converted: 2026-06-10
-generator: tomd (MarkItDown)
+source_path: "V:\\md-converters\\examples\\sample-report.html"
+source_id: "path:25f57f6cd29e0a1dd29644abe58ec89c"
+converted: 2026-06-13
+generator: tomd 1.1.0 (MarkItDown)
 ---
 
 # Отчёт об уязвимостях — demo-project

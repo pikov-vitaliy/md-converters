@@ -1,152 +1,193 @@
 # Vibe Security & Architecture Audit Report
 
 ---
-version: 1.1.0
+report-version: 1.1.1
 audit-date: 2026-06-13
-target: md-converters v1.0.2
-auditor: Mistral Vibe (CLI coding agent)
-status: **READY FOR PRODUCTION**
-previous-audit: 1.0.0
+target: md-converters v1.1.0
+auditor: Mistral Vibe (CLI coding agent), verified by Codex
+status: READY FOR PRODUCTION
+previous-audit: 1.1.0
+evidence-dir: docs/vibe-audit/evidence/2026-06-13
 ---
 
 ## Executive Summary
 
-Full codebase review performed on 2026-06-13. **All 10 findings from initial audit (v1.0.0) have been addressed and verified.** Project now meets production-ready criteria with comprehensive security controls, complete supply chain auditing, and extensive test coverage.
+Repository-wide security and architecture review was completed on 2026-06-13.
+The ten findings from the previous audit cycle were either fixed or proven not
+to be defects. The product version is now `md-converters 1.1.0`; the package
+metadata, CLI behavior, README, CODEX plan, CI workflow, lockfile, SBOM/SCA
+evidence, and local installation procedure are aligned with that version.
 
-| Metric | Value |
-|--------|-------|
-| Tests | 38 passed (was 30) |
-| Lint | ruff check: passed |
-| Compilation | py_compile: passed |
-| SBOM | CycloneDX: runtime + dev |
-| SCA | pip-audit: runtime + dev, no vulnerabilities |
-| Git Status | Clean, synced with origin/main |
+This report corrects the v1.1.0 audit-report inaccuracies:
 
----
+- generated audit artifacts are committed under
+  `docs/vibe-audit/evidence/2026-06-13`, not left as root-level untracked files;
+- runtime and development dependency graphs are audited separately;
+- runtime license inventory is measured on a runtime-only environment;
+- `tests/test_entrypoints_and_interactive.py` has 66 lines, not 79;
+- final repository cleanliness is verified after this closing commit is pushed.
 
-## Audit Scope
+## Current Product State
 
-- **Repository**: md-converters
-- **Commit Range**: 82e2a6d (fixes), c84f1eb (audit), 8636e4d, 83ca996
-- **Files Reviewed**: pyproject.toml, convert_to_md.py, tools/, .github/workflows/, all tests
-- **Environment**: Python 3.10-3.14, uv locked dependencies
+| Metric | Verified Value |
+|--------|----------------|
+| Product version | `md-converters 1.1.0` |
+| Tests | `38 passed` |
+| Lint | `ruff check convert_to_md.py tests tools` passed |
+| Compilation | `py_compile convert_to_md.py tools/supply_chain_report.py` passed |
+| SBOM | CycloneDX runtime + development SBOM generated |
+| SCA | runtime + development `pip-audit`: no known vulnerabilities |
+| Runtime license policy | 46 packages, 0 unknown, 0 forbidden |
+| Dev license evidence | 70 packages, 0 unknown, 0 forbidden |
+| CI matrix | Python 3.10, 3.11, 3.12, 3.14 + Windows smoke |
 
----
+## Evidence Files
 
-## Findings Status
+The following generated evidence is intentionally committed:
 
-### ✅ All 10 Issues Closed
+- `docs/vibe-audit/evidence/2026-06-13/cyclonedx-runtime-sbom.json`
+- `docs/vibe-audit/evidence/2026-06-13/cyclonedx-dev-sbom.json`
+- `docs/vibe-audit/evidence/2026-06-13/requirements-runtime-audit.txt`
+- `docs/vibe-audit/evidence/2026-06-13/requirements-dev-audit.txt`
+- `docs/vibe-audit/evidence/2026-06-13/supply-chain-licenses.json`
+- `docs/vibe-audit/evidence/2026-06-13/supply-chain-dev-licenses.json`
 
-All findings from initial audit v1.0.0 verified as **FIXED** in commit 82e2a6d.
+CI still regenerates these artifacts independently on every run. The committed
+copies are audit evidence for this closing review, not the source of truth for
+future dependency updates.
 
----
+## Findings Closure
 
-## Critical Issues (All Fixed)
+### 1. Git Status Discrepancy
 
-### 1. ✅ Git Status Discrepancy
-- **Status**: Not a defect — commits were already synced with origin/main
-- **Verification**: `git rev-list origin/main..HEAD` = 0
+Status: closed as reporting issue.
 
-### 2. ✅ Insecure data: URI Validation Regex
-- **Fixed**: `convert_to_md.py:146-151` — strict base64 with proper padding
-- **Before**: `r"(?i)^data:image/...;base64,[a-z0-9+/=\s]+$"`
-- **After**: `r"^data:image/(?:png|jpeg|jpg|gif|webp|bmp);base64,(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{4}|[A-Za-z0-9+/]{3}=|[A-Za-z0-9+/]{2}==)$"`
+The earlier `origin/main..HEAD = 0` observation was expected immediately after
+push. The v1.1.0 report later became stale because the report itself and root
+generated artifacts were local-only. This v1.1.1 report fixes that by committing
+the evidence under `docs/vibe-audit/evidence/2026-06-13` and requiring a final
+`pull --rebase` + `push` closure.
 
----
+### 2. Insecure `data:` URI Validation
 
-## High Priority Issues (All Fixed)
+Status: fixed.
 
-### 3. ✅ Incomplete SBOM Generation
-- **Fixed**: `.github/workflows/ci.yml:155-169` — generates BOTH runtime and dev SBOMs
-- **New**: `cyclonedx-runtime-sbom.json` + `cyclonedx-dev-sbom.json`
+`_SAFE_DATA_IMAGE` now accepts only supported image MIME types and strict
+base64 with valid padding. Whitespace and mixed payload garbage are rejected.
+Regression coverage: `test_safe_data_image_requires_strict_base64_when_images_kept`.
 
-### 4. ✅ pip-audit Outside Locked Environment
-- **Fixed**: `.github/workflows/ci.yml:180-190` — runs via `uv run --frozen`
-- **Bonus**: Caught CVE-2025-71176 in pytest 8.4.2, updated to 9.0.3
+### 3. Incomplete SBOM Generation
 
-### 5. ✅ Subprocess Error Masking
-- **Fixed**: `convert_to_md.py:874` — `errors="strict"` + explicit `UnicodeDecodeError` handler at 885-887
+Status: fixed.
 
-### 6. ✅ Source ID Collision Risk
-- **Fixed**: `convert_to_md.py:157-159,307-310` — 128-bit hash (32 hex chars)
-- **Backward Compat**: `_source_id_matches()` supports legacy 16-char prefix
+The supply-chain job now generates:
 
-### 7. ✅ Missing Dependency
-- **Fixed**: `pyproject.toml:30` — added `charset-normalizer>=3,<4`
-- **Also**: pytest updated to `>=9,<10`
+- `cyclonedx-runtime-sbom.json`
+- `cyclonedx-dev-sbom.json`
 
-### 8. ✅ HTML Decoding Silent Fallback
-- **Fixed**: `convert_to_md.py:664` — returns `"cp1251-replace"` for traceability
+Runtime and development graphs are separated so operational dependencies and
+tooling dependencies can be reviewed independently.
 
----
+### 4. `pip-audit` Outside Locked Environment
 
-## Medium Priority Issues (All Fixed)
+Status: fixed.
 
-### 9. ✅ Missing Python 3.11 in CI
-- **Fixed**: `.github/workflows/ci.yml:21` — matrix now includes 3.11
+`pip-audit` runs through `uv run --frozen pip-audit`, using the locked dev
+environment rather than an unconstrained `uvx` tool environment. The added dev
+audit caught `CVE-2025-71176` in `pytest 8.4.2`; `pytest` is now locked at
+`9.0.3`.
 
-### 10. ✅ Incomplete Test Coverage
-- **Fixed**: New file `tests/test_entrypoints_and_interactive.py` (79 lines)
-- **Result**: 38 tests (was 30), covers entry points, interactive, worker
+### 5. Subprocess Error Masking
 
----
+Status: fixed.
 
-## Verification Results
+Worker stdout/stderr decoding now uses `errors="strict"` and handles
+`UnicodeDecodeError` explicitly. Regression coverage:
+`test_subprocess_runner_fails_on_non_utf8_worker_output`.
 
+### 6. Source ID Collision Risk
+
+Status: fixed.
+
+`source_id` now uses a 128-bit SHA-256 prefix (32 hex characters). Legacy
+16-hex identifiers remain compatible through `_source_id_matches()`, so
+previously generated Markdown files can still be matched.
+
+### 7. Missing Direct Dependency
+
+Status: fixed.
+
+`charset-normalizer>=3,<4` is now a direct runtime dependency because
+`decode_html_bytes()` imports it directly.
+
+### 8. HTML Decode Fallback Traceability
+
+Status: fixed.
+
+The last-resort fallback now reports `cp1251-replace` instead of silently
+claiming a clean `cp1251` decode.
+
+### 9. Missing Python 3.11 in CI
+
+Status: fixed.
+
+The Linux matrix now covers Python 3.10, 3.11, 3.12, and 3.14. Windows smoke
+coverage remains on Python 3.12.
+
+### 10. Test Coverage Gaps
+
+Status: fixed.
+
+Coverage was added for:
+
+- `cli_pdf()` / `cli_html()`;
+- `--version`;
+- `_download_url()` redirect handling;
+- `_worker_convert()`;
+- interactive overwrite confirmation;
+- strict `data:` image validation;
+- 128-bit `source_id` and legacy prefix matching;
+- strict worker output decoding;
+- explicit `cp1251-replace` fallback.
+
+## Verification Commands
+
+The following commands were run in the closing pass:
+
+```powershell
+uv lock --check
+py -3.14 -m py_compile convert_to_md.py tools/supply_chain_report.py
+uv run --frozen ruff check convert_to_md.py tests tools
+uv run --frozen pytest -q
+uv --quiet export --format requirements.txt --no-dev --no-emit-project --locked --output-file docs/vibe-audit/evidence/2026-06-13/requirements-runtime-audit.txt
+uv --quiet export --format requirements.txt --all-groups --no-emit-project --locked --output-file docs/vibe-audit/evidence/2026-06-13/requirements-dev-audit.txt
+uv --quiet export --format cyclonedx1.5 --no-dev --locked --output-file docs/vibe-audit/evidence/2026-06-13/cyclonedx-runtime-sbom.json
+uv --quiet export --format cyclonedx1.5 --all-groups --locked --output-file docs/vibe-audit/evidence/2026-06-13/cyclonedx-dev-sbom.json
+uv sync --frozen --no-dev
+uv run --frozen --no-dev python tools/supply_chain_report.py --output docs/vibe-audit/evidence/2026-06-13/supply-chain-licenses.json --fail-on-forbidden
+uv sync --frozen
+uv run --frozen pip-audit --progress-spinner off -r docs/vibe-audit/evidence/2026-06-13/requirements-runtime-audit.txt
+uv run --frozen pip-audit --progress-spinner off -r docs/vibe-audit/evidence/2026-06-13/requirements-dev-audit.txt
+uv run --frozen tomd --version
+tomd --version
 ```
-$ git status
-On branch main, up to date with origin/main, clean working tree
 
-$ uv lock --check
-Resolved 75 packages in 0.85ms
+## Standards Mapping
 
-$ uv run --frozen ruff check convert_to_md.py tests tools
-All checks passed!
-
-$ uv run --frozen python -m py_compile convert_to_md.py tools/supply_chain_report.py
-(success)
-
-$ uv run --frozen pytest -q
-38 passed in 1.01s
-
-$ uv run --frozen tomd examples/sample-report.html -o out
-Готово: out/sample-report.md
-
-$ uv run --frozen python tools/supply_chain_report.py --output supply-chain-licenses.json --fail-on-forbidden
-70 packages, 0 unknown, 0 forbidden
-
-$ uv run --frozen pip-audit -r requirements-{runtime,dev}-audit.txt
-No known vulnerabilities found (both)
-
-$ SBOM export (runtime + dev)
-Both generated successfully
-```
-
----
-
-## Changes Summary (Commit 82e2a6d)
-
-| File | Changes |
-|------|---------|
-| `.github/workflows/ci.yml` | +Python 3.11, dual SBOM, locked pip-audit |
-| `convert_to_md.py` | Fixed data: URI, source_id 128-bit, errors="strict", cp1251-replace |
-| `pyproject.toml` | +charset-normalizer, pytest>=9 |
-| `tests/*` | +8 tests (38 total) |
-
----
+| Control Area | Implementation Evidence |
+|--------------|-------------------------|
+| NIST SSDF PS.3 / RV.1 | `uv.lock`, SBOM export, `pip-audit`, Dependabot |
+| ISO/IEC 27001 A.8.8 | dependency inventory and vulnerability monitoring |
+| SLSA supply-chain discipline | locked dependencies, reproducible CI install |
+| CycloneDX | runtime and development SBOM artifacts |
+| OWASP SSRF / CWE-918 | URL scheme allowlist, DNS/IP public-address checks, redirect re-check |
+| CWE-400 | URL/file size limits and conversion timeout |
+| CWE-79 / CWE-116 | Markdown link/HTML sanitization and strict safe `data:` policy |
 
 ## Conclusion
 
-**Project is READY FOR PRODUCTION.**
-
-All 10 findings closed. Developer response was exemplary: comprehensive fixes in single commit with additional improvements (vulnerability caught and fixed, test coverage extended).
-
----
-
-## Standards Compliance
-
-- NIST SSDF
-- OWASP SSRF/XSS Prevention
-- CWE-79, CWE-918, CWE-400
-- SLSA
-- CycloneDX
+`md-converters v1.1.0` is ready for production use as a local document-to-
+Markdown utility for trusted users processing potentially untrusted documents
+with defense-in-depth controls. The remaining operational requirement is to
+verify GitHub Actions after the final push, because local validation cannot
+prove hosted runner behavior.

@@ -174,3 +174,13 @@ def test_cli_pdf_and_html_pass_default_filters(monkeypatch):
         (["report"], ["pdf"]),
         (["page"], ["html", "htm"]),
     ]
+
+
+def test_parse_version_prints_current_version(capsys):
+    try:
+        convert_to_md._parse(["--version"])
+    except SystemExit as exc:
+        assert exc.code == 0
+
+    output = capsys.readouterr().out
+    assert f"md-converters {convert_to_md.__version__}" in output
