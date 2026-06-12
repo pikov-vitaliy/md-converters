@@ -49,7 +49,8 @@ RSS и веб-страниц в Markdown.
 - прямых `eval`, `exec`, `pickle`, shell-вызовов в Python-части не найдено;
 - защита от перезаписи по умолчанию есть;
 - `markitdown` ограничен диапазоном `<1.0.0`;
-- CI уже проверяет Linux/Windows и Python 3.10/3.12/3.14;
+- CI уже проверяет Linux Python 3.10/3.11/3.12/3.13 и Windows
+  Python 3.12/3.14;
 - `ruff check convert_to_md.py` проходил без ошибок;
 - smoke HTML -> Markdown проходил во временную папку;
 - быстрый `pip-audit` по текущей установленной цепочке MarkItDown на
@@ -414,6 +415,11 @@ ISO/IEC 27001 A.8.8.
 - CI формирует runtime/development CycloneDX SBOM, license inventory и
   запускает `pip-audit` через locked dev environment;
 - Dependabot настроен для Python и GitHub Actions.
+- License gate использует `License-Expression`, classifiers и короткие
+  декларации license metadata; длинные notice-тексты остаются в JSON-отчёте,
+  но не дают false positive на справочные упоминания GPL, если уже есть
+  авторитетный classifier/expression. При отсутствии таких полей полный
+  license text остаётся enforcement-сигналом.
 
 Оставшиеся работы перед финальной отметкой DoD:
 

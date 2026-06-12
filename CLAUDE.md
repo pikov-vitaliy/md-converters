@@ -50,7 +50,7 @@ EPUB, Outlook `.msg`, Jupyter, RSS и веб-страницы по URL.
 | `pyproject.toml` | pip-пакет, console_scripts (tomd/pdf2md/html2md) |
 | `README.md` | инструкция (рус + краткая англ. секция) |
 | `LICENSE` | MIT |
-| `.github/workflows/ci.yml` | CI: ruff + смоук-тесты (ubuntu 3.10/3.12/3.14, windows 3.12) |
+| `.github/workflows/ci.yml` | CI: ruff + смоук-тесты (ubuntu 3.10/3.11/3.12/3.13, windows 3.12/3.14) |
 | `examples/sample-report.html` + `.md` | пример вход/выход |
 | `.gitignore` | игнор: `__pycache__`, build, `sendto-convert.cmd` и др. |
 
@@ -128,7 +128,7 @@ HTML (cp1251 и др.) через перекодировку во временн
    убирает старый блок профиля и пункт Send To, прописывает заново).
 4. CI (GitHub Actions) на каждый push в `main` гоняет ruff-линт и
    смоук-тесты (HTML, CSV, пропуск без `--force`, ошибки флагов) на
-   ubuntu (Python 3.10/3.11/3.12/3.14) и windows (3.12) — должен быть
+   ubuntu (Python 3.10/3.11/3.12/3.13) и windows (3.12/3.14) — должен быть
    зелёным.
 
 ## Git-процесс
@@ -180,7 +180,8 @@ HTML (cp1251 и др.) через перекодировку во временн
    cp1251/koi8-r эвристика, worker-процесс с timeout и strict UTF-8 stdout/
    stderr, лимит размера локальных файлов, `tomd --version`, `uv.lock`,
    runtime/dev CycloneDX SBOM, `pip-audit` через locked env, license inventory,
-   Dependabot, CI Python 3.10/3.11/3.12/3.14 + Windows smoke, 38 pytest-тестов.
+   Dependabot, CI Linux 3.10/3.11/3.12/3.13 + Windows 3.12/3.14, 41
+   pytest-тестов.
 
 Проект считается завершённым и рабочим. Следующее по желанию — извлечение
 таблиц из PDF (см. ограничения) при появлении конкретной потребности.

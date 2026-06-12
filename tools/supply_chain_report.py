@@ -59,6 +59,21 @@ class PackageLicense:
         visible = [part.strip() for part in parts if part and part.strip()]
         return " | ".join(visible) if visible else "UNKNOWN"
 
+    @property
+    def policy_license(self) -> str:
+        parts = [
+            self.license_expression,
+            *self.license_classifiers,
+        ]
+        authoritative = [part for part in parts if part and part.strip()]
+        if (
+            _is_concise_license_declaration(self.license_text)
+            or (self.license_text and not authoritative)
+        ):
+            parts.append(self.license_text)
+        visible = [part.strip() for part in parts if part and part.strip()]
+        return " | ".join(visible) if visible else "UNKNOWN"
+
 
 def _canonical_name(name: str) -> str:
     return re.sub(r"[-_.]+", "-", name).lower()
@@ -107,7 +122,7 @@ def forbidden_matches(
     package: PackageLicense,
     forbidden_patterns: tuple[str, ...],
 ) -> list[str]:
-    license_text = package.normalized_license.lower()
+    license_text = package.policy_license.lower()
     matches: list[str] = []
     for pattern in forbidden_patterns:
         normalized = pattern.strip().lower()
@@ -120,6 +135,21 @@ def forbidden_matches(
         ):
             matches.append(pattern)
     return matches
+
+
+def _is_concise_license_declaration(license_text: str) -> bool:
+    text = " ".join(license_text.split()).strip()
+    if not text or len(text) > 300:
+        return False
+    body_markers = (
+        "copyright",
+        "permission is hereby granted",
+        "redistribution and use",
+        "terms and conditions",
+        "without warranties or conditions",
+    )
+    lowered = text.lower()
+    return not any(marker in lowered for marker in body_markers)
 
 
 def _contains_license_pattern(license_text: str, pattern: str) -> bool:
@@ -153,6 +183,7 @@ def build_report(
                     "package": package.name,
                     "version": package.version,
                     "license": package.normalized_license,
+                    "policy_license": package.policy_license,
                     "matched_pattern": pattern,
                 }
             )
@@ -180,6 +211,7 @@ def build_report(
                 "name": package.name,
                 "version": package.version,
                 "license": package.normalized_license,
+                "policy_license": package.policy_license,
                 "license_expression": package.license_expression,
                 "license_text": package.license_text,
                 "license_classifiers": list(package.license_classifiers),
