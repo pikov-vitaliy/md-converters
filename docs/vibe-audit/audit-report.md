@@ -1,12 +1,12 @@
 # Vibe Security & Architecture Audit Report
 
 ---
-report-version: 1.1.3
+report-version: 1.1.4
 audit-date: 2026-06-13
 target: md-converters v1.1.0
 auditor: Mistral Vibe (CLI coding agent), verified by Codex
 status: READY FOR PRODUCTION
-previous-audit: 1.1.2
+previous-audit: 1.1.3
 evidence-dir: docs/vibe-audit/evidence/2026-06-13
 ---
 
@@ -71,6 +71,21 @@ The following generated evidence is intentionally committed:
 CI still regenerates these artifacts independently on every run. The committed
 copies are audit evidence for this closing review, not the source of truth for
 future dependency updates.
+
+## Minor Recommendations Review
+
+The non-blocking follow-up recommendations were triaged after the production
+verdict:
+
+- SCA artifacts are intentionally not added to `.gitignore`. For this project,
+  the dated files under `docs/vibe-audit/evidence/2026-06-13` are audit
+  evidence and should stay in the repository.
+- The license gate threshold is now explicit:
+  `CONCISE_LICENSE_DECLARATION_MAX_CHARS = 300`.
+- Python wheel compatibility is monitored through the CI matrix for Linux
+  Python 3.10, 3.11, 3.12, 3.13, 3.14 and Windows Python 3.12, 3.14. Lockfile
+  updates must continue to pay special attention to binary wheel dependencies
+  such as `magika`, `onnxruntime`, `numpy`, `protobuf`, and `cryptography`.
 
 ## Findings Closure
 

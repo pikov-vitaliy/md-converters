@@ -420,8 +420,16 @@ ISO/IEC 27001 A.8.8.
   но не дают false positive на справочные упоминания GPL, если уже есть
   авторитетный classifier/expression. При отсутствии таких полей полный
   license text остаётся enforcement-сигналом.
+- Порог короткой license-декларации вынесен в
+  `CONCISE_LICENSE_DECLARATION_MAX_CHARS = 300`, чтобы правило license gate
+  было явной политикой, а не неименованным числом в коде.
+- Совместимость binary wheels контролируется CI-матрицей Python
+  3.10/3.11/3.12/3.13/3.14. При каждом обновлении `uv.lock` отдельно
+  проверять зависимости с платформенными wheel-ограничениями:
+  `magika`, `onnxruntime`, `numpy`, `protobuf`, `cryptography`.
 
-Оставшиеся работы перед финальной отметкой DoD:
+Финальная отметка DoD:
 
-- после push проверить статус GitHub Actions, так как локально CI не
-  исполняется полностью в среде GitHub.
+- локальная проверка, commit, pull/rebase, push и GitHub Actions выполнены;
+- финальная ветка `main` синхронизирована с `origin/main`;
+- GitHub Actions run `27449216695` завершился успешно.

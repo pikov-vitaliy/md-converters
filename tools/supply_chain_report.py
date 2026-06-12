@@ -38,6 +38,8 @@ LICENSE_PATTERN_ALIASES = {
     "sspl": ("sspl", "server side public license"),
 }
 
+CONCISE_LICENSE_DECLARATION_MAX_CHARS = 300
+
 
 @dataclass(frozen=True)
 class PackageLicense:
@@ -139,7 +141,7 @@ def forbidden_matches(
 
 def _is_concise_license_declaration(license_text: str) -> bool:
     text = " ".join(license_text.split()).strip()
-    if not text or len(text) > 300:
+    if not text or len(text) > CONCISE_LICENSE_DECLARATION_MAX_CHARS:
         return False
     body_markers = (
         "copyright",
