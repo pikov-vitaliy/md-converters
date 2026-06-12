@@ -23,6 +23,9 @@ RSS, а также веб-страницы по URL.
     --keep-images      не трогать картинки: оставить base64 и ссылки-
                        заглушки картинок из .pptx (по умолчанию они
                        сворачиваются в компактный плейсхолдер).
+    --unsafe-raw-markdown
+                       не очищать потенциально опасные ссылки/HTML в
+                       выходном Markdown (для доверенных источников).
     --no-frontmatter   не добавлять YAML-блок (source/converted) в начало.
 
 Результат: то же имя, расширение .md (рядом с исходником или в папке -o);
@@ -44,7 +47,7 @@ import tempfile
 import warnings
 from datetime import date
 from pathlib import Path
-from urllib.parse import urlparse
+from urllib.parse import unquote, urlparse
 
 # markitdown тянет pydub, а тот при импорте предупреждает, что нет
 # ffmpeg — для конвертации документов он не нужен, глушим.
@@ -102,6 +105,32 @@ _PHANTOM_IMG = re.compile(r"!\[(?P<alt>[^\]]*)\]\((?!data:)[^)]*\)")
 # прочий невидимый мусор (C0, DEL, soft hyphen, ZWSP, BOM) убираем.
 _CTRL_TO_SPACE = re.compile("[\x0b\x0c\x85\u2028\u2029]")
 _CTRL_DROP = re.compile("[\x00-\x08\x0e-\x1f\x7f\xad\u200b\ufeff]")
+
+_MD_LINK = re.compile(r"(!?)\[([^\]\n]*)\]\(([^)\n]*)\)")
+_HTML_EVENT_ATTR = re.compile(
+    r"\s+on[a-zA-Z0-9_-]+\s*=\s*(\"[^\"]*\"|'[^']*'|[^\s>]+)")
+_HTML_URL_ATTR = re.compile(
+    r"""(?ix)
+    \s(?P<name>href|src|action|formaction)\s*=\s*
+    (?P<quote>["']?)(?P<value>[^"'\s>]+)(?P=quote)
+    """
+)
+_DANGEROUS_BLOCK_TAG = re.compile(
+    r"(?is)<\s*(script|iframe|object|embed|style)\b[^>]*>.*?"
+    r"</\s*\1\s*>"
+)
+_DANGEROUS_SINGLE_TAG = re.compile(
+    r"(?is)<\s*(script|iframe|object|embed|style|meta|link)\b[^>]*>"
+)
+_DANGEROUS_AUTOLINK = re.compile(
+    r"(?i)<\s*(javascript|vbscript|file|data)\s*:[^>\n]*>")
+_REMAINING_DANGEROUS_SCHEME = re.compile(
+    r"(?i)\b(?:javascript|vbscript|file|data)\s*:[^\s)\]>]*")
+_REMAINING_DANGEROUS_NO_DATA = re.compile(
+    r"(?i)\b(?:javascript|vbscript|file)\s*:[^\s)\]>]*")
+_DANGEROUS_SCHEMES = {"javascript", "vbscript", "file", "data"}
+_SAFE_DATA_IMAGE = re.compile(
+    r"(?i)^data:image/(png|jpeg|jpg|gif|webp|bmp);base64,[a-z0-9+/=\s]+$")
 
 _converter = None
 
@@ -277,10 +306,83 @@ def front_matter(source: str, title: str | None, tool: str,
 
 
 def _img_placeholder(match: re.Match) -> str:
-    return f"![{match.group('alt') or 'встроенное изображение'}]()"
+    alt = _markdown_label(match.group("alt") or "встроенное изображение")
+    return f"![{alt}]()"
 
 
-def tidy(text: str, keep_images: bool, phantom_images: bool = False) -> str:
+def _markdown_label(value: str) -> str:
+    value = re.sub(r"[\r\n\t]+", " ", value).strip()
+    value = value.replace("\\", "\\\\")
+    value = value.replace("[", "\\[").replace("]", "\\]")
+    return value
+
+
+def _normalized_scheme(value: str) -> str | None:
+    clean = value.strip().strip("<>").strip()
+    clean = re.sub(r"[\x00-\x20]+", "", clean)
+    decoded = unquote(clean)
+    decoded = re.sub(r"[\x00-\x20]+", "", decoded)
+    if ":" not in decoded:
+        return None
+    scheme = decoded.split(":", 1)[0].lower()
+    if re.fullmatch(r"[a-z][a-z0-9+.-]*", scheme):
+        return scheme
+    return None
+
+
+def _safe_markdown_target(value: str, allow_data_images: bool) -> str:
+    value = value.strip()
+    scheme = _normalized_scheme(value)
+    if scheme is None:
+        return value
+    if scheme == "data" and allow_data_images:
+        return value if _SAFE_DATA_IMAGE.fullmatch(value.strip()) else ""
+    if scheme in _DANGEROUS_SCHEMES:
+        return ""
+    return value
+
+
+def _sanitize_markdown_link(match: re.Match,
+                            keep_images: bool) -> str:
+    marker, label, target = match.groups()
+    safe_target = _safe_markdown_target(
+        target,
+        allow_data_images=bool(marker) and keep_images,
+    )
+    return f"{marker}[{_markdown_label(label)}]({safe_target})"
+
+
+def _sanitize_html_url_attr(match: re.Match,
+                            keep_images: bool) -> str:
+    value = match.group("value")
+    safe = _safe_markdown_target(value, allow_data_images=keep_images)
+    if not safe:
+        safe = "#"
+    quote = match.group("quote") or '"'
+    return f' {match.group("name").lower()}={quote}{safe}{quote}'
+
+
+def sanitize_markdown(text: str, keep_images: bool) -> str:
+    """Нейтрализует опасные ссылки и raw HTML в Markdown-теле."""
+    text = _DANGEROUS_BLOCK_TAG.sub("", text)
+    text = _DANGEROUS_SINGLE_TAG.sub("", text)
+    text = _HTML_EVENT_ATTR.sub("", text)
+    text = _HTML_URL_ATTR.sub(
+        lambda m: _sanitize_html_url_attr(m, keep_images),
+        text,
+    )
+    text = _DANGEROUS_AUTOLINK.sub("<blocked>", text)
+    text = _MD_LINK.sub(
+        lambda m: _sanitize_markdown_link(m, keep_images),
+        text,
+    )
+    if keep_images:
+        return _REMAINING_DANGEROUS_NO_DATA.sub("blocked", text)
+    return _REMAINING_DANGEROUS_SCHEME.sub("blocked", text)
+
+
+def tidy(text: str, keep_images: bool, phantom_images: bool = False,
+         safe_markdown: bool = True) -> str:
     """Прибирает вывод: чистит управляющие символы, убирает хвостовые
     пробелы, схлопывает пустые строки, обрезает края и (по умолчанию)
     сворачивает base64-картинки и битые картинки-заглушки из PPTX."""
@@ -290,6 +392,8 @@ def tidy(text: str, keep_images: bool, phantom_images: bool = False) -> str:
         text = _DATA_IMG.sub(_img_placeholder, text)
         if phantom_images:
             text = _PHANTOM_IMG.sub(_img_placeholder, text)
+    if safe_markdown:
+        text = sanitize_markdown(text, keep_images)
     out: list[str] = []
     blank = False
     for line in text.replace("\r\n", "\n").replace("\r", "\n").split("\n"):
@@ -375,8 +479,14 @@ def _emit(target: Path, result, source: str, frontmatter: bool,
           keep_images: bool, tool: str, note: str | None,
           phantom_images: bool = False,
           source_path: str | None = None,
-          source_id: str | None = None) -> None:
-    text = tidy(result.text_content, keep_images, phantom_images)
+          source_id: str | None = None,
+          safe_markdown: bool = True) -> None:
+    text = tidy(
+        result.text_content,
+        keep_images,
+        phantom_images,
+        safe_markdown=safe_markdown,
+    )
     if frontmatter:
         title = getattr(result, "title", None)
         text = front_matter(source, title, tool, source_path, source_id) + text
@@ -456,7 +566,8 @@ def convert_file(path: Path, opts: dict) -> str:
         _emit(target, result, path.name, opts["frontmatter"],
               opts["keep_images"], opts["tool"], note,
               phantom_images=(suffix == ".pptx"),
-              source_path=str(path), source_id=source_id)
+              source_path=str(path), source_id=source_id,
+              safe_markdown=not opts.get("unsafe_raw_markdown", False))
     except OSError as exc:
         print(f"[ошибка] Не удалось записать {target.name}: {exc}")
         return "fail"
@@ -489,7 +600,8 @@ def convert_url(url: str, opts: dict) -> str:
     try:
         _emit(target, result, url, opts["frontmatter"],
               opts["keep_images"], opts["tool"], None,
-              source_path=url, source_id=source_id)
+              source_path=url, source_id=source_id,
+              safe_markdown=not opts.get("unsafe_raw_markdown", False))
     except OSError as exc:
         print(f"[ошибка] Не удалось записать {target.name}: {exc}")
         return "fail"
@@ -542,6 +654,7 @@ def _parse(tokens: list) -> dict:
     parser.add_argument("--no-frontmatter", dest="frontmatter",
                         action="store_false", default=True)
     parser.add_argument("--keep-images", action="store_true")
+    parser.add_argument("--unsafe-raw-markdown", action="store_true")
     parser.add_argument("-o", "--output", dest="out_dir")
     parser.add_argument("--only")
     parser.add_argument("-h", "--help", action="store_true")
@@ -582,6 +695,7 @@ def _parse(tokens: list) -> dict:
         "patterns": parsed.patterns, "force": parsed.force,
         "recursive": parsed.recursive, "frontmatter": parsed.frontmatter,
         "keep_images": parsed.keep_images,
+        "unsafe_raw_markdown": parsed.unsafe_raw_markdown,
         "out_dir": out_dir, "only": only, "errors": errors,
     }
 
@@ -595,6 +709,7 @@ def _build_opts(parsed: dict, default_only: list | None) -> dict:
         "force": parsed["force"],
         "frontmatter": parsed["frontmatter"],
         "keep_images": parsed["keep_images"],
+        "unsafe_raw_markdown": parsed["unsafe_raw_markdown"],
         "out_dir": parsed["out_dir"],
         "scan": scan,
         "tool": _tool_name(only),
