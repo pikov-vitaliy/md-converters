@@ -6,6 +6,12 @@ on:
   pull_request:
     branches: [ main ]
 
+permissions:
+  contents: read
+
+env:
+  UV_LINK_MODE: copy
+
 jobs:
   smoke:
     runs-on: ubuntu-latest
@@ -22,26 +28,28 @@ jobs:
         with:
           python-version: ${{ matrix.python-version }}
 
+      - name: Install uv
+        run: python -m pip install "uv>=0.11,<0.12"
+
+      - name: Check lockfile
+        run: uv lock --check
+
+      - name: Sync locked environment
+        run: uv sync --frozen --python ${{ matrix.python-version }}
+
       - name: Compile check
-        run: python -m py_compile convert_to_md.py
+        run: uv run --frozen python -m py_compile convert_to_md.py tools/supply_chain_report.py
 
       - name: Lint (ruff)
-        run: |
-          pip install ruff
-          ruff check convert_to_md.py
-
-      - name: Install package
-        run: pip install .
+        run: uv run --frozen ruff check convert_to_md.py tests tools
 
       - name: Unit tests
-        run: |
-          pip install pytest
-          pytest -q
+        run: uv run --frozen pytest -q
 
       # Вывод через -o в /tmp, чтобы не трогать tracked-файл examples/*.md.
       - name: Smoke — HTML to Markdown
         run: |
-          tomd examples/sample-report.html -o /tmp/out
+          uv run --frozen tomd examples/sample-report.html -o /tmp/out
           test -f /tmp/out/sample-report.md
           grep -q "Отчёт об уязвимостях" /tmp/out/sample-report.md
           echo "OK: HTML сконвертирован"
@@ -49,29 +57,29 @@ jobs:
       - name: Smoke — CSV to Markdown via tomd
         run: |
           printf 'a,b\n1,2\n' > /tmp/t.csv
-          tomd /tmp/t.csv --no-frontmatter
+          uv run --frozen tomd /tmp/t.csv --no-frontmatter
           grep -q "| a | b |" /tmp/t.md
           echo "OK: CSV сконвертирован в таблицу"
 
       - name: Smoke — повтор без --force пропускает существующий .md
         run: |
-          tomd /tmp/t.csv --no-frontmatter | grep -q "пропуск"
+          uv run --frozen tomd /tmp/t.csv --no-frontmatter | grep -q "пропуск"
           echo "OK: без --force существующий .md не перезаписан"
 
       # «! cmd» под дефолтным bash -e не роняет шаг — нужен явный exit 1.
       - name: Smoke — флаг без значения даёт ошибку
         run: |
-          if tomd /tmp/t.csv -o; then
+          if uv run --frozen tomd /tmp/t.csv -o; then
             echo "FAIL: -o без значения принят молча"; exit 1
           fi
-          if tomd /tmp/t.csv --only=; then
+          if uv run --frozen tomd /tmp/t.csv --only=; then
             echo "FAIL: --only= принят молча"; exit 1
           fi
           echo "OK: -o и --only без значения не игнорируются молча"
 
       - name: Unit — плейсхолдер data-URI не задевает соседнюю разметку
         run: |
-          python - <<'EOF'
+          uv run --frozen python - <<'EOF'
           from convert_to_md import tidy
           out = tidy("[![l](data:image/png;base64,A)](https://e.com/x)\n",
                      keep_images=False)
@@ -94,18 +102,72 @@ jobs:
         with:
           python-version: "3.12"
 
-      - name: Install package
-        run: pip install .
+      - name: Install uv
+        run: python -m pip install "uv>=0.11,<0.12"
+
+      - name: Sync locked environment
+        run: uv sync --frozen --python 3.12
 
       - name: Unit tests
-        run: |
-          pip install pytest
-          pytest -q
+        run: uv run --frozen pytest -q
 
       - name: Smoke — HTML to Markdown
         shell: bash
         run: |
-          tomd examples/sample-report.html -o out
+          uv run --frozen tomd examples/sample-report.html -o out
           test -f out/sample-report.md
           grep -q "Отчёт об уязвимостях" out/sample-report.md
           echo "OK: HTML сконвертирован на Windows"
+
+  supply-chain:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install uv
+        run: python -m pip install "uv>=0.11,<0.12"
+
+      - name: Check lockfile
+        run: uv lock --check
+
+      - name: Export locked runtime requirements
+        run: |
+          uv --quiet export \
+            --format requirements.txt \
+            --no-dev \
+            --no-emit-project \
+            --locked \
+            --output-file requirements-audit.txt
+
+      - name: Generate CycloneDX SBOM
+        run: |
+          uv --quiet export \
+            --format cyclonedx1.5 \
+            --no-dev \
+            --locked \
+            --output-file cyclonedx-sbom.json
+
+      - name: Sync runtime environment
+        run: uv sync --frozen --no-dev --python 3.12
+
+      - name: Generate license inventory
+        run: |
+          uv run --frozen --no-dev python tools/supply_chain_report.py \
+            --output supply-chain-licenses.json \
+            --fail-on-forbidden
+
+      - name: Audit runtime dependencies
+        run: uvx pip-audit --progress-spinner off -r requirements-audit.txt
+
+      - name: Upload supply-chain artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: supply-chain
+          path: |
+            cyclonedx-sbom.json
+            requirements-audit.txt
+            supply-chain-licenses.json

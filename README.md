@@ -29,6 +29,8 @@ md-converters\
 ├─ convert_to_md.py        — основной скрипт (вся логика)
 ├─ install.ps1             — установщик (зависимости + команды + Send To)
 ├─ pyproject.toml          — для установки через pip (кроссплатформенно)
+├─ uv.lock                 — lockfile зависимостей для разработки/CI
+├─ tools\                  — служебные проверки SCA/лицензий
 ├─ README.md              — эта инструкция
 ├─ LICENSE                — MIT
 ├─ .github\workflows\     — CI (GitHub Actions, смоук-тест)
@@ -268,6 +270,40 @@ Markdown прибирается (хвостовые пробелы, лишние
 
 ---
 
+## Модель безопасности
+
+`md-converters` рассчитан на локальный запуск доверенным пользователем, но
+входные документы, HTML и URL считаются потенциально недоверенными. Это важно
+для сценариев с материалами от студентов, подрядчиков, внешних LMS, отчётов
+сканеров и выгрузок из неизвестных систем.
+
+Защитная модель по умолчанию:
+
+- локальные файлы проверяются по размеру до передачи стороннему парсеру;
+- конвертация локального файла идёт в отдельном worker-процессе с timeout;
+- URL разрешены только по `http`/`https`, private/loopback/link-local адреса
+  блокируются, редиректы проверяются повторно;
+- сетевые ответы читаются с timeout и ограничением размера;
+- выходной Markdown очищается от опасных схем ссылок и raw HTML;
+- существующие `.md` не перезаписываются без `--force`.
+
+Ограничения:
+
+- worker-процесс не является полноценной ОС-песочницей с отдельным
+  пользователем, seccomp/AppContainer или контейнером;
+- утилита снижает риск активного содержимого в Markdown, но не заменяет
+  редакторскую проверку перед публикацией в LMS, статический сайт или базу
+  знаний;
+- `--allow-private-url`, `--unsafe-raw-markdown`, `--no-sandbox` следует
+  использовать только для доверенных локальных сценариев.
+
+Для обработки особо недоверенных файлов используйте отдельную виртуальную
+машину или контейнер без доступа к чувствительным каталогам и внутренним
+сетям. Это соответствует принципам least privilege и defense-in-depth
+(NIST SSDF PW.4/PW.8, OWASP SSRF Prevention, CWE-400/CWE-918).
+
+---
+
 ## Особенности форматов
 
 - **Таблицы.** HTML, Word (`.docx`) и Excel (`.xlsx`) хранят настоящую
@@ -321,6 +357,56 @@ tomd path/to/file.docx
 
 Команды `tomd`, `pdf2md`, `html2md` появятся как обычные консольные утилиты
 (пункт Send To — только для Windows, через `install.ps1`).
+
+---
+
+## Разработка, SBOM и SCA
+
+Для разработки используется `uv.lock`: он фиксирует транзитивные зависимости
+для поддерживаемых Python 3.10-3.14 и платформ Windows/Linux. Это нужно для
+воспроизводимости поставки, SCA и лицензионного контроля.
+
+Базовый цикл проверки:
+
+```powershell
+python -m pip install "uv>=0.11,<0.12"
+uv sync --frozen
+uv run --frozen python -m py_compile convert_to_md.py tools/supply_chain_report.py
+uv run --frozen ruff check convert_to_md.py tests tools
+uv run --frozen pytest -q
+```
+
+Проверка состава поставки:
+
+```powershell
+uv lock --check
+uv --quiet export --format requirements.txt --no-dev --no-emit-project --locked --output-file requirements-audit.txt
+uv --quiet export --format cyclonedx1.5 --no-dev --locked --output-file cyclonedx-sbom.json
+uv sync --frozen --no-dev
+uv run --frozen --no-dev python tools/supply_chain_report.py --output supply-chain-licenses.json --fail-on-forbidden
+uvx pip-audit --progress-spinner off -r requirements-audit.txt
+```
+
+Что получается:
+
+- `cyclonedx-sbom.json` — CycloneDX SBOM по runtime-зависимостям;
+- `requirements-audit.txt` — lock-экспорт для `pip-audit`;
+- `supply-chain-licenses.json` — инвентаризация лицензий из metadata
+  установленных runtime-пакетов.
+
+В CI эти файлы публикуются как артефакты job `supply-chain`. Локальные
+одноразовые SBOM/отчёты можно пересоздавать перед передачей комплекта или
+аудитом; исходники проверок (`uv.lock`, `tools/`, workflow) хранятся в
+репозитории.
+
+Политика лицензий по умолчанию блокирует сильный copyleft и лицензии с
+нежелательными ограничениями: AGPL/GPL/LGPL, SSPL, Commons Clause, Sleepycat.
+`UNKNOWN` пока считается замечанием для ручной проверки, а не автоматическим
+падением сборки.
+
+Dependabot настроен для еженедельных PR по Python-зависимостям и GitHub
+Actions. Обновления должны проходить через тот же CI: lockfile, тесты, SBOM,
+`pip-audit` и лицензионная проверка.
 
 ---
 

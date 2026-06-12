@@ -28,6 +28,13 @@ classifiers = [
 # Потолок <1.0.0 — чтобы мажорный релиз не прилетел молча.
 dependencies = ["markitdown[pdf,docx,pptx,xlsx,xls,outlook]>=0.1.0,<1.0.0"]
 
+[dependency-groups]
+dev = [
+    "pip-audit>=2.9,<3",
+    "pytest>=8,<9",
+    "ruff>=0.13,<0.14",
+]
+
 [project.urls]
 Homepage = "https://github.com/pikov-vitaliy/md-converters"
 
