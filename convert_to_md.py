@@ -26,6 +26,10 @@ RSS, а также веб-страницы по URL.
     --unsafe-raw-markdown
                        не очищать потенциально опасные ссылки/HTML в
                        выходном Markdown (для доверенных источников).
+    --allow-private-url
+                       разрешить URL на localhost/private/link-local адреса.
+    --url-timeout SEC  timeout сетевой загрузки URL (по умолчанию 20).
+    --max-url-mb MB    максимум данных URL-ответа (по умолчанию 50).
     --no-frontmatter   не добавлять YAML-блок (source/converted) в начало.
 
 Результат: то же имя, расширение .md (рядом с исходником или в папке -o);
@@ -39,15 +43,18 @@ from __future__ import annotations
 import glob
 import argparse
 import hashlib
+import io
+import ipaddress
 import os
 import re
 import shlex
+import socket
 import sys
 import tempfile
 import warnings
 from datetime import date
 from pathlib import Path
-from urllib.parse import unquote, urlparse
+from urllib.parse import unquote, urljoin, urlparse
 
 # markitdown тянет pydub, а тот при импорте предупреждает, что нет
 # ffmpeg — для конвертации документов он не нужен, глушим.
@@ -131,6 +138,9 @@ _REMAINING_DANGEROUS_NO_DATA = re.compile(
 _DANGEROUS_SCHEMES = {"javascript", "vbscript", "file", "data"}
 _SAFE_DATA_IMAGE = re.compile(
     r"(?i)^data:image/(png|jpeg|jpg|gif|webp|bmp);base64,[a-z0-9+/=\s]+$")
+_MAX_REDIRECTS = 5
+_DEFAULT_URL_TIMEOUT = 20.0
+_DEFAULT_MAX_URL_MB = 50.0
 
 _converter = None
 
@@ -537,6 +547,130 @@ def _convert_file_data(path: Path) -> tuple:
     return _md().convert(str(path)), None
 
 
+def _positive_float(value: str, name: str) -> float:
+    try:
+        number = float(value)
+    except ValueError as exc:
+        raise ValueError(f"{name} должен быть числом") from exc
+    if number <= 0:
+        raise ValueError(f"{name} должен быть больше 0")
+    return number
+
+
+def _is_public_ip(address: str) -> bool:
+    ip = ipaddress.ip_address(address)
+    return ip.is_global
+
+
+def _resolved_ips(hostname: str) -> set[str]:
+    try:
+        infos = socket.getaddrinfo(hostname, None, type=socket.SOCK_STREAM)
+    except socket.gaierror as exc:
+        raise ValueError(f"не удалось разрешить host {hostname!r}") from exc
+    return {info[4][0] for info in infos}
+
+
+def _check_url_allowed(url: str, allow_private: bool) -> None:
+    parsed = urlparse(url)
+    if parsed.scheme.lower() not in {"http", "https"}:
+        raise ValueError("поддерживаются только http и https URL")
+    if not parsed.hostname:
+        raise ValueError("URL должен содержать имя хоста")
+    if allow_private:
+        return
+    blocked = [ip for ip in _resolved_ips(parsed.hostname)
+               if not _is_public_ip(ip)]
+    if blocked:
+        sample = ", ".join(sorted(blocked)[:3])
+        raise ValueError(
+            f"URL указывает на непубличный адрес ({sample}); "
+            "используйте --allow-private-url только для доверенного сценария"
+        )
+
+
+def _read_limited_response(response, max_bytes: int) -> bytes:
+    header = response.headers.get("content-length")
+    if header:
+        try:
+            declared = int(header)
+        except ValueError:
+            declared = None
+        if declared is not None and declared > max_bytes:
+            raise ValueError(
+                f"URL-ответ больше лимита ({declared} байт > {max_bytes})"
+            )
+
+    chunks = []
+    total = 0
+    for chunk in response.iter_content(chunk_size=65536):
+        if not chunk:
+            continue
+        total += len(chunk)
+        if total > max_bytes:
+            raise ValueError(f"URL-ответ больше лимита ({max_bytes} байт)")
+        chunks.append(chunk)
+    return b"".join(chunks)
+
+
+def _download_url(url: str, timeout: float, max_bytes: int,
+                  allow_private: bool) -> tuple[bytes, str, str | None]:
+    try:
+        import requests
+    except ImportError as exc:
+        raise ValueError("для URL-режима нужен пакет requests") from exc
+
+    current = url.strip()
+    session = requests.Session()
+    session.trust_env = False
+    session.headers.update({
+        "Accept": "text/markdown, text/html;q=0.9, "
+                  "text/plain;q=0.8, */*;q=0.1",
+        "User-Agent": "md-converters/1.0",
+    })
+    try:
+        for _ in range(_MAX_REDIRECTS + 1):
+            _check_url_allowed(current, allow_private)
+            response = session.get(
+                current,
+                allow_redirects=False,
+                stream=True,
+                timeout=(timeout, timeout),
+            )
+            try:
+                if 300 <= response.status_code < 400:
+                    location = response.headers.get("location")
+                    if not location:
+                        raise ValueError("редирект без заголовка Location")
+                    current = urljoin(current, location)
+                    continue
+                response.raise_for_status()
+                final_url = response.url or current
+                _check_url_allowed(final_url, allow_private)
+                data = _read_limited_response(response, max_bytes)
+                suffix = Path(urlparse(final_url).path).suffix or None
+                return data, final_url, suffix
+            finally:
+                response.close()
+        raise ValueError("слишком много редиректов")
+    finally:
+        session.close()
+
+
+def _convert_url_data(url: str, opts: dict) -> tuple:
+    data, final_url, suffix = _download_url(
+        url,
+        timeout=opts["url_timeout"],
+        max_bytes=opts["max_url_bytes"],
+        allow_private=opts["allow_private_url"],
+    )
+    result = _md().convert_stream(
+        io.BytesIO(data),
+        file_extension=suffix,
+        url=final_url,
+    )
+    return result, final_url
+
+
 def convert_file(path: Path, opts: dict) -> str:
     if not path.exists():
         print(f"[ошибка] Файл не найден: {path.resolve()}")
@@ -593,14 +727,14 @@ def convert_url(url: str, opts: dict) -> str:
         return "skip"
     print(f"Загружаю {url} ...")
     try:
-        result = _md().convert_url(url)
+        result, final_url = _convert_url_data(url, opts)
     except Exception as exc:
         print(f"[ошибка] Не удалось загрузить {url}: {exc}")
         return "fail"
     try:
         _emit(target, result, url, opts["frontmatter"],
               opts["keep_images"], opts["tool"], None,
-              source_path=url, source_id=source_id,
+              source_path=final_url, source_id=source_id,
               safe_markdown=not opts.get("unsafe_raw_markdown", False))
     except OSError as exc:
         print(f"[ошибка] Не удалось записать {target.name}: {exc}")
@@ -655,6 +789,11 @@ def _parse(tokens: list) -> dict:
                         action="store_false", default=True)
     parser.add_argument("--keep-images", action="store_true")
     parser.add_argument("--unsafe-raw-markdown", action="store_true")
+    parser.add_argument("--allow-private-url", action="store_true")
+    parser.add_argument("--url-timeout",
+                        default=str(_DEFAULT_URL_TIMEOUT))
+    parser.add_argument("--max-url-mb",
+                        default=str(_DEFAULT_MAX_URL_MB))
     parser.add_argument("-o", "--output", dest="out_dir")
     parser.add_argument("--only")
     parser.add_argument("-h", "--help", action="store_true")
@@ -691,11 +830,26 @@ def _parse(tokens: list) -> dict:
             if only is None and not errors:
                 errors.append("[ошибка] Флагу --only нужны расширения, "
                               "например: --only pdf,docx.")
+    try:
+        url_timeout = _positive_float(parsed.url_timeout, "--url-timeout")
+    except ValueError as exc:
+        errors.append(f"[ошибка] {exc}")
+        url_timeout = _DEFAULT_URL_TIMEOUT
+
+    try:
+        max_url_mb = _positive_float(parsed.max_url_mb, "--max-url-mb")
+    except ValueError as exc:
+        errors.append(f"[ошибка] {exc}")
+        max_url_mb = _DEFAULT_MAX_URL_MB
+
     return {
         "patterns": parsed.patterns, "force": parsed.force,
         "recursive": parsed.recursive, "frontmatter": parsed.frontmatter,
         "keep_images": parsed.keep_images,
         "unsafe_raw_markdown": parsed.unsafe_raw_markdown,
+        "allow_private_url": parsed.allow_private_url,
+        "url_timeout": url_timeout,
+        "max_url_mb": max_url_mb,
         "out_dir": out_dir, "only": only, "errors": errors,
     }
 
@@ -710,6 +864,9 @@ def _build_opts(parsed: dict, default_only: list | None) -> dict:
         "frontmatter": parsed["frontmatter"],
         "keep_images": parsed["keep_images"],
         "unsafe_raw_markdown": parsed["unsafe_raw_markdown"],
+        "allow_private_url": parsed["allow_private_url"],
+        "url_timeout": parsed["url_timeout"],
+        "max_url_bytes": int(parsed["max_url_mb"] * 1024 * 1024),
         "out_dir": parsed["out_dir"],
         "scan": scan,
         "tool": _tool_name(only),
