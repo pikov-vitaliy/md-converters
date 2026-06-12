@@ -87,7 +87,7 @@ jobs:
           from convert_to_md import tidy
           out = tidy("[![l](data:image/png;base64,A)](https://e.com/x)\n",
                      keep_images=False)
-          assert "[![l]()](https://e.com/x)" in out, out
+          assert "[!\\[l]()](https://e.com/x)" in out, out
           out = tidy("![a](data:image/png;base64,A)"
                      "![b](data:image/png;base64,B)\n", keep_images=False)
           assert "![a]()" in out and "![b]()" in out, out

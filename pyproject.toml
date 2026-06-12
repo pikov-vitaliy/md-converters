@@ -31,6 +31,9 @@ dependencies = [
     # magika 0.6.3 resolves to onnxruntime 1.20.1, which has no cp314 wheels.
     # Keep 0.6.2 until upstream publishes a 3.14-compatible dependency graph.
     "magika>=0.6.2,<0.6.3",
+    # onnxruntime 1.24+ dropped cp310 wheels; 1.20.1 lacks cp314 wheels.
+    "onnxruntime>=1.20.1,<1.21; python_version < '3.11'",
+    "onnxruntime>=1.26,<2; python_version >= '3.11'",
     "markitdown[pdf,docx,pptx,xlsx,xls,outlook]>=0.1.0,<1.0.0",
 ]
 
