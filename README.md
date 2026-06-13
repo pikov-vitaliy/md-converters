@@ -108,12 +108,13 @@ PS C:\reports> tomd *
 правый клик → **Отправить** → **Конвертировать в Markdown**. Откроется окно
 с ходом конвертации; `.md` появятся рядом с исходниками.
 
-В Windows 11 тот же пункт дублируется в основном контекстном меню
-(в «Show more options» → «Конвертировать в Markdown»). В Windows 10 он
-видно сразу в коротком меню. Запись реестра создаётся в
-`HKCU\Software\Classes\*\shell\ConvertToMarkdown` — без админ-прав, только
-для текущего пользователя. Если нужно только Send to (без основного меню),
-запустите установщик с `-SkipContextMenu`:
+В Windows 11 22H2+ тот же пункт дублируется в основном контекстном меню —
+в подменю **«Open with»** (рядом с WinRAR / VS Code / Notepad++) с
+человеческим именем «Конвертировать в Markdown». Кроме того, он виден
+через «Show more options» классическим путём. В Windows 10 — сразу
+в коротком меню. Запись реестра создаётся в `HKCU\Software\Classes\...`
+без админ-прав, только для текущего пользователя. Если нужно только
+Send to (без основного меню), запустите установщик с `-SkipContextMenu`:
 
 ```powershell
 pwsh -ExecutionPolicy Bypass -File .\install.ps1 -SkipContextMenu
@@ -502,9 +503,9 @@ Jupyter notebooks, RSS, and web pages by URL.
 `markitdown[pdf,docx,pptx,xlsx,xls,outlook]>=0.1.0,<1.0.0`, registers the
 `tomd` / `pdf2md` / `html2md` commands in your PowerShell profile, and adds
 a right-click *Send to → Convert to Markdown* entry. The same entry is
-also registered in Explorer's main context menu (under `Show more options`
-in Windows 11). Pass `-SkipContextMenu` to install.ps1 to skip the main
-menu entry.
+also registered in Explorer's main context menu (under `Open with` in
+Windows 11 22H2+, directly in the short menu in Windows 10). Pass
+`-SkipContextMenu` to install.ps1 to skip the main menu entry.
 
 **Install (any OS):** `pip install .` exposes `tomd`, `pdf2md`, `html2md`.
 

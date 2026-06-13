@@ -11,9 +11,11 @@
          указывая на ту папку, ИЗ КОТОРОЙ запущен этот скрипт;
       4) добавляет пункт «Конвертировать в Markdown» в меню правого клика
          Проводника (Отправить / Send to);
-      5) добавляет тот же пункт в основное контекстное меню Проводника
-         (видно через «Show more options» в Windows 11 и в классическом
-         меню в Windows 10). Запись создаётся в HKCU — без админ-прав.
+      5) добавляет тот же пункт в основное контекстное меню Проводника:
+         - в Win10 — сразу в коротком меню;
+         - в Win11 22H2+ — в подменю "Open with" (рядом с WinRAR / VS Code
+           / Notepad++), а также в "Show more options" классическим путём.
+         Запись создаётся в HKCU — без админ-прав.
 
     Скрипт можно запускать сколько угодно раз — старые строки он
     аккуратно убирает и прописывает заново (идемпотентно).
@@ -184,31 +186,65 @@ pause
 }
 
 # --- 4b) Пункт в основном контекстном меню Проводника ---------------------
-# HKCU\Software\Classes\*\shell\... — без админ-прав, только для текущего
-# пользователя. Position=Middle помогает пункту попасть в видимую часть
-# сокращённого меню Windows 11 (иначе он остаётся только в "Show more options").
+# В Windows 11 22H2+ сокращённое меню рендерит в верхней части только
+# нативные shell extensions. Простая запись в HKCU\...\shell\... на Win11 24H2
+# видна только в "Show more options". Чтобы пункт попал в видимую часть
+# (а именно — в подменю "Open with", как у WinRAR/VS Code/Notepad++),
+# регистрируем .cmd как "приложение" в HKCU\Software\Classes\Applications\
+# и вешаем на него shell-команду. Плюс оставляем запись в \* для случая
+# Win10 и для тех, кто пользуется "Show more options" в Win11.
 if (-not $SkipContextMenu) {
-    $shellKey = 'Registry::HKEY_CURRENT_USER\Software\Classes\*\shell\ConvertToMarkdown'
-    $cmdKey    = "$shellKey\command"
     $menuTitle = 'Конвертировать в Markdown'
-    $iconValue = "$python,0"   # иконка из python.exe — есть всегда, не зависит от kit
+    $iconValue = "$python,0"
     $cmdLine   = '"' + $cmdPath + '" "%1"'
 
-    # Симметричное удаление перед переустановкой.
-    if (Test-Path -LiteralPath $shellKey) {
-        Remove-Item -LiteralPath $shellKey -Recurse -Force
-    }
-
+    # --- 4b-1) Запись в \* \shell — для Win10 и "Show more options" в Win11.
+    $shellKey = 'Registry::HKEY_CURRENT_USER\Software\Classes\*\shell\ConvertToMarkdown'
+    $shellCmd = "$shellKey\command"
+    if (Test-Path -LiteralPath $shellKey) { Remove-Item -LiteralPath $shellKey -Recurse -Force }
     try {
         New-Item -Path $shellKey -Force | Out-Null
         Set-ItemProperty -LiteralPath $shellKey -Name '(default)' -Value $menuTitle
         Set-ItemProperty -LiteralPath $shellKey -Name 'Icon'      -Value $iconValue
         Set-ItemProperty -LiteralPath $shellKey -Name 'Position'  -Value 'Middle'
-        New-Item -Path $cmdKey -Force | Out-Null
-        Set-ItemProperty -LiteralPath $cmdKey -Name '(default)' -Value $cmdLine
-        Write-Host "Пункт «Конвертировать в Markdown» добавлен в основное контекстное меню Проводника." -ForegroundColor Green
+        New-Item -Path $shellCmd -Force | Out-Null
+        Set-ItemProperty -LiteralPath $shellCmd -Name '(default)' -Value $cmdLine
+        Write-Host "Пункт «Конвертировать в Markdown» добавлен в 'Show more options'." -ForegroundColor Green
     } catch {
-        Write-Host "Не удалось добавить пункт в основное меню (не критично): $_" -ForegroundColor Yellow
+        Write-Host "Не удалось добавить пункт в 'Show more options' (не критично): $_" -ForegroundColor Yellow
+    }
+
+    # --- 4b-2) Регистрация .cmd как приложения — для подменю "Open with" в Win11.
+    # Имя файла .cmd не должно содержать пробелов/спецсимволов (наш — годится).
+    $appBase  = 'Registry::HKEY_CURRENT_USER\Software\Classes\Applications\sendto-convert.cmd'
+    $appName  = "$appBase\shell\ConvertToMarkdown"
+    $appCmd   = "$appName\command"
+    $appInfo  = "$appBase\DefaultIcon"
+    $appTypes = "$appBase\SupportedTypes"
+    if (Test-Path -LiteralPath $appBase) { Remove-Item -LiteralPath $appBase -Recurse -Force }
+    try {
+        New-Item -Path $appBase -Force | Out-Null
+        # FriendlyAppName — это то, что увидит пользователь в подменю "Open with".
+        Set-ItemProperty -LiteralPath $appBase -Name 'FriendlyAppName' -Value $menuTitle
+        # ApplicationCompany — на случай, если Explorer его показывает.
+        Set-ItemProperty -LiteralPath $appBase -Name 'ApplicationCompany' -Value 'md-converters'
+        # Иконка приложения.
+        New-Item -Path $appInfo -Force | Out-Null
+        Set-ItemProperty -LiteralPath $appInfo -Name '(default)' -Value $iconValue
+        # SupportedTypes — маски расширений, на которые "Open with" предложит
+        # наш пункт. Регистрируем все, что умеет утилита.
+        New-Item -Path $appTypes -Force | Out-Null
+        '.pdf','.html','.htm','.docx','.xlsx','.pptx','.csv','.json','.xml','.epub','.msg','.ipynb','.rss' |
+            ForEach-Object { Set-ItemProperty -LiteralPath $appTypes -Name $_ -Value '' }
+        # Сама команда.
+        New-Item -Path $appName -Force | Out-Null
+        Set-ItemProperty -LiteralPath $appName -Name '(default)' -Value $menuTitle
+        Set-ItemProperty -LiteralPath $appName -Name 'Icon'      -Value $iconValue
+        New-Item -Path $appCmd -Force | Out-Null
+        Set-ItemProperty -LiteralPath $appCmd -Name '(default)' -Value $cmdLine
+        Write-Host "Пункт «Конвертировать в Markdown» добавлен в подменю 'Open with'." -ForegroundColor Green
+    } catch {
+        Write-Host "Не удалось добавить пункт в 'Open with' (не критично): $_" -ForegroundColor Yellow
     }
 }
 
@@ -227,6 +263,7 @@ Write-Host "Откройте НОВОЕ окно PowerShell (или выполн
 Write-Host "Команды:  tomd  (любой формат),  pdf2md,  html2md"
 Write-Host "В Проводнике: правый клик → Отправить → Конвертировать в Markdown"
 if (-not $SkipContextMenu) {
-    Write-Host "  и в основном меню (Show more options) — пункт «Конвертировать в Markdown»."
+    Write-Host "  и в подменю 'Open with' основного меню — пункт «Конвертировать в Markdown»." -ForegroundColor Green
+    Write-Host "  Также доступно через 'Show more options' (Win11) / прямо в меню (Win10)."
 }
 Write-Host "Справка:  tomd --help"
