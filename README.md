@@ -104,20 +104,32 @@ PS C:\reports> tomd *
 
 ### Правый клик в Проводнике (без терминала)
 
-После установки выделите один или несколько файлов в Проводнике →
-правый клик → **Отправить** → **Конвертировать в Markdown**. Откроется окно
-с ходом конвертации; `.md` появятся рядом с исходниками.
+По умолчанию установщик `install.ps1` **спрашивает** после установки,
+добавлять ли пункты в контекстное меню — это изменение системного
+состояния, и без явного согласия мы их не создаём. Если отвечаете «Y»,
+после установки в Проводнике появятся:
 
-В Windows 11 22H2+ тот же пункт дублируется в основном контекстном меню —
-в подменю **«Open with»** (рядом с WinRAR / VS Code / Notepad++) с
-человеческим именем «Конвертировать в Markdown». Кроме того, он виден
-через «Show more options» классическим путём. В Windows 10 — сразу
-в коротком меню. Запись реестра создаётся в `HKCU\Software\Classes\...`
-без админ-прав, только для текущего пользователя. Если нужно только
-Send to (без основного меню), запустите установщик с `-SkipContextMenu`:
+- **Send to → «Конвертировать в Markdown»** (правый клик → Отправить).
+- **Open with → «Конвертировать в Markdown»** (правый клик → Открыть
+  с помощью) — Win11 22H2+ рядом с WinRAR / VS Code / Notepad++.
+- **Show more options → «Конвертировать в Markdown»** — в Win11; в Win10
+  пункт виден сразу в коротком меню.
+
+Все записи — в `HKCU\Software\Classes\...`, без админ-прав, только для
+текущего пользователя. Идемпотентно: переустановка с `-NoMenu` снимает
+записи, переустановка с `-Menu` восстанавливает.
+
+#### Режимы установки
 
 ```powershell
-pwsh -ExecutionPolicy Bypass -File .\install.ps1 -SkipContextMenu
+# По умолчанию (без флагов) — интерактивный вопрос после установки.
+pwsh -ExecutionPolicy Bypass -File .\install.ps1
+
+# Сразу добавить пункты в контекстное меню (без вопроса):
+pwsh -ExecutionPolicy Bypass -File .\install.ps1 -Menu
+
+# Установить только команды, контекстное меню не трогать (CI / минимальная):
+pwsh -ExecutionPolicy Bypass -File .\install.ps1 -NoMenu
 ```
 
 ---
@@ -356,8 +368,9 @@ Markdown прибирается (хвостовые пробелы, лишние
 
    Он сам: найдёт Python → поставит актуальный комплект `md-converters`
    из текущей папки вместе с зависимостями → пропишет команды
-   `tomd` / `pdf2md` / `html2md` → добавит пункт «Отправить → Конвертировать в
-   Markdown» → проверит на примере.
+   `tomd` / `pdf2md` / `html2md` → спросит, добавлять ли пункты в
+   контекстное меню Проводника (Send to, Open with, Show more options) →
+   проверит на примере.
 
 4. **Откройте новое окно PowerShell** и пользуйтесь.
 
@@ -501,11 +514,13 @@ Jupyter notebooks, RSS, and web pages by URL.
 
 **Install (Windows):** run `install.ps1` (PowerShell 7.2+) — it installs
 `markitdown[pdf,docx,pptx,xlsx,xls,outlook]>=0.1.0,<1.0.0`, registers the
-`tomd` / `pdf2md` / `html2md` commands in your PowerShell profile, and adds
-a right-click *Send to → Convert to Markdown* entry. The same entry is
-also registered in Explorer's main context menu (under `Open with` in
-Windows 11 22H2+, directly in the short menu in Windows 10). Pass
-`-SkipContextMenu` to install.ps1 to skip the main menu entry.
+`tomd` / `pdf2md` / `html2md` commands in your PowerShell profile, and
+**prompts** whether to add a right-click *Send to → Convert to Markdown*
+entry plus the corresponding entries in the main context menu (`Open with`
+in Windows 11 22H2+, `Show more options` in Windows 11 / direct menu in
+Windows 10). Pass `-Menu` to install without the prompt, or `-NoMenu` to
+install commands only (no registry changes). All context menu entries are
+in `HKCU\Software\Classes\...` — no admin rights required.
 
 **Install (any OS):** `pip install .` exposes `tomd`, `pdf2md`, `html2md`.
 

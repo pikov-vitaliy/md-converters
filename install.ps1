@@ -3,36 +3,48 @@
     Установщик комплекта конвертеров в Markdown (tomd / pdf2md / html2md).
 
 .DESCRIPTION
-    Делает пять вещей:
+    Установщик делает следующее:
       1) находит Python (или подсказывает, где скачать);
       2) ставит текущий комплект md-converters и его зависимости
          (MarkItDown для PDF, Word, Excel и др.);
       3) прописывает команды tomd / pdf2md / html2md в профиль PowerShell,
          указывая на ту папку, ИЗ КОТОРОЙ запущен этот скрипт;
-      4) добавляет пункт «Конвертировать в Markdown» в меню правого клика
-         Проводника (Отправить / Send to);
-      5) добавляет тот же пункт в основное контекстное меню Проводника:
-         - в Win10 — сразу в коротком меню;
-         - в Win11 22H2+ — в подменю "Open with" (рядом с WinRAR / VS Code
-           / Notepad++), а также в "Show more options" классическим путём.
-         Запись создаётся в HKCU — без админ-прав.
+      4) ОПЦИОНАЛЬНО (после явного согласия пользователя или флага -Menu)
+         добавляет пункт «Конвертировать в Markdown» в:
+         - Send to Проводника;
+         - подменю "Open with" в Win11 22H2+;
+         - "Show more options" в Win11 / прямое меню в Win10.
+         Все записи — в HKCU, без админ-прав.
+      5) Прогоняет смоук-тест на примере.
 
-    Скрипт можно запускать сколько угодно раз — старые строки он
-    аккуратно убирает и прописывает заново (идемпотентно).
+    Скрипт идемпотентен: можно запускать повторно, старые записи
+    корректно перетираются.
 
-.PARAMETER SkipContextMenu
-    Не регистрировать пункт в основном контекстном меню Проводника
-    (только Send to). По умолчанию — оба.
+.PARAMETER Menu
+    Добавить пункты в контекстное меню Проводника без интерактивного
+    вопроса. Полезно для скриптов/CI, где пользователь уже решил.
+
+.PARAMETER NoMenu
+    НЕ добавлять пункты в контекстное меню и НЕ задавать вопрос.
+    Полезно для CI и минимальной установки.
 
 .EXAMPLE
     pwsh -ExecutionPolicy Bypass -File .\install.ps1
+    # Интерактивный режим: после установки спросит про контекстное меню.
+
 .EXAMPLE
-    pwsh -ExecutionPolicy Bypass -File .\install.ps1 -SkipContextMenu
+    pwsh -ExecutionPolicy Bypass -File .\install.ps1 -Menu
+    # Установить + сразу добавить пункты в контекстное меню.
+
+.EXAMPLE
+    pwsh -ExecutionPolicy Bypass -File .\install.ps1 -NoMenu
+    # Установить только команды, контекстное меню не трогать.
 #>
 
 [CmdletBinding()]
 param(
-    [switch]$SkipContextMenu
+    [switch]$Menu,
+    [switch]$NoMenu
 )
 
 $ErrorActionPreference = 'Stop'
@@ -51,6 +63,12 @@ if ($PSVersionTable.PSVersion -lt [version]'7.2') {
     Write-Host "Нужен PowerShell 7.2+ (pwsh). Запустите так:" -ForegroundColor Red
     Write-Host "  pwsh -ExecutionPolicy Bypass -File .\install.ps1"
     Write-Host "Если pwsh не установлен: winget install Microsoft.PowerShell"
+    exit 1
+}
+
+# -Menu и -NoMenu несовместимы — это явная ошибка пользователя, а не молча.
+if ($Menu -and $NoMenu) {
+    Write-Host "Флаги -Menu и -NoMenu несовместимы. Выберите один." -ForegroundColor Red
     exit 1
 }
 
@@ -119,7 +137,7 @@ Write-Host "Комплект установлен." -ForegroundColor Green
 $profilePath = $PROFILE
 $profileDir  = Split-Path $profilePath
 if (-not (Test-Path $profileDir))  { New-Item -ItemType Directory -Force $profileDir | Out-Null }
-if (-not (Test-Path $profilePath)) { New-Item -ItemType File $profilePath | Out-Null }
+if (-not (Test-Path $profilePath)) { New-Item -ItemType File -Force $profilePath | Out-Null }
 
 # Убираем прежний блок и любые ранее прописанные строки наших команд.
 $old   = @(Get-Content $profilePath -ErrorAction SilentlyContinue)
@@ -153,8 +171,71 @@ Set-Content -Path $profilePath -Value $content -Encoding utf8BOM
 Write-Host "`nКоманды tomd / pdf2md / html2md прописаны в профиль:" -ForegroundColor Green
 Write-Host "  $profilePath"
 
-# --- 4) Пункт «Отправить → Конвертировать в Markdown» ---------------------
-try {
+# --- 4) Контекстное меню Проводника — по решению пользователя -------------
+# В Windows 11 22H2+ сокращённое меню рендерит в верхней части только
+# нативные shell extensions. Простая запись в HKCU\...\shell\... на Win11 24H2
+# видна только в "Show more options". Чтобы пункт попал в видимую часть
+# (а именно — в подменю "Open with", как у WinRAR/VS Code/Notepad++),
+# регистрируем .cmd как "приложение" в HKCU\Software\Classes\Applications\
+# и вешаем на него shell-команду. Плюс оставляем запись в \* для случая
+# Win10 и для тех, кто пользуется "Show more options" в Win11.
+#
+# ВАЖНО: пункт в Send to + реестр — это изменение системного состояния.
+# Без явного согласия пользователя установщик их НЕ создаёт. Режимы:
+#   -Menu    — добавить, без вопроса.
+#   -NoMenu  — не добавлять, без вопроса.
+#   (без флагов) — спросить интерактивно.
+
+# Разыскиваем уже существующие записи — используется для самопроверки
+# (на пустой машине их быть не должно).
+$existingMenuItems = @(
+    (Test-Path -LiteralPath "$env:APPDATA\Microsoft\Windows\SendTo\Конвертировать в Markdown.lnk")
+    (Test-Path -LiteralPath 'Registry::HKEY_CURRENT_USER\Software\Classes\*\shell\ConvertToMarkdown')
+    (Test-Path -LiteralPath 'Registry::HKEY_CURRENT_USER\Software\Classes\Applications\sendto-convert.cmd')
+)
+$anyExisting = $existingMenuItems -contains $true
+
+$installMenu = $false
+if ($Menu) {
+    $installMenu = $true
+} elseif ($NoMenu) {
+    $installMenu = $false
+} else {
+    # Интерактивный вопрос.
+    Write-Host ""
+    Write-Host "Хотите добавить пункты в контекстное меню Проводника?" -ForegroundColor Cyan
+    Write-Host "  Будет создано:"
+    Write-Host "    - Ярлык в Send to:  Конвертировать в Markdown"
+    Write-Host "    - Подменю Open with:  Конвертировать в Markdown (Win11 22H2+)"
+    Write-Host "    - Show more options:  Конвертировать в Markdown (Win11) /"
+    Write-Host "      прямое меню (Win10)"
+    Write-Host "  Все записи — в HKCU, без админ-прав. Позже можно удалить,"
+    Write-Host "  переустановив с -NoMenu."
+    if ($anyExisting) {
+        Write-Host "  Найдены существующие записи — будут пересозданы." -ForegroundColor Yellow
+    }
+    $answer = Read-Host "  Добавить? [Y/n]"
+    # Пустой ответ = Y (по умолчанию добавляем). 'n' / 'N' / 'no' / 'нет' = не добавлять.
+    if ([string]::IsNullOrWhiteSpace($answer)) {
+        $installMenu = $true
+    } else {
+        $installMenu = $answer -in @('y', 'Y', 'yes', 'Yes', 'YES', 'д', 'Д', 'да', 'Да', 'ДА')
+    }
+    Write-Host ""
+}
+
+# --- 4-pre) Подготовительная фаза: снять все наши записи, если были ----
+# Это выполняется ВСЕГДА, независимо от того, добавляем мы сейчас или
+# снимаем — идемпотентность: повторная установка с любым режимом должна
+# оставить систему в согласованном состоянии.
+$shellKey = 'Registry::HKEY_CURRENT_USER\Software\Classes\*\shell\ConvertToMarkdown'
+$appBase  = 'Registry::HKEY_CURRENT_USER\Software\Classes\Applications\sendto-convert.cmd'
+$finalLnk = Join-Path $env:APPDATA 'Microsoft\Windows\SendTo\Конвертировать в Markdown.lnk'
+if (Test-Path -LiteralPath $shellKey) { Remove-Item -LiteralPath $shellKey -Recurse -Force }
+if (Test-Path -LiteralPath $appBase)  { Remove-Item -LiteralPath $appBase  -Recurse -Force }
+if (Test-Path -LiteralPath $finalLnk) { Remove-Item -LiteralPath $finalLnk -Force }
+
+if ($installMenu) {
     $cmdPath = Join-Path $kit 'sendto-convert.cmd'
     $cmdText = @"
 @echo off
@@ -163,45 +244,39 @@ chcp 65001 >nul
 echo.
 pause
 "@
-    Set-Content -Path $cmdPath -Value $cmdText -Encoding utf8NoBOM
+    try {
+        Set-Content -Path $cmdPath -Value $cmdText -Encoding utf8NoBOM
+    } catch {
+        Write-Host "Не удалось создать $cmdPath (не критично): $_" -ForegroundColor Yellow
+    }
 
-    # WScript.Shell теряет кириллицу в ИМЕНИ .lnk (downconvert в ANSI),
-    # поэтому создаём по латинскому пути, затем переименовываем (Unicode).
-    $sendTo   = Join-Path $env:APPDATA 'Microsoft\Windows\SendTo'
-    $tmpLnk   = Join-Path $sendTo '_md_convert_tmp.lnk'
-    $finalLnk = Join-Path $sendTo 'Конвертировать в Markdown.lnk'
-    if (Test-Path -LiteralPath $finalLnk) { Remove-Item -LiteralPath $finalLnk -Force }
-    $ws  = New-Object -ComObject WScript.Shell
-    $lnk = $ws.CreateShortcut($tmpLnk)
-    $lnk.TargetPath       = $cmdPath
-    $lnk.WorkingDirectory = $kit
-    # WScript.Shell через COM-маршалинг в PowerShell 7 искажает кириллицу
-    # в Description (UTF-16 обрезается). Имя пункта берётся из имени файла
-    # .lnk — Description для тултипа не обязателен.
-    $lnk.Save()
-    Move-Item -LiteralPath $tmpLnk -Destination $finalLnk -Force
-    Write-Host "Пункт «Отправить → Конвертировать в Markdown» добавлен." -ForegroundColor Green
-} catch {
-    Write-Host "Не удалось добавить пункт в Send to (не критично): $_" -ForegroundColor Yellow
-}
+    # --- 4-1) Send to -----------------------------------------------------
+    try {
+        # WScript.Shell теряет кириллицу в ИМЕНИ .lnk (downconvert в ANSI),
+        # поэтому создаём по латинскому пути, затем переименовываем (Unicode).
+        $sendTo = Join-Path $env:APPDATA 'Microsoft\Windows\SendTo'
+        $tmpLnk = Join-Path $sendTo '_md_convert_tmp.lnk'
+        $ws  = New-Object -ComObject WScript.Shell
+        $lnk = $ws.CreateShortcut($tmpLnk)
+        $lnk.TargetPath       = $cmdPath
+        $lnk.WorkingDirectory = $kit
+        # WScript.Shell через COM-маршалинг в PowerShell 7 искажает кириллицу
+        # в Description (UTF-16 обрезается), а IconLocation кладёт только
+        # ASCII-часть. Имя пункта берётся из имени файла .lnk — Description
+        # не обязателен, иконка берётся из реестра (HKCU\...\Applications\...),
+        # где она задаётся без COM-обёртки и работает корректно.
+        $lnk.Save()
+        Move-Item -LiteralPath $tmpLnk -Destination $finalLnk -Force
+        Write-Host "Пункт «Отправить → Конвертировать в Markdown» добавлен." -ForegroundColor Green
+    } catch {
+        Write-Host "Не удалось добавить пункт в Send to (не критично): $_" -ForegroundColor Yellow
+    }
 
-# --- 4b) Пункт в основном контекстном меню Проводника ---------------------
-# В Windows 11 22H2+ сокращённое меню рендерит в верхней части только
-# нативные shell extensions. Простая запись в HKCU\...\shell\... на Win11 24H2
-# видна только в "Show more options". Чтобы пункт попал в видимую часть
-# (а именно — в подменю "Open with", как у WinRAR/VS Code/Notepad++),
-# регистрируем .cmd как "приложение" в HKCU\Software\Classes\Applications\
-# и вешаем на него shell-команду. Плюс оставляем запись в \* для случая
-# Win10 и для тех, кто пользуется "Show more options" в Win11.
-if (-not $SkipContextMenu) {
+    # --- 4-2) \* \shell — для Win10 и "Show more options" в Win11 -------
     $menuTitle = 'Конвертировать в Markdown'
     $iconValue = "$python,0"
     $cmdLine   = '"' + $cmdPath + '" "%1"'
-
-    # --- 4b-1) Запись в \* \shell — для Win10 и "Show more options" в Win11.
-    $shellKey = 'Registry::HKEY_CURRENT_USER\Software\Classes\*\shell\ConvertToMarkdown'
-    $shellCmd = "$shellKey\command"
-    if (Test-Path -LiteralPath $shellKey) { Remove-Item -LiteralPath $shellKey -Recurse -Force }
+    $shellCmd  = "$shellKey\command"
     try {
         New-Item -Path $shellKey -Force | Out-Null
         Set-ItemProperty -LiteralPath $shellKey -Name '(default)' -Value $menuTitle
@@ -214,14 +289,11 @@ if (-not $SkipContextMenu) {
         Write-Host "Не удалось добавить пункт в 'Show more options' (не критично): $_" -ForegroundColor Yellow
     }
 
-    # --- 4b-2) Регистрация .cmd как приложения — для подменю "Open with" в Win11.
-    # Имя файла .cmd не должно содержать пробелов/спецсимволов (наш — годится).
-    $appBase  = 'Registry::HKEY_CURRENT_USER\Software\Classes\Applications\sendto-convert.cmd'
+    # --- 4-3) Applications\... — для подменю "Open with" в Win11 ---------
     $appName  = "$appBase\shell\ConvertToMarkdown"
     $appCmd   = "$appName\command"
     $appInfo  = "$appBase\DefaultIcon"
     $appTypes = "$appBase\SupportedTypes"
-    if (Test-Path -LiteralPath $appBase) { Remove-Item -LiteralPath $appBase -Recurse -Force }
     try {
         New-Item -Path $appBase -Force | Out-Null
         # FriendlyAppName — это то, что увидит пользователь в подменю "Open with".
@@ -246,6 +318,9 @@ if (-not $SkipContextMenu) {
     } catch {
         Write-Host "Не удалось добавить пункт в 'Open with' (не критично): $_" -ForegroundColor Yellow
     }
+} else {
+    Write-Host "Пункты в контекстное меню не добавлены (по запросу). Для добавления:" -ForegroundColor Yellow
+    Write-Host "  pwsh -ExecutionPolicy Bypass -File .\install.ps1 -Menu" -ForegroundColor Yellow
 }
 
 # --- 5) Смоук-тест --------------------------------------------------------
@@ -261,9 +336,11 @@ if (Test-Path $sample) {
 Write-Host "`n=== Готово! ===" -ForegroundColor Green
 Write-Host "Откройте НОВОЕ окно PowerShell (или выполните:  . `$PROFILE )"
 Write-Host "Команды:  tomd  (любой формат),  pdf2md,  html2md"
-Write-Host "В Проводнике: правый клик → Отправить → Конвертировать в Markdown"
-if (-not $SkipContextMenu) {
-    Write-Host "  и в подменю 'Open with' основного меню — пункт «Конвертировать в Markdown»." -ForegroundColor Green
-    Write-Host "  Также доступно через 'Show more options' (Win11) / прямо в меню (Win10)."
+if ($installMenu) {
+    Write-Host "В Проводнике:"
+    Write-Host "  - Send to: «Конвертировать в Markdown»"
+    Write-Host "  - Open with (Win11 22H2+): «Конвертировать в Markdown»"
+    Write-Host "  - Show more options (Win11) / прямое меню (Win10):"
+    Write-Host "    «Конвертировать в Markdown»"
 }
 Write-Host "Справка:  tomd --help"
