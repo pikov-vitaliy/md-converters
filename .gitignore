@@ -24,3 +24,19 @@ desktop.ini
 !README.md
 !CLAUDE.md
 !CODEX.md
+
+# Одноразовые артефакты SCA/pip-audit/license-gate: генерируются локально
+# командами из README и публикуются в CI как job supply-chain. В репозиторий
+# коммитить нельзя — бумажный след аудита хранится централизованно в
+# docs/vibe-audit/evidence/<дата>/, новые прогоны — в свежую подпапку там же.
+# Привязка к корню (!/) ловит случайный `uv export --output-file foo.json` в
+# корне; в подпапках те же имена оставляем как есть, чтобы не ломать
+# существующее дерево docs/ и локальные отчёты разработчика.
+/cyclonedx-*.json
+/cyclonedx-*.cdx.json
+/requirements-runtime-audit.txt
+/requirements-dev-audit.txt
+/supply-chain-licenses.json
+/supply-chain-dev-licenses.json
+/pip-audit*.txt
+/pip-audit*.json

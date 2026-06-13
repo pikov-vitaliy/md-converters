@@ -306,7 +306,13 @@ ISO/IEC 27001 A.8.8.
 7. Хранить в репозитории воспроизводимые исходники контроля поставки:
    `uv.lock`, `tools/`, CI workflow и Dependabot config. Одноразовые SBOM и
    license reports формировать командой или CI artifact, чтобы не плодить
-   timestamp/UUID-шум в истории.
+   timestamp/UUID-шум в истории. Если делается официальный аудит релиза,
+   «бумажный след» (SBOM, requirements-аудит, license inventory) кладётся
+   централизованно в `docs/vibe-audit/evidence/<ГГГГ-ММ-ДД>/` — по одной
+   подпапке на дату, без разброда по корню и соседним директориям. В
+   `.gitignore` стоит гард на корневые `cyclonedx-*.json`,
+   `requirements-*-audit.txt` и `supply-chain-licenses.json`, чтобы
+   случайный локальный прогон SCA не оседал в репозитории мимо этой схемы.
 
 Критерии приемки:
 

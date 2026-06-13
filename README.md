@@ -412,6 +412,13 @@ uv run --frozen pip-audit --progress-spinner off -r requirements-dev-audit.txt
 аудитом; исходники проверок (`uv.lock`, `tools/`, workflow) хранятся в
 репозитории.
 
+Файлы, сгенерированные в корне репозитория (`cyclonedx-*.json`,
+`requirements-*-audit.txt`, `supply-chain-licenses.json`), в `.gitignore`
+добавлены в ignore — случайный локальный прогон SCA не осядет коммитом
+мимо схемы. «Бумажный след» официальных аудитов релиза хранится
+централизованно в `docs/vibe-audit/evidence/<ГГГГ-ММ-ДД>/` — по одной
+подпапке на дату.
+
 Политика лицензий по умолчанию блокирует сильный copyleft и лицензии с
 нежелательными ограничениями: AGPL/GPL/LGPL, SSPL, Commons Clause, Sleepycat.
 `UNKNOWN` пока считается замечанием для ручной проверки, а не автоматическим
