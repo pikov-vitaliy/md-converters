@@ -260,11 +260,11 @@ pause
         $lnk = $ws.CreateShortcut($tmpLnk)
         $lnk.TargetPath       = $cmdPath
         $lnk.WorkingDirectory = $kit
-        # WScript.Shell через COM-маршалинг в PowerShell 7 искажает кириллицу
-        # в Description (UTF-16 обрезается), а IconLocation кладёт только
-        # ASCII-часть. Имя пункта берётся из имени файла .lnk — Description
-        # не обязателен, иконка берётся из реестра (HKCU\...\Applications\...),
-        # где она задаётся без COM-обёртки и работает корректно.
+        # IconLocation здесь не задаём: WScript.Shell через COM-маршалинг
+        # в PowerShell 7 падает на ".ico,0" (выкидывает "Value does not fall
+        # within the expected range"). Explorer и без этого берёт иконку
+        # из HKCU\Software\Classes\Applications\sendto-convert.cmd\DefaultIcon
+        # (там convert.ico,0 задаётся без COM-обёртки, и она работает).
         $lnk.Save()
         Move-Item -LiteralPath $tmpLnk -Destination $finalLnk -Force
         Write-Host "Пункт «Отправить → Конвертировать в Markdown» добавлен." -ForegroundColor Green
@@ -274,7 +274,14 @@ pause
 
     # --- 4-2) \* \shell — для Win10 и "Show more options" в Win11 -------
     $menuTitle = 'Конвертировать в Markdown'
-    $iconValue = "$python,0"
+    # Своя иконка convert.ico (лежит рядом с install.ps1). Используем её
+    # во всех трёх местах — Send to, \* \shell, Applications\... — чтобы
+    # везде был один и тот же значок. До генерации собственного .ico
+    # использовался $python,0, но он тянул за собой жёлтую иконку
+    # Python и не подходил по смыслу.
+    # Реестр Windows для Icon ожидает "path,index"; для .ico индекс = 0.
+    $iconFile  = Join-Path $kit 'convert.ico'
+    $iconValue = "$iconFile,0"
     $cmdLine   = '"' + $cmdPath + '" "%1"'
     $shellCmd  = "$shellKey\command"
     try {
