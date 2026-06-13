@@ -63,6 +63,14 @@ from datetime import date
 from pathlib import Path
 from urllib.parse import unquote, urljoin, urlparse
 
+# pypdfium2 используется только для подсчёта страниц в PDF-диагностике
+# (image-only detection). Импортируем лениво внутри функции — при отсутствии
+# библиотеки остальная функциональность продолжает работать.
+try:
+    import pypdfium2  # noqa: F401  (used in _pdf_page_count)
+except ImportError:  # pragma: no cover — pypdfium2 is a runtime dep
+    pypdfium2 = None  # type: ignore[assignment]
+
 # Windows-консоль бывает в cp1252/cp866/cp1251 — без reconfigure кириллица
 # в наших сообщениях уезжает в «кракозябры». Делаем ДО всех импортов, чтобы
 # даже предупреждения сторонних библиотек шли в UTF-8.
@@ -352,7 +360,11 @@ def _source_id_matches(existing: str | None, expected: str | None) -> bool:
 
 def front_matter(source: str, title: str | None, tool: str,
                  source_path: str | None = None,
-                 source_id: str | None = None) -> str:
+                 source_id: str | None = None,
+                 pdf_text_layer: str | None = None) -> str:
+    """Build YAML front-matter. pdf_text_layer — PDF-specific diagnostic:
+    'present' (text-rich PDF) or 'absent' (image-only / scan, no text).
+    None — поле не пишется (используется для не-PDF форматов)."""
     lines = ["---"]
     if title:
         lines.append(f"title: {_yaml_str(title)}")
@@ -362,10 +374,52 @@ def front_matter(source: str, title: str | None, tool: str,
         lines.append(f"source_path: {_yaml_str(source_path)}")
     if source_id:
         lines.append(f"source_id: {_yaml_str(source_id)}")
+    if pdf_text_layer is not None:
+        lines.append(f"pdf_text_layer: {pdf_text_layer}")
     lines.append(f"converted: {date.today().isoformat()}")
     lines.append(f"generator: {tool} {__version__} (MarkItDown)")
     lines.append("---")
     return "\n".join(lines) + "\n\n"
+
+
+# PDF-диагностика: средняя плотность печатных символов на страницу.
+# 20 символов/стр — нижний порог «какой-то осмысленный текст». Ниже —
+# либо image-only / scan-only PDF, либо повреждённый файл. Подобрано
+# эмпирически: типичный «пустой» PDF (скан без OCR) даёт 0-5 символов
+# на страницу (пробелы и NUL); нормальный текстовый PDF — сотни.
+_PDF_MIN_CHARS_PER_PAGE = 20
+
+
+def _pdf_page_count(path: Path) -> int | None:
+    """Число страниц в PDF, или None, если не удалось открыть (не PDF,
+    битый файл, зашифрованный и т.п.). Использует pypdfium2."""
+    if pypdfium2 is None:
+        return None
+    try:
+        with pypdfium2.PdfDocument(str(path)) as doc:
+            return len(doc)
+    except Exception:
+        return None
+
+
+def _pdf_text_layer_diagnose(
+    text: str, page_count: int | None
+) -> str | None:
+    """'present' | 'absent' | None (неизвестно).
+
+    None возвращается, если:
+    - не PDF (page_count is None) — диагностика не выполняется;
+    - PDF без страниц — нет данных.
+    Иначе сравнивает печатные символы в результате MarkItDown с порогом
+    pages * _PDF_MIN_CHARS_PER_PAGE.
+    """
+    if not page_count:
+        return None
+    printable = sum(1 for ch in text if ch.isprintable() and not ch.isspace())
+    threshold = page_count * _PDF_MIN_CHARS_PER_PAGE
+    if printable < threshold:
+        return "absent"
+    return "present"
 
 
 def _img_placeholder(match: re.Match) -> str:
@@ -571,7 +625,8 @@ def _emit(target: Path, result, source: str, frontmatter: bool,
           phantom_images: bool = False,
           source_path: str | None = None,
           source_id: str | None = None,
-          safe_markdown: bool = True) -> None:
+          safe_markdown: bool = True,
+          pdf_text_layer: str | None = None) -> None:
     text = tidy(
         result.text_content,
         keep_images,
@@ -580,7 +635,10 @@ def _emit(target: Path, result, source: str, frontmatter: bool,
     )
     if frontmatter:
         title = getattr(result, "title", None)
-        text = front_matter(source, title, tool, source_path, source_id) + text
+        text = front_matter(
+            source, title, tool, source_path, source_id,
+            pdf_text_layer=pdf_text_layer,
+        ) + text
     target.parent.mkdir(parents=True, exist_ok=True)
     target.write_text(text, encoding="utf-8")
     extra = f" ({note})" if note else ""
@@ -843,12 +901,34 @@ def _convert_file_to_target(path: Path, target: Path, opts: dict,
     except Exception as exc:
         print(f"[error] Failed to convert {path.name}: {exc}")
         return "fail"
+
+    # PDF-специфичная диагностика: image-only / scan-only PDF.
+    # Если у PDF нет текстового слоя — MarkItDown вернёт пустой/мусорный
+    # Markdown, и пользователь должен знать, почему.
+    pdf_text_layer = None
+    if suffix == ".pdf":
+        page_count = _pdf_page_count(path)
+        if page_count is not None:
+            pdf_text_layer = _pdf_text_layer_diagnose(
+                result.text_content, page_count
+            )
+            if pdf_text_layer == "absent":
+                print(
+                    f"[warning] {path.name}: PDF without a text layer "
+                    f"(only images / scan, {page_count} page(s)). "
+                    f"Open in ABBYY FineReader or run "
+                    f"`ocrmypdf {path.name} {path.stem}-ocr.pdf` "
+                    f"(requires Tesseract).",
+                    file=sys.stderr,
+                )
+
     try:
         _emit(target, result, path.name, opts["frontmatter"],
               opts["keep_images"], opts["tool"], note,
               phantom_images=(suffix == ".pptx"),
               source_path=str(path), source_id=source_id,
-              safe_markdown=not opts.get("unsafe_raw_markdown", False))
+              safe_markdown=not opts.get("unsafe_raw_markdown", False),
+              pdf_text_layer=pdf_text_layer)
     except OSError as exc:
         print(f"[error] Failed to write {target.name}: {exc}")
         return "fail"
