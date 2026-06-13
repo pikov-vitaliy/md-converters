@@ -419,6 +419,11 @@ uv run --frozen pip-audit --progress-spinner off -r requirements-dev-audit.txt
 централизованно в `docs/vibe-audit/evidence/<ГГГГ-ММ-ДД>/` — по одной
 подпапке на дату.
 
+Идеи развития, которые не вошли в v1.1.0 (OCR сканов, `--mirror` для
+`-o`, пресет «для проверки студенческих работ», выкидывание `.msg` из
+зависимостей), собраны в `docs/vibe-audit/future-ideas.md` — заметки
+на будущее, не план.
+
 Политика лицензий по умолчанию блокирует сильный copyleft и лицензии с
 нежелательными ограничениями: AGPL/GPL/LGPL, SSPL, Commons Clause, Sleepycat.
 `UNKNOWN` пока считается замечанием для ручной проверки, а не автоматическим
