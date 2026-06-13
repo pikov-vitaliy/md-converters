@@ -7,7 +7,7 @@ import convert_to_md
 
 
 def test_private_url_is_blocked_by_default():
-    with pytest.raises(ValueError, match="непубличный адрес"):
+    with pytest.raises(ValueError, match="non-public address"):
         convert_to_md._check_url_allowed(
             "http://127.0.0.1:8000/admin",
             allow_private=False,
@@ -35,7 +35,7 @@ def test_public_url_policy_allows_public_resolved_ip(monkeypatch):
 
 
 def test_url_policy_rejects_non_http_schemes():
-    with pytest.raises(ValueError, match="http и https"):
+    with pytest.raises(ValueError, match="http and https"):
         convert_to_md._check_url_allowed(
             "file:///c:/secret.txt",
             allow_private=True,
@@ -48,7 +48,7 @@ def test_read_limited_response_rejects_large_content_length():
         iter_content=lambda chunk_size: [b"ignored"],
     )
 
-    with pytest.raises(ValueError, match="больше лимита"):
+    with pytest.raises(ValueError, match="exceeds the limit"):
         convert_to_md._read_limited_response(response, max_bytes=5)
 
 
@@ -58,7 +58,7 @@ def test_read_limited_response_rejects_large_stream_without_header():
         iter_content=lambda chunk_size: [b"1234", b"5678"],
     )
 
-    with pytest.raises(ValueError, match="больше лимита"):
+    with pytest.raises(ValueError, match="exceeds the limit"):
         convert_to_md._read_limited_response(response, max_bytes=5)
 
 

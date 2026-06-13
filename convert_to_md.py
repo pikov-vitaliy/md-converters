@@ -1,46 +1,46 @@
 # -*- coding: utf-8 -*-
-"""Универсальная конвертация документов в Markdown (MarkItDown, Microsoft).
+"""Universal document -> Markdown converter (powered by MarkItDown, Microsoft).
 
-Понимает формат по расширению: PDF, HTML, Word (.docx), Excel (.xlsx),
+Detects the format by extension: PDF, HTML, Word (.docx), Excel (.xlsx),
 PowerPoint (.pptx), CSV, JSON, XML, EPUB, Outlook (.msg), Jupyter (.ipynb),
-RSS, а также веб-страницы по URL.
+RSS, and web pages by URL.
 
-Использование:
-    python convert_to_md.py                      — интерактивный режим.
-    python convert_to_md.py file.docx [...]      — конкретные файлы.
-    python convert_to_md.py *                    — все документы в папке.
-    python convert_to_md.py C:\\reports -r        — папка и вложенные.
-    python convert_to_md.py https://site/page    — веб-страница по URL.
+Usage:
+    python convert_to_md.py                      — interactive mode.
+    python convert_to_md.py file.docx [...]      — explicit files.
+    python convert_to_md.py *                    — all documents in the folder.
+    python convert_to_md.py C:\\reports -r        — folder and nested ones.
+    python convert_to_md.py https://site/page    — web page by URL.
 
-Флаги:
-    -r, --recursive    обходить вложенные папки (node_modules/.git и т.п.
-                       пропускаются автоматически).
-    -f, --force        перезаписывать существующие .md (по умолчанию они
-                       пропускаются, чтобы не затереть правки).
-    -o, --output DIR   складывать .md в эту папку, а не рядом с исходником.
-    --only EXT[,EXT]   при маске/папке брать только эти расширения
-                       (например: --only pdf  или  --only docx,xlsx).
-    --keep-images      не трогать картинки: оставить base64 и ссылки-
-                       заглушки картинок из .pptx (по умолчанию они
-                       сворачиваются в компактный плейсхолдер).
+Flags:
+    -r, --recursive    recurse into subfolders (node_modules/.git etc. are
+                       skipped automatically).
+    -f, --force        overwrite existing .md (by default they are skipped
+                       to avoid clobbering manual edits).
+    -o, --output DIR   write .md into this folder instead of next to source.
+    --only EXT[,EXT]   when a glob/folder is given, keep only these
+                       extensions (e.g.: --only pdf  or  --only docx,xlsx).
+    --keep-images      do not touch images: keep base64 and PPTX phantom
+                       image links (by default they are folded into a
+                       compact placeholder).
     --unsafe-raw-markdown
-                       не очищать потенциально опасные ссылки/HTML в
-                       выходном Markdown (для доверенных источников).
+                       do not sanitize potentially dangerous links/HTML in
+                       the output Markdown (for trusted sources only).
     --allow-private-url
-                       разрешить URL на localhost/private/link-local адреса.
-    --url-timeout SEC  timeout сетевой загрузки URL (по умолчанию 20).
-    --max-url-mb MB    максимум данных URL-ответа (по умолчанию 50).
-    --max-input-mb MB  максимум размера локального файла (по умолчанию 100).
+                       allow URLs pointing at localhost / private / link-local
+                       addresses.
+    --url-timeout SEC  URL fetch timeout (default 20).
+    --max-url-mb MB    URL response size cap (default 50).
+    --max-input-mb MB  local file size cap (default 100).
     --conversion-timeout SEC
-                       timeout конвертации одного локального файла
-                       (по умолчанию 120).
-    --no-sandbox       конвертировать локальные файлы в основном процессе.
-    --no-frontmatter   не добавлять YAML-блок (source/converted) в начало.
+                       per-file conversion timeout (default 120).
+    --no-sandbox       convert local files in the main process.
+    --no-frontmatter   do not add the YAML header (source/converted).
 
-Результат: то же имя, расширение .md (рядом с исходником или в папке -o);
-при совпадении имён результата добавляется суффикс " (2)", " (3)"...
-Расширение при вводе можно не указывать. Кодировка HTML (UTF-8, cp1251 и
-др.) определяется автоматически.
+Output: same name with .md extension (next to the source or in -o folder);
+on name collision a " (2)", " (3)" suffix is appended. The extension can
+be omitted at the input. HTML encoding (UTF-8, cp1251, etc.) is detected
+automatically.
 """
 
 from __future__ import annotations
@@ -63,6 +63,17 @@ from datetime import date
 from pathlib import Path
 from urllib.parse import unquote, urljoin, urlparse
 
+# Windows-консоль бывает в cp1252/cp866/cp1251 — без reconfigure кириллица
+# в наших сообщениях уезжает в «кракозябры». Делаем ДО всех импортов, чтобы
+# даже предупреждения сторонних библиотек шли в UTF-8.
+for _stream in (sys.stdout, sys.stderr):
+    _enc = _stream.encoding
+    if _enc and _enc.lower() not in ("utf-8", "utf8"):
+        try:
+            _stream.reconfigure(encoding="utf-8")
+        except (AttributeError, ValueError):
+            pass  # не-текстовые потоки в редких средах
+
 # markitdown тянет pydub, а тот при импорте предупреждает, что нет
 # ffmpeg — для конвертации документов он не нужен, глушим.
 warnings.filterwarnings("ignore", message="Couldn't find ffmpeg")
@@ -75,15 +86,10 @@ except ImportError:
 
 def _missing_markitdown() -> None:
     # Не [all]: на Python 3.14 pip из-за него молча откатывается на 0.0.2.
-    print("Библиотека markitdown не установлена. Установите командой:")
-    print('  pip install "markitdown[pdf,docx,pptx,xlsx,xls,outlook]'
-          '>=0.1.0,<1.0.0"')
+    print("markitdown is not installed. Install it with:")
+    print('  pip install "markitdown[pdf,docx,pptx,xlsx,xls,outlook]"'
+          '>=0.1.0,<1.0.0')
     sys.exit(1)
-
-# Windows-консоль бывает в cp1252/cp866 — переключаем вывод на UTF-8.
-_encoding = sys.stdout.encoding
-if _encoding and _encoding.lower() not in ("utf-8", "utf8"):
-    sys.stdout.reconfigure(encoding="utf-8")
 
 # Форматы, которые берём при обходе папки/маски (по одному явному файлу
 # конвертируем что угодно — MarkItDown сам разберётся).
@@ -191,17 +197,17 @@ def _suffix_set(spec: str) -> set[str]:
         if not part:
             continue
         if part.startswith("-"):
-            raise ValueError(f"расширение не может начинаться с '-': {raw}")
+            raise ValueError(f"extension cannot start with '-': {raw}")
         if any(ch in part for ch in ("/", "\\", ":")):
-            raise ValueError(f"расширение содержит путь: {raw}")
+            raise ValueError(f"extension contains a path separator: {raw}")
         if any(ord(ch) < 32 for ch in part):
-            raise ValueError(f"расширение содержит управляющий символ: {raw}")
+            raise ValueError(f"extension contains a control character: {raw}")
         if part.startswith("*."):
             part = part[1:]
         if part.startswith("."):
             part = part[1:]
         if not _EXTENSION.fullmatch(part):
-            raise ValueError(f"недопустимое расширение: {raw}")
+            raise ValueError(f"invalid extension: {raw}")
         result.add("." + part)
     return result
 
@@ -237,8 +243,8 @@ def scan_dir(root: Path, recursive: bool,
             if item.is_file() and item.suffix.lower() in suffixes:
                 files.append(item)
     if not files:
-        where = "подпапках" if recursive else "папке"
-        print(f"[ошибка] В {where} {root} подходящих файлов не найдено.")
+        where = "subfolders" if recursive else "folder"
+        print(f"[error] No matching files found in {where} {root}.")
     return sorted(files)
 
 
@@ -283,7 +289,7 @@ def collect(token: str, recursive: bool,
                 pattern = str(parent / "**" / path.name)
         files = _gather_glob(pattern, recursive or "**" in pattern, suffixes)
         if not files:
-            print(f"[ошибка] По маске {token} подходящих файлов не найдено.")
+            print(f"[error] No matching files for pattern {token}.")
         return files
 
     # обычное имя: расширение можно не вводить
@@ -363,7 +369,7 @@ def front_matter(source: str, title: str | None, tool: str,
 
 
 def _img_placeholder(match: re.Match) -> str:
-    alt = _markdown_label(match.group("alt") or "встроенное изображение")
+    alt = _markdown_label(match.group("alt") or "embedded image")
     return f"![{alt}]()"
 
 
@@ -578,7 +584,7 @@ def _emit(target: Path, result, source: str, frontmatter: bool,
     target.parent.mkdir(parents=True, exist_ok=True)
     target.write_text(text, encoding="utf-8")
     extra = f" ({note})" if note else ""
-    print(f"Готово: {target}{extra}")
+    print(f"Done: {target}{extra}")
 
 
 # --------------------------------------------------------------------------
@@ -680,7 +686,7 @@ def _convert_reencoded(raw: bytes) -> tuple:
             os.unlink(tmp)
         except OSError:
             pass
-    return result, f"перекодировано из {enc}"
+    return result, f"re-encoded from {enc}"
 
 
 def _convert_file_data(path: Path) -> tuple:
@@ -698,9 +704,9 @@ def _positive_float(value: str, name: str) -> float:
     try:
         number = float(value)
     except ValueError as exc:
-        raise ValueError(f"{name} должен быть числом") from exc
+        raise ValueError(f"{name} must be a number") from exc
     if number <= 0:
-        raise ValueError(f"{name} должен быть больше 0")
+        raise ValueError(f"{name} must be greater than 0")
     return number
 
 
@@ -713,16 +719,16 @@ def _resolved_ips(hostname: str) -> set[str]:
     try:
         infos = socket.getaddrinfo(hostname, None, type=socket.SOCK_STREAM)
     except socket.gaierror as exc:
-        raise ValueError(f"не удалось разрешить host {hostname!r}") from exc
+        raise ValueError(f"failed to resolve host {hostname!r}") from exc
     return {info[4][0] for info in infos}
 
 
 def _check_url_allowed(url: str, allow_private: bool) -> None:
     parsed = urlparse(url)
     if parsed.scheme.lower() not in {"http", "https"}:
-        raise ValueError("поддерживаются только http и https URL")
+        raise ValueError("only http and https URLs are supported")
     if not parsed.hostname:
-        raise ValueError("URL должен содержать имя хоста")
+        raise ValueError("URL must contain a hostname")
     if allow_private:
         return
     blocked = [ip for ip in _resolved_ips(parsed.hostname)
@@ -730,8 +736,8 @@ def _check_url_allowed(url: str, allow_private: bool) -> None:
     if blocked:
         sample = ", ".join(sorted(blocked)[:3])
         raise ValueError(
-            f"URL указывает на непубличный адрес ({sample}); "
-            "используйте --allow-private-url только для доверенного сценария"
+            f"URL points to a non-public address ({sample}); "
+            "use --allow-private-url only for trusted local scenarios"
         )
 
 
@@ -744,7 +750,8 @@ def _read_limited_response(response, max_bytes: int) -> bytes:
             declared = None
         if declared is not None and declared > max_bytes:
             raise ValueError(
-                f"URL-ответ больше лимита ({declared} байт > {max_bytes})"
+                f"URL response exceeds the limit "
+                f"({declared} bytes > {max_bytes})"
             )
 
     chunks = []
@@ -754,7 +761,10 @@ def _read_limited_response(response, max_bytes: int) -> bytes:
             continue
         total += len(chunk)
         if total > max_bytes:
-            raise ValueError(f"URL-ответ больше лимита ({max_bytes} байт)")
+            raise ValueError(
+                f"URL response exceeds the limit "
+                f"({max_bytes} bytes)"
+            )
         chunks.append(chunk)
     return b"".join(chunks)
 
@@ -764,7 +774,7 @@ def _download_url(url: str, timeout: float, max_bytes: int,
     try:
         import requests
     except ImportError as exc:
-        raise ValueError("для URL-режима нужен пакет requests") from exc
+        raise ValueError("URL mode requires the 'requests' package") from exc
 
     current = url.strip()
     session = requests.Session()
@@ -787,7 +797,7 @@ def _download_url(url: str, timeout: float, max_bytes: int,
                 if 300 <= response.status_code < 400:
                     location = response.headers.get("location")
                     if not location:
-                        raise ValueError("редирект без заголовка Location")
+                        raise ValueError("redirect without a Location header")
                     current = urljoin(current, location)
                     continue
                 response.raise_for_status()
@@ -798,7 +808,7 @@ def _download_url(url: str, timeout: float, max_bytes: int,
                 return data, final_url, suffix
             finally:
                 response.close()
-        raise ValueError("слишком много редиректов")
+        raise ValueError("too many redirects")
     finally:
         session.close()
 
@@ -827,11 +837,11 @@ def _file_too_large(path: Path, max_bytes: int) -> bool:
 
 def _convert_file_to_target(path: Path, target: Path, opts: dict,
                             suffix: str, source_id: str) -> str:
-    print(f"Конвертирую {path.name} ...")
+    print(f"Converting {path.name} ...")
     try:
         result, note = _convert_file_data(path)
     except Exception as exc:
-        print(f"[ошибка] Не удалось конвертировать {path.name}: {exc}")
+        print(f"[error] Failed to convert {path.name}: {exc}")
         return "fail"
     try:
         _emit(target, result, path.name, opts["frontmatter"],
@@ -840,7 +850,7 @@ def _convert_file_to_target(path: Path, target: Path, opts: dict,
               source_path=str(path), source_id=source_id,
               safe_markdown=not opts.get("unsafe_raw_markdown", False))
     except OSError as exc:
-        print(f"[ошибка] Не удалось записать {target.name}: {exc}")
+        print(f"[error] Failed to write {target.name}: {exc}")
         return "fail"
     return "ok"
 
@@ -879,12 +889,15 @@ def _convert_file_subprocess(path: Path, target: Path, opts: dict,
         )
     except subprocess.TimeoutExpired:
         print(
-            f"[ошибка] Таймаут конвертации {path.name} "
-            f"({opts['conversion_timeout']} сек.)"
+            f"[error] Conversion timeout for {path.name} "
+            f"({opts['conversion_timeout']} sec)"
         )
         return "fail"
     except UnicodeDecodeError as exc:
-        print(f"[ошибка] Worker {path.name} вывел не UTF-8 данные: {exc}")
+        print(
+            f"[error] Worker for {path.name} produced non-UTF-8 "
+            f"output: {exc}"
+        )
         return "fail"
     if completed.stdout:
         print(completed.stdout, end="")
@@ -895,7 +908,7 @@ def _convert_file_subprocess(path: Path, target: Path, opts: dict,
 
 def _worker_convert(argv: list[str]) -> int:
     if len(argv) != 5:
-        print("[ошибка] Некорректный внутренний worker-вызов")
+        print("[error] Invalid internal worker invocation")
         return 2
     path = Path(argv[0])
     target = Path(argv[1])
@@ -904,7 +917,7 @@ def _worker_convert(argv: list[str]) -> int:
     try:
         worker_opts = json.loads(argv[4])
     except json.JSONDecodeError as exc:
-        print(f"[ошибка] Некорректные worker-настройки: {exc}")
+        print(f"[error] Invalid worker options: {exc}")
         return 2
     status = _convert_file_to_target(path, target, worker_opts,
                                      suffix, source_id)
@@ -913,23 +926,24 @@ def _worker_convert(argv: list[str]) -> int:
 
 def convert_file(path: Path, opts: dict) -> str:
     if not path.exists():
-        print(f"[ошибка] Файл не найден: {path.resolve()}")
+        print(f"[error] File not found: {path.resolve()}")
         return "fail"
     suffix = path.suffix.lower()
     if suffix not in opts["scan"]:
-        print(f"[внимание] {path.name} — формат вне списка, пробую как есть.")
+        print(f"[warning] {path.name} — format not in the filter list, "
+              "trying anyway.")
 
     target, source_id = _plan_file_target(path, opts, opts["planned"])
     if target.exists() and not opts["force"]:
-        print(f"[пропуск] {target.name} уже есть "
-              "(-f / --force для перезаписи)")
+        print(f"[skip] {target.name} already exists "
+              "(use -f / --force to overwrite)")
         return "skip"
 
     max_bytes = opts.get("max_input_bytes", 0)
     if max_bytes > 0 and _file_too_large(path, max_bytes):
         print(
-            f"[ошибка] {path.name} больше лимита "
-            f"({opts['max_input_mb']} МБ)"
+            f"[error] {path.name} exceeds the size limit "
+            f"({opts['max_input_mb']} MB)"
         )
         return "fail"
 
@@ -949,14 +963,14 @@ def _url_stem(url: str) -> str:
 def convert_url(url: str, opts: dict) -> str:
     target, source_id = _plan_url_target(url, opts, opts["planned"])
     if target.exists() and not opts["force"]:
-        print(f"[пропуск] {target.name} уже есть "
-              "(-f / --force для перезаписи)")
+        print(f"[skip] {target.name} already exists "
+              "(use -f / --force to overwrite)")
         return "skip"
-    print(f"Загружаю {url} ...")
+    print(f"Downloading {url} ...")
     try:
         result, final_url = _convert_url_data(url, opts)
     except Exception as exc:
-        print(f"[ошибка] Не удалось загрузить {url}: {exc}")
+        print(f"[error] Failed to download {url}: {exc}")
         return "fail"
     try:
         _emit(target, result, url, opts["frontmatter"],
@@ -964,7 +978,7 @@ def convert_url(url: str, opts: dict) -> str:
               source_path=final_url, source_id=source_id,
               safe_markdown=not opts.get("unsafe_raw_markdown", False))
     except OSError as exc:
-        print(f"[ошибка] Не удалось записать {target.name}: {exc}")
+        print(f"[error] Failed to write {target.name}: {exc}")
         return "fail"
     return "ok"
 
@@ -985,14 +999,14 @@ def run(items: list, opts: dict) -> list:
             failed.append(item)
 
     if len(items) > 1:
-        parts = [f"сконвертировано {ok} из {len(items)}"]
+        parts = [f"converted {ok} of {len(items)}"]
         if skipped:
-            parts.append(f"пропущено {skipped}")
+            parts.append(f"skipped {skipped}")
         if failed:
-            parts.append(f"ошибок {len(failed)}")
-        print("Итого: " + ", ".join(parts) + ".")
+            parts.append(f"failed {len(failed)}")
+        print("Total: " + ", ".join(parts) + ".")
         if failed:
-            print("Не удалось обработать:")
+            print("Failed to process:")
             for item in failed:
                 print(f"  - {item}")
     return failed
@@ -1035,7 +1049,7 @@ def _parse(tokens: list) -> dict:
     try:
         parsed = parser.parse_args(tokens)
     except ValueError as exc:
-        errors.append(f"[ошибка] Некорректные аргументы: {exc}")
+        errors.append(f"[error] Invalid arguments: {exc}")
         parsed = parser.parse_args([])
 
     if parsed.help:
@@ -1051,38 +1065,38 @@ def _parse(tokens: list) -> dict:
         if val and not val.startswith("-"):
             out_dir = Path(val)
         else:
-            errors.append("[ошибка] Флагу -o/--output нужен путь к папке.")
+            errors.append("[error] -o/--output requires a folder path.")
 
     only = None
     if parsed.only is not None:
         spec = parsed.only.strip().strip('"').strip("'")
         if not spec or spec.startswith("-"):
-            errors.append("[ошибка] Флагу --only нужны расширения, "
-                          "например: --only pdf,docx.")
+            errors.append("[error] --only requires extensions, "
+                          "e.g.: --only pdf,docx.")
         else:
             try:
                 only = _suffix_set(spec) or None
             except ValueError as exc:
-                errors.append(f"[ошибка] Некорректный --only: {exc}")
+                errors.append(f"[error] Invalid --only: {exc}")
             if only is None and not errors:
-                errors.append("[ошибка] Флагу --only нужны расширения, "
-                              "например: --only pdf,docx.")
+                errors.append("[error] --only requires extensions, "
+                              "e.g.: --only pdf,docx.")
     try:
         url_timeout = _positive_float(parsed.url_timeout, "--url-timeout")
     except ValueError as exc:
-        errors.append(f"[ошибка] {exc}")
+        errors.append(f"[error] {exc}")
         url_timeout = _DEFAULT_URL_TIMEOUT
 
     try:
         max_url_mb = _positive_float(parsed.max_url_mb, "--max-url-mb")
     except ValueError as exc:
-        errors.append(f"[ошибка] {exc}")
+        errors.append(f"[error] {exc}")
         max_url_mb = _DEFAULT_MAX_URL_MB
 
     try:
         max_input_mb = _positive_float(parsed.max_input_mb, "--max-input-mb")
     except ValueError as exc:
-        errors.append(f"[ошибка] {exc}")
+        errors.append(f"[error] {exc}")
         max_input_mb = _DEFAULT_MAX_INPUT_MB
 
     try:
@@ -1091,7 +1105,7 @@ def _parse(tokens: list) -> dict:
             "--conversion-timeout",
         )
     except ValueError as exc:
-        errors.append(f"[ошибка] {exc}")
+        errors.append(f"[error] {exc}")
         conversion_timeout = _DEFAULT_CONVERSION_TIMEOUT
 
     return {
@@ -1149,14 +1163,14 @@ def _items_from(patterns: list, recursive: bool, scan: set) -> list:
 
 
 def interactive(default_only: list | None) -> None:
-    print("=== Универсальный конвертер -> Markdown ===")
-    print("Введите файл, папку, маску или URL и нажмите Enter.")
-    print("Форматы: PDF, HTML, Word, Excel, PowerPoint, CSV и др.")
-    print("Примеры:  *   |   C:\\reports -r   |   https://site/page")
-    print("Пустая строка или Ctrl+C — выход.")
+    print("=== Universal converter -> Markdown ===")
+    print("Enter a file, folder, glob, or URL and press Enter.")
+    print("Formats: PDF, HTML, Word, Excel, PowerPoint, CSV, etc.")
+    print("Examples:  *   |   C:\\reports -r   |   https://site/page")
+    print("Empty line or Ctrl+C to exit.")
     while True:
         try:
-            line = input("\nФайл> ")
+            line = input("\nFile> ")
         except (EOFError, KeyboardInterrupt):
             print()
             break
@@ -1195,8 +1209,8 @@ def interactive(default_only: list | None) -> None:
                     existing.append(it)
             if existing:
                 answer = input(
-                    f"{len(existing)} файл(ов) уже имеют .md. "
-                    "Перезаписать? (y = да / Enter = пропустить): "
+                    f"{len(existing)} file(s) already have a .md. "
+                    "Overwrite? (y = yes / Enter = skip): "
                 )
                 force = answer.strip().lower() in ("y", "yes", "д", "да")
         opts["force"] = force

@@ -3,23 +3,45 @@
     Установщик комплекта конвертеров в Markdown (tomd / pdf2md / html2md).
 
 .DESCRIPTION
-    Делает четыре вещи:
+    Делает пять вещей:
       1) находит Python (или подсказывает, где скачать);
       2) ставит текущий комплект md-converters и его зависимости
          (MarkItDown для PDF, Word, Excel и др.);
       3) прописывает команды tomd / pdf2md / html2md в профиль PowerShell,
          указывая на ту папку, ИЗ КОТОРОЙ запущен этот скрипт;
       4) добавляет пункт «Конвертировать в Markdown» в меню правого клика
-         Проводника (Отправить / Send to).
+         Проводника (Отправить / Send to);
+      5) добавляет тот же пункт в основное контекстное меню Проводника
+         (видно через «Show more options» в Windows 11 и в классическом
+         меню в Windows 10). Запись создаётся в HKCU — без админ-прав.
 
     Скрипт можно запускать сколько угодно раз — старые строки он
     аккуратно убирает и прописывает заново (идемпотентно).
 
+.PARAMETER SkipContextMenu
+    Не регистрировать пункт в основном контекстном меню Проводника
+    (только Send to). По умолчанию — оба.
+
 .EXAMPLE
     pwsh -ExecutionPolicy Bypass -File .\install.ps1
+.EXAMPLE
+    pwsh -ExecutionPolicy Bypass -File .\install.ps1 -SkipContextMenu
 #>
 
+[CmdletBinding()]
+param(
+    [switch]$SkipContextMenu
+)
+
 $ErrorActionPreference = 'Stop'
+
+# Без этого в Windows-консоли PowerShell-сообщения на кириллице идут
+# в OEM-кодировке и превращаются в «кракозябры». Ставим UTF-8 для текущего
+# процесса, чтобы Write-Host ниже читался нормально.
+try {
+    [Console]::OutputEncoding = [System.Text.Encoding]::UTF8
+    $PSDefaultParameterValues['Out-File:Encoding'] = 'utf8'
+} catch {}
 
 # Скрипту нужен PowerShell 7.2+: -Encoding utf8BOM/utf8NoBOM и поведение
 # stderr нативных команд в 5.1 другие, а профиль 5.1 — вообще другой файл.
@@ -151,23 +173,60 @@ pause
     $lnk = $ws.CreateShortcut($tmpLnk)
     $lnk.TargetPath       = $cmdPath
     $lnk.WorkingDirectory = $kit
-    $lnk.Description      = 'Конвертировать выбранные файлы в Markdown'
+    # WScript.Shell через COM-маршалинг в PowerShell 7 искажает кириллицу
+    # в Description (UTF-16 обрезается). Имя пункта берётся из имени файла
+    # .lnk — Description для тултипа не обязателен.
     $lnk.Save()
     Move-Item -LiteralPath $tmpLnk -Destination $finalLnk -Force
     Write-Host "Пункт «Отправить → Конвертировать в Markdown» добавлен." -ForegroundColor Green
 } catch {
-    Write-Host "Не удалось добавить пункт в меню (не критично): $_" -ForegroundColor Yellow
+    Write-Host "Не удалось добавить пункт в Send to (не критично): $_" -ForegroundColor Yellow
+}
+
+# --- 4b) Пункт в основном контекстном меню Проводника ---------------------
+# HKCU\Software\Classes\*\shell\... — без админ-прав, только для текущего
+# пользователя. Position=Middle помогает пункту попасть в видимую часть
+# сокращённого меню Windows 11 (иначе он остаётся только в "Show more options").
+if (-not $SkipContextMenu) {
+    $shellKey = 'Registry::HKEY_CURRENT_USER\Software\Classes\*\shell\ConvertToMarkdown'
+    $cmdKey    = "$shellKey\command"
+    $menuTitle = 'Конвертировать в Markdown'
+    $iconValue = "$python,0"   # иконка из python.exe — есть всегда, не зависит от kit
+    $cmdLine   = '"' + $cmdPath + '" "%1"'
+
+    # Симметричное удаление перед переустановкой.
+    if (Test-Path -LiteralPath $shellKey) {
+        Remove-Item -LiteralPath $shellKey -Recurse -Force
+    }
+
+    try {
+        New-Item -Path $shellKey -Force | Out-Null
+        Set-ItemProperty -LiteralPath $shellKey -Name '(default)' -Value $menuTitle
+        Set-ItemProperty -LiteralPath $shellKey -Name 'Icon'      -Value $iconValue
+        Set-ItemProperty -LiteralPath $shellKey -Name 'Position'  -Value 'Middle'
+        New-Item -Path $cmdKey -Force | Out-Null
+        Set-ItemProperty -LiteralPath $cmdKey -Name '(default)' -Value $cmdLine
+        Write-Host "Пункт «Конвертировать в Markdown» добавлен в основное контекстное меню Проводника." -ForegroundColor Green
+    } catch {
+        Write-Host "Не удалось добавить пункт в основное меню (не критично): $_" -ForegroundColor Yellow
+    }
 }
 
 # --- 5) Смоук-тест --------------------------------------------------------
 $sample = Join-Path $kit 'examples\sample-report.html'
 if (Test-Path $sample) {
     Write-Host "`nПроверочная конвертация примера..." -ForegroundColor Cyan
-    & $python (Join-Path $kit 'convert_to_md.py') $sample --force | Out-Host
+    # Без Out-Host: иначе PowerShell забирает stdout Python в свой pipeline
+    # и кириллица идёт через его кодировку. С reconfigure() в convert_to_md.py
+    # прямой вывод идёт как UTF-8.
+    & $python (Join-Path $kit 'convert_to_md.py') $sample --force
 }
 
 Write-Host "`n=== Готово! ===" -ForegroundColor Green
 Write-Host "Откройте НОВОЕ окно PowerShell (или выполните:  . `$PROFILE )"
 Write-Host "Команды:  tomd  (любой формат),  pdf2md,  html2md"
-Write-Host "Или в Проводнике: правый клик по файлам → Отправить → Конвертировать в Markdown"
+Write-Host "В Проводнике: правый клик → Отправить → Конвертировать в Markdown"
+if (-not $SkipContextMenu) {
+    Write-Host "  и в основном меню (Show more options) — пункт «Конвертировать в Markdown»."
+}
 Write-Host "Справка:  tomd --help"
