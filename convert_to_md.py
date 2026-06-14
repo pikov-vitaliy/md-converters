@@ -18,6 +18,8 @@ Flags:
     -f, --force        overwrite existing .md (by default they are skipped
                        to avoid clobbering manual edits).
     -o, --output DIR   write .md into this folder instead of next to source.
+    --mirror, --preserve-tree
+                       with -o, preserve the source folder tree under DIR.
     --only EXT[,EXT]   when a glob/folder is given, keep only these
                        extensions (e.g.: --only pdf  or  --only docx,xlsx).
     --keep-images      do not touch images: keep base64 and PPTX phantom
@@ -37,9 +39,10 @@ Flags:
     --no-sandbox       convert local files in the main process.
     --no-frontmatter   do not add the YAML header (source/converted).
 
-Output: same name with .md extension (next to the source or in -o folder);
-on name collision a " (2)", " (3)" suffix is appended. The extension can
-be omitted at the input. HTML encoding (UTF-8, cp1251, etc.) is detected
+Output: same name with .md extension (next to the source or in -o folder).
+With -o --mirror, relative subfolders are kept under the output folder. On
+name collision a " (2)", " (3)" suffix is appended. The extension can be
+omitted at the input. HTML encoding (UTF-8, cp1251, etc.) is detected
 automatically.
 """
 
@@ -178,7 +181,7 @@ _HTML_HTTP_EQUIV_CHARSET = re.compile(
 _CYRILLIC_ENCODINGS = ("cp1251", "koi8-r", "cp866", "mac_cyrillic")
 
 _converter = None
-__version__ = "1.1.0"
+__version__ = "1.2.0"
 
 
 def _md() -> MarkItDown:
@@ -307,6 +310,42 @@ def collect(token: str, recursive: bool,
             if candidate.exists():
                 return [candidate]
     return [path]  # существование проверит конвертация
+
+
+def _path_key(path: Path) -> str:
+    return os.path.normcase(str(path.resolve())).lower()
+
+
+def _glob_root(token: str) -> Path:
+    root_parts = []
+    for part in Path(token).parts:
+        if any(ch in part for ch in "*?["):
+            break
+        root_parts.append(part)
+    if not root_parts:
+        return Path.cwd()
+    return Path(*root_parts)
+
+
+def _mirror_root_for_token(token: str) -> Path:
+    token = token.strip().strip('"').strip("'")
+    path = Path(token)
+    if path.is_dir():
+        return path
+    if path.is_file():
+        return path.parent
+    if any(ch in token for ch in "*?["):
+        return _glob_root(token)
+    if path.parent != Path("."):
+        return path.parent
+    return Path.cwd()
+
+
+def _mirror_relative(path: Path, root: Path) -> Path:
+    try:
+        return path.resolve().relative_to(root.resolve())
+    except (OSError, ValueError):
+        return Path(path.name)
 
 
 # --------------------------------------------------------------------------
@@ -595,13 +634,19 @@ def _plan_target(stem: str, dest_dir: Path, planned: set[str],
 def _plan_file_target(path: Path, opts: dict,
                       planned: set[str]) -> tuple[Path, str]:
     source_id = _source_id_for_path(path)
+    dest_dir = opts.get("out_dir") or path.parent
+    if opts.get("out_dir") and opts.get("mirror"):
+        roots = opts.get("mirror_roots", {})
+        root = roots.get(_path_key(path))
+        if root is not None:
+            dest_dir = opts["out_dir"] / _mirror_relative(path, root).parent
     target = _plan_target(
         path.stem,
-        opts["out_dir"] or path.parent,
+        dest_dir,
         planned,
         path.name,
         source_id,
-        allow_legacy_source_match=opts["out_dir"] is None,
+        allow_legacy_source_match=opts.get("out_dir") is None,
     )
     return target, source_id
 
@@ -840,7 +885,7 @@ def _download_url(url: str, timeout: float, max_bytes: int,
     session.headers.update({
         "Accept": "text/markdown, text/html;q=0.9, "
                   "text/plain;q=0.8, */*;q=0.1",
-        "User-Agent": "md-converters/1.0",
+        "User-Agent": f"md-converters/{__version__}",
     })
     try:
         for _ in range(_MAX_REDIRECTS + 1):
@@ -1122,6 +1167,8 @@ def _parse(tokens: list) -> dict:
     parser.add_argument("--no-sandbox", dest="sandbox",
                         action="store_false", default=True)
     parser.add_argument("-o", "--output", dest="out_dir")
+    parser.add_argument("--mirror", "--preserve-tree", dest="mirror",
+                        action="store_true")
     parser.add_argument("--only")
     parser.add_argument("-h", "--help", action="store_true")
     parser.add_argument("--version", action="store_true")
@@ -1146,6 +1193,8 @@ def _parse(tokens: list) -> dict:
             out_dir = Path(val)
         else:
             errors.append("[error] -o/--output requires a folder path.")
+    if parsed.mirror and out_dir is None:
+        errors.append("[error] --mirror/--preserve-tree requires -o/--output.")
 
     only = None
     if parsed.only is not None:
@@ -1199,7 +1248,8 @@ def _parse(tokens: list) -> dict:
         "max_input_mb": max_input_mb,
         "conversion_timeout": conversion_timeout,
         "sandbox": parsed.sandbox,
-        "out_dir": out_dir, "only": only, "errors": errors,
+        "out_dir": out_dir, "mirror": parsed.mirror,
+        "only": only, "errors": errors,
     }
 
 
@@ -1221,24 +1271,30 @@ def _build_opts(parsed: dict, default_only: list | None) -> dict:
         "conversion_timeout": parsed["conversion_timeout"],
         "sandbox": parsed["sandbox"],
         "out_dir": parsed["out_dir"],
+        "mirror": parsed["mirror"],
+        "mirror_roots": {},
         "scan": scan,
         "tool": _tool_name(only),
         "planned": set(),
     }
 
 
-def _items_from(patterns: list, recursive: bool, scan: set) -> list:
+def _items_from(patterns: list, recursive: bool, scan: set,
+                opts: dict | None = None) -> list:
     items = []
     seen = set()
     for pattern in patterns:
         if _is_url(pattern):
             items.append(pattern.strip().strip('"').strip("'"))
             continue
+        mirror_root = _mirror_root_for_token(pattern)
         for path in collect(pattern, recursive, scan):
-            key = str(path).lower()
+            key = _path_key(path)
             if key not in seen:
                 seen.add(key)
                 items.append(path)
+                if opts and opts.get("mirror"):
+                    opts["mirror_roots"][key] = mirror_root
     return items
 
 
@@ -1270,7 +1326,7 @@ def interactive(default_only: list | None) -> None:
             continue
         opts = _build_opts(parsed, default_only)
         items = _items_from(parsed["patterns"], parsed["recursive"],
-                            opts["scan"])
+                            opts["scan"], opts)
         if not items:
             continue
 
@@ -1308,7 +1364,7 @@ def _main(argv: list, default_only: list | None = None) -> int:
     if parsed["patterns"]:
         opts = _build_opts(parsed, default_only)
         items = _items_from(parsed["patterns"], parsed["recursive"],
-                            opts["scan"])
+                            opts["scan"], opts)
         failed = run(items, opts)
         return 1 if (failed or not items) else 0
     interactive(default_only)

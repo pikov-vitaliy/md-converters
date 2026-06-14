@@ -3,7 +3,7 @@
 [![CI](https://github.com/pikov-vitaliy/md-converters/actions/workflows/ci.yml/badge.svg)](https://github.com/pikov-vitaliy/md-converters/actions/workflows/ci.yml)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 
-Версия: **1.1.0**.
+Версия: **1.2.0**.
 
 Универсальный инструмент перевода документов в Markdown. Одна команда `tomd`
 понимает формат по расширению и конвертирует **что угодно**:
@@ -78,6 +78,7 @@ md-converters\
 | `tomd C:\reports -r` | то же, плюс все вложенные папки |
 | `tomd *.pdf -f` | перезаписать уже существующие `.md` |
 | `tomd C:\reports -r -o C:\vault` | результат сложить в одну папку (база знаний) |
+| `tomd C:\reports -r -o C:\vault --mirror` | сохранить структуру подпапок в `C:\vault` |
 | `tomd https://site/page` | конвертировать веб-страницу по URL |
 | `tomd https://site/page --url-timeout 10 --max-url-mb 20` | URL с лимитами |
 | `tomd http://127.0.0.1:8000 --allow-private-url` | локальный URL явно |
@@ -146,7 +147,7 @@ source_name: "sample-report.html"
 source_path: "examples\\sample-report.html"
 source_id: "path:..."
 converted: 2026-06-10
-generator: tomd 1.1.0 (MarkItDown)
+generator: tomd 1.2.0 (MarkItDown)
 ---
 
 # Отчёт об уязвимостях — demo-project
@@ -193,6 +194,18 @@ generator: tomd 1.1.0 (MarkItDown)
 работает и без `-o`: `report.docx` и `report.pdf` в одной папке дадут
 `report.md` и `report (2).md`, а не затрут друг друга.
 
+Если важна исходная структура папок, добавьте `--mirror` (или
+`--preserve-tree`):
+
+```powershell
+tomd C:\students -r -o C:\vault --mirror
+```
+
+Тогда `C:\students\ivanov\курсовая.docx` попадёт в
+`C:\vault\ivanov\курсовая.md`, а `C:\students\petrov\курсовая.docx` — в
+`C:\vault\petrov\курсовая.md`. Это удобнее для пачек отчётов, курсовых и
+проектных папок, где одноимённые документы лежат в разных каталогах.
+
 ### 4. Автоопределение кодировки (HTML)
 
 Если инструмент выдал HTML в `windows-1251` без правильного `<meta charset>`,
@@ -229,7 +242,7 @@ source_name: "имя-исходного-файла.docx"
 source_path: "путь\\к\\имя-исходного-файла.docx"
 source_id: "path:короткий-хэш-источника"
 converted: 2026-06-10
-generator: tomd 1.1.0 (MarkItDown)
+generator: tomd 1.2.0 (MarkItDown)
 ---
 ```
 
@@ -456,10 +469,9 @@ uv run --frozen pip-audit --progress-spinner off -r requirements-dev-audit.txt
 централизованно в `docs/vibe-audit/evidence/<ГГГГ-ММ-ДД>/` — по одной
 подпапке на дату.
 
-Идеи развития, которые не вошли в v1.1.0 (OCR сканов, `--mirror` для
-`-o`, пресет «для проверки студенческих работ», выкидывание `.msg` из
-зависимостей), собраны в `docs/vibe-audit/future-ideas.md` — заметки
-на будущее, не план.
+Идеи развития, которые не вошли в v1.2.0 (OCR сканов, пресет «для проверки
+студенческих работ», выкидывание `.msg` из зависимостей), собраны в
+`docs/vibe-audit/future-ideas.md` — заметки на будущее, не план.
 
 Политика лицензий по умолчанию блокирует сильный copyleft и лицензии с
 нежелательными ограничениями: AGPL/GPL/LGPL, SSPL, Commons Clause, Sleepycat.
@@ -550,6 +562,7 @@ in `HKCU\Software\Classes\...` — no admin rights required.
 tomd report.docx                # one file (output next to it)
 tomd *                          # every document in the folder
 tomd C:\reports -r -o C:\vault  # whole tree into one folder
+tomd C:\reports -r -o C:\vault --mirror  # preserve folders under vault
 tomd https://site/page          # a web page
 tomd folder --only docx,xlsx    # filter by type
 ```

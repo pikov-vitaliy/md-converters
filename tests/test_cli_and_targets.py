@@ -33,6 +33,23 @@ def test_parse_accepts_plain_and_dotted_extensions():
     assert parsed["only"] == {".pdf", ".docx"}
 
 
+def test_parse_accepts_mirror_only_with_output(tmp_path):
+    parsed = convert_to_md._parse([
+        "folder",
+        "-o",
+        str(tmp_path / "out"),
+        "--preserve-tree",
+    ])
+
+    assert parsed["errors"] == []
+    assert parsed["mirror"] is True
+
+    bad = convert_to_md._parse(["folder", "--mirror"])
+
+    assert bad["errors"]
+    assert bad["mirror"] is True
+
+
 def test_front_matter_contains_stable_source_fields():
     text = convert_to_md.front_matter(
         "report.html",
@@ -99,6 +116,48 @@ def test_output_dir_rerun_updates_matching_source_id(tmp_path, monkeypatch):
     assert "# a\n" in report_a
     assert "# a-updated" not in report_a
     assert "# b-updated\n" in report_b
+
+
+def test_mirror_output_dir_preserves_source_tree(tmp_path, monkeypatch):
+    root = tmp_path / "students"
+    out_dir = tmp_path / "out"
+    src_a = root / "ivanov" / "report.html"
+    src_b = root / "petrov" / "report.html"
+    src_a.parent.mkdir(parents=True)
+    src_b.parent.mkdir(parents=True)
+    src_a.write_text("<h1>A</h1>", encoding="utf-8")
+    src_b.write_text("<h1>B</h1>", encoding="utf-8")
+
+    def fake_convert(path: Path):
+        return SimpleNamespace(
+            text_content=f"# {path.parent.name}\n",
+            title=None,
+        ), None
+
+    monkeypatch.setattr(convert_to_md, "_convert_file_data", fake_convert)
+    opts = {
+        "force": True,
+        "frontmatter": True,
+        "keep_images": False,
+        "unsafe_raw_markdown": False,
+        "out_dir": out_dir,
+        "mirror": True,
+        "mirror_roots": {},
+        "scan": {".html"},
+        "tool": "tomd",
+        "planned": set(),
+        "max_input_bytes": 0,
+        "sandbox": False,
+    }
+    items = convert_to_md._items_from([str(root)], True, opts["scan"], opts)
+
+    assert items == [src_a, src_b]
+    assert convert_to_md.convert_file(src_a, opts) == "ok"
+    assert convert_to_md.convert_file(src_b, opts) == "ok"
+    assert (out_dir / "ivanov" / "report.md").is_file()
+    assert (out_dir / "petrov" / "report.md").is_file()
+    assert not (out_dir / "report.md").exists()
+    assert not (out_dir / "report (2).md").exists()
 
 
 def test_file_target_planner_uses_source_id_for_output_dir_preflight(tmp_path):
