@@ -237,6 +237,21 @@ if (Test-Path -LiteralPath $finalLnk) { Remove-Item -LiteralPath $finalLnk -Forc
 
 if ($installMenu) {
     $cmdPath = Join-Path $kit 'sendto-convert.cmd'
+    $menuTitle = 'Конвертировать в Markdown'
+    # Своя иконка convert.ico (лежит рядом с install.ps1). Используем её
+    # во всех трёх местах — Send to, \* \shell, Applications\... — чтобы
+    # везде был один и тот же значок. До генерации собственного .ico
+    # использовался $python,0, но он тянул за собой жёлтую иконку
+    # Python и не подходил по смыслу.
+    # Реестр Windows и .lnk IconLocation ожидают "path,index";
+    # для .ico индекс = 0.
+    $iconFile  = Join-Path $kit 'convert.ico'
+    $iconValue = "$iconFile,0"
+    if (-not (Test-Path -LiteralPath $iconFile)) {
+        Write-Host "Не найден convert.ico, использую иконку Python." -ForegroundColor Yellow
+        $iconValue = "$python,0"
+    }
+    $cmdLine = '"' + $cmdPath + '" "%1"'
     $cmdText = @"
 @echo off
 chcp 65001 >nul
@@ -255,17 +270,28 @@ pause
         # WScript.Shell теряет кириллицу в ИМЕНИ .lnk (downconvert в ANSI),
         # поэтому создаём по латинскому пути, затем переименовываем (Unicode).
         $sendTo = Join-Path $env:APPDATA 'Microsoft\Windows\SendTo'
+        if (-not (Test-Path -LiteralPath $sendTo)) {
+            New-Item -ItemType Directory -Force -Path $sendTo | Out-Null
+        }
         $tmpLnk = Join-Path $sendTo '_md_convert_tmp.lnk'
+        if (Test-Path -LiteralPath $tmpLnk) {
+            Remove-Item -LiteralPath $tmpLnk -Force
+        }
         $ws  = New-Object -ComObject WScript.Shell
         $lnk = $ws.CreateShortcut($tmpLnk)
         $lnk.TargetPath       = $cmdPath
         $lnk.WorkingDirectory = $kit
-        # IconLocation здесь не задаём: WScript.Shell через COM-маршалинг
-        # в PowerShell 7 падает на ".ico,0" (выкидывает "Value does not fall
-        # within the expected range"). Explorer и без этого берёт иконку
-        # из HKCU\Software\Classes\Applications\sendto-convert.cmd\DefaultIcon
-        # (там convert.ico,0 задаётся без COM-обёртки, и она работает).
+        # Для Send to Explorer читает именно .lnk, а не DefaultIcon
+        # из Applications\..., поэтому IconLocation задаём явно.
+        $lnk.IconLocation     = $iconValue
         $lnk.Save()
+        $check = $ws.CreateShortcut($tmpLnk)
+        $badFields = @()
+        if ($check.TargetPath -ine $cmdPath) { $badFields += 'TargetPath' }
+        if ($check.IconLocation -ine $iconValue) { $badFields += 'IconLocation' }
+        if ($badFields.Count -gt 0) {
+            throw "ярлык создан некорректно: $($badFields -join ', ')"
+        }
         Move-Item -LiteralPath $tmpLnk -Destination $finalLnk -Force
         Write-Host "Пункт «Отправить → Конвертировать в Markdown» добавлен." -ForegroundColor Green
     } catch {
@@ -273,16 +299,6 @@ pause
     }
 
     # --- 4-2) \* \shell — для Win10 и "Show more options" в Win11 -------
-    $menuTitle = 'Конвертировать в Markdown'
-    # Своя иконка convert.ico (лежит рядом с install.ps1). Используем её
-    # во всех трёх местах — Send to, \* \shell, Applications\... — чтобы
-    # везде был один и тот же значок. До генерации собственного .ico
-    # использовался $python,0, но он тянул за собой жёлтую иконку
-    # Python и не подходил по смыслу.
-    # Реестр Windows для Icon ожидает "path,index"; для .ico индекс = 0.
-    $iconFile  = Join-Path $kit 'convert.ico'
-    $iconValue = "$iconFile,0"
-    $cmdLine   = '"' + $cmdPath + '" "%1"'
     $shellCmd  = "$shellKey\command"
     try {
         New-Item -Path $shellKey -Force | Out-Null

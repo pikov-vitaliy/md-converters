@@ -32,6 +32,8 @@ md-converters\
 ├─ install.ps1             — установщик (зависимости + команды + Send To)
 ├─ pyproject.toml          — для установки через pip (кроссплатформенно)
 ├─ uv.lock                 — lockfile зависимостей для разработки/CI
+├─ convert.ico             — иконка пунктов контекстного меню
+├─ icon-source.png         — исходник иконки для tools\make_icon.py
 ├─ tools\                  — служебные проверки SCA/лицензий
 ├─ README.md              — эта инструкция
 ├─ LICENSE                — MIT
@@ -486,6 +488,14 @@ pwsh -ExecutionPolicy Bypass -File .\install.ps1
 
 **Изменили расположение папки или обновили Python** — запустите `install.ps1`
 ещё раз из новой папки.
+
+**В Send to видна шестерёнка вместо иконки** — пересоздайте пункты меню:
+```powershell
+pwsh -ExecutionPolicy Bypass -File .\install.ps1 -Menu
+```
+Установщик явно записывает `convert.ico` в `IconLocation` ярлыка. Если
+Проводник держит старый кэш, перезапустите `explorer.exe` или выйдите из
+Windows и войдите снова.
 
 **Excel/Word не конвертируются** — нужна установка зависимостей с
 формат-экстрами (это делает установщик):

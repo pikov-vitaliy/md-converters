@@ -29,6 +29,8 @@ desktop.ini
 # НЕ коммитить — это одноразовые проверки, не часть набора.
 /test-*.pdf
 /test-*.md
+/test-audit-*.html
+/test-audit-*/
 
 # Одноразовые артефакты SCA/pip-audit/license-gate: генерируются локально
 # командами из README и публикуются в CI как job supply-chain. В репозиторий
