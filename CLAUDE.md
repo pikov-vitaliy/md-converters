@@ -131,6 +131,23 @@ HTML (cp1251 и др.) через перекодировку во временн
    ubuntu (Python 3.10/3.11/3.12/3.13/3.14) и windows (3.12/3.14) —
    должен быть зелёным.
 
+   **⚠ CI на ПАУЗЕ с 2026-06-16** (`gh workflow disable CI` →
+   состояние `disabled_manually`). Причина не в коде: репозиторий
+   приватный, Actions тратит платные минуты, а платёж/спенд-лимит
+   исчерпан — все джобы падали мгновенно (1–3 сек, до запуска шагов)
+   с «recent account payments have failed», и GitHub слал «CI: All
+   jobs have failed» на каждый push. Не считай красный/выключенный
+   CI багом и не «чини» ci.yml. Пока пауза — проверяй локально тем же
+   набором, что и CI (Python на PATH — заглушка Store, поэтому через
+   `uv`):
+   `uv lock --check && uv sync --frozen && uv run --frozen ruff check
+   convert_to_md.py tests tools && uv run --frozen pytest -q`.
+   Вернуть CI, когда биллинг восстановят: `gh workflow enable CI`
+   (альтернатива — сделать репозиторий публичным, тогда Actions
+   бесплатны без лимита; приватных отчётов в репо нет). Управляемые
+   Dependabot Updates / Dependency Graph API отключить не даёт
+   (HTTP 422), но они дают `cancelled`, а не `failure` — писем не шлют.
+
 ## Git-процесс
 
 - Коммиты на русском, в конце строка:
