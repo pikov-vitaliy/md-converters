@@ -17,8 +17,9 @@ EPUB, Outlook `.msg`, Jupyter, RSS и веб-страницы по URL.
 
 ## Где что лежит
 
-- **GitHub:** https://github.com/pikov-vitaliy/md-converters — **private**,
-  ветка по умолчанию `main`. Аккаунт `pikov-vitaliy` (через `gh`).
+- **GitHub:** https://github.com/pikov-vitaliy/md-converters — **public**
+  (с 2026-06-16; раньше private — см. заметку про CI ниже), ветка по
+  умолчанию `main`. Аккаунт `pikov-vitaliy` (через `gh`).
 - **Локальная рабочая копия (канон):** `V:\md-converters`. Все git-операции
   делай отсюда: `git -C "V:\md-converters" ...`.
 - **Устаревшая копия:** `C:\Users\user\Documents\md-converters` — НЕ
@@ -131,27 +132,25 @@ HTML (cp1251 и др.) через перекодировку во временн
    ubuntu (Python 3.10/3.11/3.12/3.13/3.14) и windows (3.12/3.14) —
    должен быть зелёным.
 
-   **⚠ CI на ПАУЗЕ с 2026-06-16** (`gh workflow disable CI` →
-   состояние `disabled_manually`). Причина не в коде: репозиторий
-   приватный, Actions тратит платные минуты, а платёж/спенд-лимит
-   исчерпан — все джобы падали мгновенно (1–3 сек, до запуска шагов)
-   с «recent account payments have failed», и GitHub слал «CI: All
-   jobs have failed» на каждый push. Не считай красный/выключенный
-   CI багом и не «чини» ci.yml. Пока пауза — проверяй локально тем же
-   набором, что и CI (Python на PATH — заглушка Store, поэтому через
-   `uv`):
+   **CI активен; репозиторий публичный.** 2026-06-16 репозиторий
+   сделан публичным (`gh repo edit --visibility public`), потому что
+   на приватном репо Actions тратят платные минуты, а платёж/лимит
+   тогда исчерпался — CI падал мгновенно с «recent account payments
+   have failed» и спамил «CI: All jobs have failed» на каждый push.
+   На публичном репо стандартные раннеры бесплатны без лимита, биллинг
+   больше не помеха. Если когда-нибудь понадобится пауза без оплаты —
+   `gh workflow disable CI` (→ `disabled_manually`), вернуть —
+   `gh workflow enable CI`.
+   Локально тот же набор, что и в CI (голый `python` на PATH —
+   заглушка Microsoft Store, поэтому через `uv`):
    `uv lock --check && uv sync --frozen && uv run --frozen ruff check
    convert_to_md.py tests tools && uv run --frozen pytest -q`.
-   Вернуть CI, когда биллинг восстановят: `gh workflow enable CI`
-   (альтернатива — сделать репозиторий публичным, тогда Actions
-   бесплатны без лимита; приватных отчётов в репо нет). Управляемые
-   Dependabot Updates / Dependency Graph API отключить не даёт
-   (HTTP 422), но они дают `cancelled`, а не `failure` — писем не шлют.
 
 ## Git-процесс
 
-- Коммиты на русском, в конце строка:
-  `Co-Authored-By: Claude Fable 5 <noreply@anthropic.com>`.
+- Коммиты на русском, в конце строка соавтора — текущей модели Claude,
+  которая делала правку: `Co-Authored-By: Claude <модель> <noreply@anthropic.com>`
+  (напр. `Claude Opus 4.8 (1M context)` или `Claude Fable 5`).
 - Push/pull разрешены пользователем. Команды: `git -C "V:\md-converters"`.
 - Перед завершением правок: `git add -A && commit && push`, убедиться, что
   `git status -sb` показывает `## main...origin/main` без расхождений.
