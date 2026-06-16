@@ -189,7 +189,7 @@ HTML (cp1251 и др.) через перекодировку во временн
    data-URI; install.ps1 — гард PowerShell 7.2+ и fallback
    `pip install --user`; README синхронизирован (pwsh, экстры вместо
    `[all]`, развод имён).
-8. **Текущее состояние (v1.1.0):** hardening по плану `CODEX.md`:
+8. **v1.1.0:** hardening по плану `CODEX.md`:
    `argparse`, стабильные `source_name/source_path/source_id` с 128-bit
    хэшем и legacy-prefix совместимостью, безопасная Markdown-очистка,
    SSRF-защита URL с timeout/лимитами/редирект-проверками, HTML BOM/meta/
@@ -198,6 +198,13 @@ HTML (cp1251 и др.) через перекодировку во временн
    runtime/dev CycloneDX SBOM, `pip-audit` через locked env, license inventory,
    Dependabot, CI Linux 3.10/3.11/3.12/3.13/3.14 + Windows 3.12/3.14,
    41 pytest-тест.
+9. **Текущее состояние (v1.2.0):** `--mirror`/`--preserve-tree` —
+   зеркальная структура подпапок при выводе через `-o`; детектор PDF без
+   текстового слоя (`pdf_text_layer` во front-matter + жёлтое
+   предупреждение про сканы) и распознавание image-only PDF; кастомная
+   иконка пунктов контекстного меню и фиксы пункта Send To; 56 pytest-
+   тестов. 2026-06-16: репозиторий сделан публичным (Actions бесплатны),
+   экшены CI переведены на Node 24 — см. заметку про CI выше.
 
 Проект считается завершённым и рабочим. Следующее по желанию — извлечение
 таблиц из PDF (см. ограничения) при появлении конкретной потребности.
