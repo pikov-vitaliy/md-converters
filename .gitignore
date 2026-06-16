@@ -13,6 +13,7 @@ sendto-convert.cmd
 # AI tool artifacts
 .gigacode/
 .qwen/
+.codegraph/
 
 # Windows / macOS
 Thumbs.db
