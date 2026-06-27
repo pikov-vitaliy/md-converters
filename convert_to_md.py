@@ -687,6 +687,58 @@ def _join_continued_tables(blocks: list) -> list:
     return merged
 
 
+# Строка-номер страницы (только цифры) и ложный ATX-заголовок.
+_PDF_PAGE_NUM_RE = re.compile(r"^\s*\d{1,4}\s*$")
+_PDF_ATX_RE = re.compile(r"^\s*#{1,6}(?:\s|$)")
+
+
+def _escape_stray_heading(line: str) -> str:
+    """В PDF нет настоящих ATX-заголовков: '# ...' — это литеральный текст
+    (комментарий конфига, путь и т.п.), иначе Markdown рендерит его как
+    заголовок. Экранируем ведущую решётку. Строки таблиц (`|`) не трогаем."""
+    if line.lstrip().startswith("|"):
+        return line
+    if _PDF_ATX_RE.match(line):
+        stripped = line.lstrip()
+        indent = line[:len(line) - len(stripped)]
+        return f"{indent}\\{stripped}"
+    return line
+
+
+def _clean_pdf_text(text: str, page_count: int) -> str:
+    """Чистит типичный мусор PDF-текста: ложные `#`-заголовки и сквозные
+    колонтитулы (повторяющиеся короткие строки — номер документа, версия —
+    и страничные номера), которые текут в тело на стыках страниц."""
+    lines = [_escape_stray_heading(ln) for ln in text.split("\n")]
+    if page_count < 3:
+        return "\n".join(lines)
+
+    counts: dict[str, int] = {}
+    for ln in lines:
+        s = ln.strip()
+        if s and not ln.lstrip().startswith("|"):
+            counts[s] = counts.get(s, 0) + 1
+    threshold = max(5, page_count // 2)
+    repeated = {s for s, n in counts.items()
+                if n >= threshold and len(s) <= 60}
+    # Страничные номера чистим только если колонтитул реально найден
+    # (иначе можно срезать легитимное одиночное число).
+    drop_page_numbers = bool(repeated)
+
+    kept: list[str] = []
+    for ln in lines:
+        s = ln.strip()
+        if not s or ln.lstrip().startswith("|"):
+            kept.append(ln)
+            continue
+        if s in repeated:
+            continue
+        if drop_page_numbers and _PDF_PAGE_NUM_RE.match(ln):
+            continue
+        kept.append(ln)
+    return "\n".join(kept)
+
+
 def _pdf_tables_result(path: Path):
     """PDF -> _PdfResult с Markdown-таблицами, либо None (pdfplumber нет,
     документ без таблиц, или ничего не извлеклось — тогда вызывающий код
@@ -695,7 +747,9 @@ def _pdf_tables_result(path: Path):
         return None
     try:
         doc_blocks: list = []
+        page_count = 0
         with pdfplumber.open(str(path)) as pdf:
+            page_count = len(pdf.pages)
             for page in pdf.pages:
                 doc_blocks.extend(_page_blocks(page))
                 page.close()  # освобождаем кэш страницы сразу
@@ -713,6 +767,7 @@ def _pdf_tables_result(path: Path):
         elif content:
             parts.append(content)
     text = "\n\n".join(p for p in parts if p).strip()
+    text = _clean_pdf_text(text, page_count).strip()
     if not text:
         return None
     return _PdfResult(text + "\n", table_count)

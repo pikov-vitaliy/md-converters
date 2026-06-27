@@ -337,3 +337,49 @@ def test_row_text_preserves_internal_newlines():
     # схлопываться в одну строку.
     assert c._row_text(["Строка 1\nСтрока 2\nСтрока 3"]) == \
         "Строка 1\nСтрока 2\nСтрока 3"
+
+
+# --- чистка PDF-текста: ложные #-заголовки и колонтитулы -------------------
+
+def test_escape_stray_heading_defuses_hash_comment():
+    assert c._escape_stray_heading("# /etc/fstab") == "\\# /etc/fstab"
+    assert c._escape_stray_heading("## раздел") == "\\## раздел"
+
+
+def test_escape_stray_heading_leaves_text_and_table_rows():
+    assert c._escape_stray_heading("обычный текст") == "обычный текст"
+    assert c._escape_stray_heading("| # | x |") == "| # | x |"
+
+
+def test_clean_pdf_text_escapes_headings_only_on_short_doc():
+    out = c._clean_pdf_text("# comment\nplain\n| a | b |", page_count=1)
+    assert out == "\\# comment\nplain\n| a | b |"
+
+
+def test_clean_pdf_text_strips_repeated_footer_and_page_numbers():
+    lines = []
+    for p in range(6):
+        lines.append(f"Контент страницы {p}")
+        lines.append("РУСБ.10015-01 95 01-1")  # сквозной колонтитул
+        lines.append(str(40 + p))              # номер страницы
+    out = c._clean_pdf_text("\n".join(lines), page_count=6)
+    assert "РУСБ.10015-01 95 01-1" not in out
+    assert "\n40\n" not in ("\n" + out + "\n")
+    assert "Контент страницы 0" in out
+    assert "Контент страницы 5" in out
+
+
+def test_clean_pdf_text_keeps_unique_doc_and_standalone_number():
+    # Нет повторяющегося колонтитула -> одиночное число НЕ срезается
+    # (защита документов вроде Предзащиты).
+    text = "Параграф один\nПараграф два\n42\nПараграф три"
+    out = c._clean_pdf_text(text, page_count=10)
+    assert "42" in out
+    assert "Параграф один" in out and "Параграф три" in out
+
+
+def test_clean_pdf_text_protects_table_rows():
+    text = "FOOT\nFOOT\nFOOT\nFOOT\nFOOT\n| FOOT | x |\n| --- | --- |"
+    out = c._clean_pdf_text(text, page_count=10)
+    assert "| FOOT | x |" in out   # строка таблицы не тронута
+    assert "\nFOOT\n" not in ("\n" + out + "\n")  # одиночный колонтитул убран
