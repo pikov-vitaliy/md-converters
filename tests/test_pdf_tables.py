@@ -351,9 +351,59 @@ def test_escape_stray_heading_leaves_text_and_table_rows():
     assert c._escape_stray_heading("| # | x |") == "| # | x |"
 
 
-def test_clean_pdf_text_escapes_headings_only_on_short_doc():
-    out = c._clean_pdf_text("# comment\nplain\n| a | b |", page_count=1)
-    assert out == "\\# comment\nplain\n| a | b |"
+def test_clean_pdf_text_escapes_prose_hash_outside_fence():
+    # Кириллица с ведущей '#' — это проза-комментарий, не заголовок:
+    # экранируем (вне код-блока).
+    out = c._clean_pdf_text("# Комментарий\nобычная строка", page_count=1)
+    assert "\\# Комментарий" in out
+    assert "```" not in out
+
+
+def test_clean_pdf_text_fences_code_and_keeps_hash_literal():
+    # Латинский код-блок (комментарий конфига + UUID) оборачивается в ```,
+    # '#' внутри фенса остаётся буквальным (не экранируется).
+    out = c._clean_pdf_text(
+        "# /etc/fstab static info\nUUID=abc / ext4 defaults 0 1",
+        page_count=1,
+    )
+    assert "```" in out
+    assert "# /etc/fstab static info" in out
+    assert "\\#" not in out
+
+
+# --- классификатор и фенсинг кода ------------------------------------------
+
+def test_classify_code_line():
+    assert c._classify_code_line("sudo nft add rule") == "code"
+    assert c._classify_code_line("CREATE ROLE repl;") == "code"
+    assert c._classify_code_line("lsblk -f") == "code"
+    assert c._classify_code_line("{<уровень>,<категория>} ;") == "code"
+    assert c._classify_code_line("$REPL_PASSWORD") == "code"
+    # проза, начинающаяся с пути, — кириллице-доминантна -> НЕ код
+    assert c._classify_code_line(
+        "/etc/fstab настраивается администратором системы") == "prose"
+    assert c._classify_code_line("Обычное предложение на русском.") == "prose"
+    assert c._classify_code_line("| a | b |") == "gfm"
+    assert c._classify_code_line("’ ’ ’ ’") == "neutral"
+
+
+def test_fence_code_blocks_groups_runs_and_keeps_prose():
+    text = ("Выполнить команду:\n"
+            "lsblk -f\n"
+            "Вывод команды:\n"
+            "NAME FSTYPE UUID\n"
+            "vda ext4 44c1\n"
+            "Это обычный поясняющий абзац на русском языке.")
+    out = c._fence_code_blocks(text)
+    assert "```\nlsblk -f\n```" in out
+    assert "```\nNAME FSTYPE UUID\nvda ext4 44c1\n```" in out
+    assert "Выполнить команду:" in out and "```\nВыполнить" not in out
+    assert "Это обычный поясняющий абзац" in out
+
+
+def test_fence_does_not_touch_real_tables():
+    text = "| Параметр | Описание |\n| --- | --- |\n| x | y |"
+    assert c._fence_code_blocks(text) == text  # таблица не обёрнута
 
 
 def test_clean_pdf_text_strips_repeated_footer_and_page_numbers():

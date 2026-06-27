@@ -483,11 +483,13 @@ def _pdf_text_layer_diagnose(
 # PDF-таблицы через pdfplumber (по геометрии, а не по координатам слов)
 # --------------------------------------------------------------------------
 
-# Сначала пробуем стратегию по линиям/краям заливок, затем по тексту
-# (безбордюрные таблицы). Первая, давшая настоящие таблицы, — побеждает.
+# Только стратегия по линиям/краям заливок (она же ловит безбордюрные
+# таблицы с фоновой заливкой — через края прямоугольников). Стратегию по
+# тексту (кластеризация слов) НЕ используем: на плотно-расставленном коде/
+# SQL и многоколоночной прозе она порождает фейковые мега-«таблицы» и
+# крошит текст. Настоящие таблицы в PDF почти всегда разлинованы/с заливкой.
 _PDF_TABLE_STRATEGIES = (
     {"vertical_strategy": "lines", "horizontal_strategy": "lines"},
-    {"vertical_strategy": "text", "horizontal_strategy": "text"},
 )
 # Ячейка длиннее — это, скорее всего, проза, а не табличные данные.
 _PDF_LONG_CELL = 60
@@ -691,6 +693,18 @@ def _join_continued_tables(blocks: list) -> list:
 _PDF_PAGE_NUM_RE = re.compile(r"^\s*\d{1,4}\s*$")
 _PDF_ATX_RE = re.compile(r"^\s*#{1,6}(?:\s|$)")
 
+# --- распознавание строк кода/команд/конфигов для обёртки в ``` ---
+_FENCE = "```"
+_CODE_SQL_RE = re.compile(
+    r"^(CREATE|ALTER|DROP|SELECT|INSERT|UPDATE|DELETE|GRANT|REVOKE|SET|MAC|"
+    r"WITH|TRUNCATE|CONNECTION|PUBLICATION|SUBSCRIPTION)\b")
+# CLI-вызов: команда (нижний регистр) + флаг -x / плейсхолдер <...> / путь.
+_CODE_CLI_RE = re.compile(r"^[a-z][a-z0-9._-]+\s+(?:-{1,2}[a-z]|<|/|\S+\s+-)")
+_GFM_ROW_RE = re.compile(r"^\s*\|.*\|\s*$")
+_CYR_RE = re.compile(r"[А-Яа-яЁё]")
+_LAT_RE = re.compile(r"[A-Za-z]")
+_CODE_STARTS = ("$", "{", "|-", "sudo ", "su ", "UUID=", "deb ", "./", "../")
+
 
 def _escape_stray_heading(line: str) -> str:
     """В PDF нет настоящих ATX-заголовков: '# ...' — это литеральный текст
@@ -705,14 +719,75 @@ def _escape_stray_heading(line: str) -> str:
     return line
 
 
-def _clean_pdf_text(text: str, page_count: int) -> str:
-    """Чистит типичный мусор PDF-текста: ложные `#`-заголовки и сквозные
-    колонтитулы (повторяющиеся короткие строки — номер документа, версия —
-    и страничные номера), которые текут в тело на стыках страниц."""
-    lines = [_escape_stray_heading(ln) for ln in text.split("\n")]
-    if page_count < 3:
-        return "\n".join(lines)
+def _classify_code_line(line: str) -> str:
+    """code | prose | neutral | blank | gfm. Русская проза — кириллице-
+    доминантна; код — латиница/команды/SQL/$VAR/{<...>}/продолжение `\\`."""
+    s = line.strip()
+    if not s:
+        return "blank"
+    if _GFM_ROW_RE.match(s) or "│" in s or "┃" in s:
+        return "gfm"  # настоящая таблица или псевдографика — граница
+    cyr = len(_CYR_RE.findall(s))
+    lat = len(_LAT_RE.findall(s))
+    if cyr == 0 and lat == 0:
+        return "neutral"  # только пунктуация/цифры (часть блока кода)
+    if (_CODE_SQL_RE.match(s) or s.startswith(_CODE_STARTS)
+            or s.endswith("\\") or _CODE_CLI_RE.match(s)):
+        return "code"
+    if lat > cyr and lat >= 2:
+        return "code"  # латинице-доминантная строка
+    return "prose"
 
+
+def _fence_code_blocks(text: str) -> str:
+    """Оборачивает прогоны строк-кода в ```. Код в этих документах
+    построчно перемешан с прозой, поэтому фенсы часто короткие. Настоящие
+    таблицы (`| ... |`) и псевдографику не трогаем."""
+    out: list[str] = []
+    run: list[str] = []
+    pending: list[str] = []
+
+    def flush() -> None:
+        if run:
+            out.append(_FENCE)
+            out.extend(run)
+            out.append(_FENCE)
+            run.clear()
+
+    for ln in text.split("\n"):
+        cl = _classify_code_line(ln)
+        if cl == "code":
+            if pending:
+                run.extend(pending)
+                pending.clear()
+            run.append(ln)
+        elif cl == "neutral":
+            if run:
+                if pending:
+                    run.extend(pending)
+                    pending.clear()
+                run.append(ln)
+            else:
+                out.append(ln)
+        elif cl == "blank":
+            if run:
+                pending.append(ln)  # одиночный пробел внутри блока кода
+            else:
+                out.append(ln)
+        else:  # prose | gfm — граница блока
+            flush()
+            if pending:
+                out.extend(pending)
+                pending.clear()
+            out.append(ln)
+    flush()
+    out.extend(pending)
+    return "\n".join(out)
+
+
+def _strip_pdf_furniture(lines: list, page_count: int) -> list:
+    """Убирает сквозные колонтитулы (повторяющиеся короткие строки — номер
+    документа, версия) и страничные номера, текущие в тело на стыках стр."""
     counts: dict[str, int] = {}
     for ln in lines:
         s = ln.strip()
@@ -724,7 +799,6 @@ def _clean_pdf_text(text: str, page_count: int) -> str:
     # Страничные номера чистим только если колонтитул реально найден
     # (иначе можно срезать легитимное одиночное число).
     drop_page_numbers = bool(repeated)
-
     kept: list[str] = []
     for ln in lines:
         s = ln.strip()
@@ -736,7 +810,28 @@ def _clean_pdf_text(text: str, page_count: int) -> str:
         if drop_page_numbers and _PDF_PAGE_NUM_RE.match(ln):
             continue
         kept.append(ln)
-    return "\n".join(kept)
+    return kept
+
+
+def _clean_pdf_text(text: str, page_count: int) -> str:
+    """Чистит типичный мусор PDF-текста и улучшает разметку:
+    1) сквозные колонтитулы и страничные номера (многостраничные);
+    2) обёртка прогонов кода/команд/конфигов в ``` (плейсхолдеры `<...>`
+       и спецсимволы рендерятся буквально);
+    3) экранирование ложных `#`-заголовков ВНЕ код-блоков."""
+    lines = text.split("\n")
+    if page_count >= 3:
+        lines = _strip_pdf_furniture(lines, page_count)
+    text = _fence_code_blocks("\n".join(lines))
+    out: list[str] = []
+    in_fence = False
+    for ln in text.split("\n"):
+        if ln.strip() == _FENCE:
+            in_fence = not in_fence
+            out.append(ln)
+        else:
+            out.append(ln if in_fence else _escape_stray_heading(ln))
+    return "\n".join(out)
 
 
 def _pdf_tables_result(path: Path):
