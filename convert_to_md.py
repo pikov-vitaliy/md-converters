@@ -22,6 +22,9 @@ Flags:
                        with -o, preserve the source folder tree under DIR.
     --only EXT[,EXT]   when a glob/folder is given, keep only these
                        extensions (e.g.: --only pdf  or  --only docx,xlsx).
+    --pdf-tables MODE  auto (default) | off. PDF table extraction via
+                       pdfplumber (geometry-aware). 'off' falls back to the
+                       plain MarkItDown text path.
     --keep-images      do not touch images: keep base64 and PPTX phantom
                        image links (by default they are folded into a
                        compact placeholder).
@@ -73,6 +76,17 @@ try:
     import pypdfium2  # noqa: F401  (used in _pdf_page_count)
 except ImportError:  # pragma: no cover — pypdfium2 is a runtime dep
     pypdfium2 = None  # type: ignore[assignment]
+
+# pdfplumber извлекает таблицы PDF по геометрии (линии/края заливок) —
+# штатный PDF-путь MarkItDown ищет таблицы по координатам слов и теряет
+# структуру (колонки слипаются/рвутся). pdfplumber уже стоит как
+# транзитивная зависимость markitdown[pdf]; объявлен и напрямую в
+# pyproject. Импорт ленивый: без него PDF-таблицы просто не извлекаются,
+# остальное работает.
+try:
+    import pdfplumber  # noqa: F401  (used in PDF table extraction)
+except ImportError:  # pragma: no cover — pdfplumber is a runtime dep
+    pdfplumber = None  # type: ignore[assignment]
 
 # Windows-консоль бывает в cp1252/cp866/cp1251 — без reconfigure кириллица
 # в наших сообщениях уезжает в «кракозябры». Делаем ДО всех импортов, чтобы
@@ -400,10 +414,12 @@ def _source_id_matches(existing: str | None, expected: str | None) -> bool:
 def front_matter(source: str, title: str | None, tool: str,
                  source_path: str | None = None,
                  source_id: str | None = None,
-                 pdf_text_layer: str | None = None) -> str:
+                 pdf_text_layer: str | None = None,
+                 pdf_tables: int | None = None) -> str:
     """Build YAML front-matter. pdf_text_layer — PDF-specific diagnostic:
     'present' (text-rich PDF) or 'absent' (image-only / scan, no text).
-    None — поле не пишется (используется для не-PDF форматов)."""
+    pdf_tables — число таблиц, извлечённых через pdfplumber (PDF-путь).
+    None — соответствующее поле не пишется (не-PDF форматы)."""
     lines = ["---"]
     if title:
         lines.append(f"title: {_yaml_str(title)}")
@@ -415,6 +431,8 @@ def front_matter(source: str, title: str | None, tool: str,
         lines.append(f"source_id: {_yaml_str(source_id)}")
     if pdf_text_layer is not None:
         lines.append(f"pdf_text_layer: {pdf_text_layer}")
+    if pdf_tables is not None:
+        lines.append(f"pdf_tables: {pdf_tables}")
     lines.append(f"converted: {date.today().isoformat()}")
     lines.append(f"generator: {tool} {__version__} (MarkItDown)")
     lines.append("---")
@@ -459,6 +477,236 @@ def _pdf_text_layer_diagnose(
     if printable < threshold:
         return "absent"
     return "present"
+
+
+# --------------------------------------------------------------------------
+# PDF-таблицы через pdfplumber (по геометрии, а не по координатам слов)
+# --------------------------------------------------------------------------
+
+# Сначала пробуем стратегию по линиям/краям заливок, затем по тексту
+# (безбордюрные таблицы). Первая, давшая настоящие таблицы, — побеждает.
+_PDF_TABLE_STRATEGIES = (
+    {"vertical_strategy": "lines", "horizontal_strategy": "lines"},
+    {"vertical_strategy": "text", "horizontal_strategy": "text"},
+)
+# Ячейка длиннее — это, скорее всего, проза, а не табличные данные.
+_PDF_LONG_CELL = 60
+
+
+class _PdfResult:
+    """Лёгкая замена результата MarkItDown для PDF-пути с таблицами:
+    тот же интерфейс (.text_content/.title), плюс число таблиц."""
+
+    def __init__(self, text_content: str, pdf_tables: int) -> None:
+        self.text_content = text_content
+        self.title = None
+        self.pdf_tables = pdf_tables
+
+
+def _pdf_cell(value) -> str:
+    if value is None:
+        return ""
+    return str(value).replace("\n", " ").strip()
+
+
+def _row_populated(row) -> int:
+    return sum(1 for c in row if c is not None and str(c).strip())
+
+
+def _row_text(row) -> str:
+    return " ".join(_pdf_cell(c) for c in row if _pdf_cell(c))
+
+
+def _drop_empty_columns(rows: list) -> list:
+    """Убирает столбцы, пустые во всех строках (артефакт безбордюрных
+    таблиц, где заливка добавляет лишнюю колонку)."""
+    if not rows:
+        return rows
+    width = max(len(r) for r in rows)
+    keep = [
+        col for col in range(width)
+        if any(col < len(r) and r[col] is not None
+               and str(r[col]).strip() for r in rows)
+    ]
+    if len(keep) == width:
+        return rows
+    return [[r[c] if c < len(r) else None for c in keep] for r in rows]
+
+
+def _looks_like_table(rows: list) -> bool:
+    """Отсекает прозу, обёрнутую pdfplumber в «таблицу»: нужно ≥2 колонок,
+    ≥2 строк с 2+ заполненными ячейками и не сплошной длинный текст."""
+    if not rows or max(len(r) for r in rows) < 2:
+        return False
+    if sum(1 for r in rows if _row_populated(r) >= 2) < 2:
+        return False
+    cells = [str(c) for r in rows for c in r
+             if c is not None and str(c).strip()]
+    if not cells:
+        return False
+    longish = sum(1 for c in cells if len(c.strip()) > _PDF_LONG_CELL)
+    return longish / len(cells) <= 0.5
+
+
+def _segment_table_rows(rows: list) -> list:
+    """Делит «сырые» строки на блоки по порядку чтения: ("table", rows)
+    для строк с 2+ ячейками и ("text", str) для строк-склеек (заголовки
+    над/под таблицей и между разделами, прилипшие из-за заливки)."""
+    blocks: list = []
+    current: list = []
+    for row in rows:
+        if _row_populated(row) >= 2:
+            current.append(row)
+            continue
+        if current:
+            blocks.append(("table", current))
+            current = []
+        text = _row_text(row)
+        if text:
+            blocks.append(("text", text))
+    if current:
+        blocks.append(("table", current))
+    return blocks
+
+
+def _table_to_gfm(rows: list) -> str:
+    """Строки -> GitHub-flavored Markdown. Экранирует `|`, схлопывает
+    переносы, дополняет рваные строки. Без pandas/tabulate — те не
+    экранируют `|` и тянут лишние зависимости."""
+    width = max(len(r) for r in rows)
+    norm = []
+    for row in rows:
+        cells = [_pdf_cell(c).replace("|", "\\|") for c in row]
+        cells += [""] * (width - len(cells))
+        norm.append(cells)
+    out = ["| " + " | ".join(norm[0]) + " |",
+           "| " + " | ".join("---" for _ in norm[0]) + " |"]
+    out += ["| " + " | ".join(r) + " |" for r in norm[1:]]
+    return "\n".join(out)
+
+
+def _crop_text(page, top0: float, top1: float) -> str:
+    """Текст полосы страницы [top0; top1) — то, что вне таблицы. Так
+    содержимое таблицы не дублируется прозой."""
+    if top1 - top0 < 2:
+        return ""
+    try:
+        crop = page.crop((0, max(0, top0), page.width,
+                          min(page.height, top1)))
+        return (crop.extract_text() or "").strip()
+    except Exception:
+        return ""
+
+
+def _page_blocks(page) -> list:
+    """Упорядоченные блоки страницы: ("text", str) / ("table", rows).
+    Если настоящих таблиц нет — весь текст страницы одним блоком."""
+    regions = []
+    for settings in _PDF_TABLE_STRATEGIES:
+        try:
+            found = page.find_tables(settings)
+        except Exception:
+            found = []
+        for tbl in found:
+            try:
+                rows = tbl.extract()
+            except Exception:
+                continue
+            has_table = any(
+                _looks_like_table(_drop_empty_columns(block))
+                for kind, block in _segment_table_rows(rows)
+                if kind == "table"
+            )
+            if has_table:
+                regions.append((tbl.bbox, rows))
+        if regions:
+            break
+
+    if not regions:
+        text = (page.extract_text() or "").strip()
+        return [("text", text)] if text else []
+
+    regions.sort(key=lambda r: r[0][1])
+    blocks: list = []
+    cursor = 0.0
+    for bbox, rows in regions:
+        top, bottom = bbox[1], bbox[3]
+        if top < cursor - 1:  # перекрытие с уже обработанной таблицей
+            continue
+        above = _crop_text(page, cursor, top)
+        if above:
+            blocks.append(("text", above))
+        for kind, block in _segment_table_rows(rows):
+            if kind == "text":
+                blocks.append(("text", block))
+                continue
+            block = _drop_empty_columns(block)
+            if _looks_like_table(block):
+                blocks.append(("table", block))
+            else:
+                joined = "\n".join(
+                    _row_text(r) for r in block if _row_text(r)
+                )
+                if joined:
+                    blocks.append(("text", joined))
+        cursor = max(cursor, bottom)
+    below = _crop_text(page, cursor, page.height)
+    if below:
+        blocks.append(("text", below))
+    return blocks
+
+
+def _join_continued_tables(blocks: list) -> list:
+    """Склеивает таблицы, перенесённые на следующую страницу: соседние
+    table-блоки с одинаковым числом колонок, где продолжение повторяет
+    строку-заголовок (типично для экспорта из Word/PowerPoint)."""
+    merged: list = []
+    for kind, content in blocks:
+        if kind == "table" and merged and merged[-1][0] == "table":
+            prev = merged[-1][1]
+            same_cols = (max(len(r) for r in prev) ==
+                         max(len(r) for r in content))
+            header_repeat = (
+                same_cols and content and prev and
+                [_pdf_cell(c) for c in content[0]] ==
+                [_pdf_cell(c) for c in prev[0]]
+            )
+            if header_repeat:
+                prev.extend(content[1:])
+                continue
+        merged.append((kind, list(content) if kind == "table" else content))
+    return merged
+
+
+def _pdf_tables_result(path: Path):
+    """PDF -> _PdfResult с Markdown-таблицами, либо None (pdfplumber нет,
+    документ без таблиц, или ничего не извлеклось — тогда вызывающий код
+    откатывается на штатный путь MarkItDown)."""
+    if pdfplumber is None:
+        return None
+    try:
+        doc_blocks: list = []
+        with pdfplumber.open(str(path)) as pdf:
+            for page in pdf.pages:
+                doc_blocks.extend(_page_blocks(page))
+                page.close()  # освобождаем кэш страницы сразу
+    except Exception:
+        return None
+    if not any(kind == "table" for kind, _ in doc_blocks):
+        return None  # таблиц нет — пусть отработает обычный путь
+    doc_blocks = _join_continued_tables(doc_blocks)
+    parts = []
+    table_count = 0
+    for kind, content in doc_blocks:
+        if kind == "table":
+            parts.append(_table_to_gfm(content))
+            table_count += 1
+        elif content:
+            parts.append(content)
+    text = "\n\n".join(p for p in parts if p).strip()
+    if not text:
+        return None
+    return _PdfResult(text + "\n", table_count)
 
 
 def _img_placeholder(match: re.Match) -> str:
@@ -683,6 +931,7 @@ def _emit(target: Path, result, source: str, frontmatter: bool,
         text = front_matter(
             source, title, tool, source_path, source_id,
             pdf_text_layer=pdf_text_layer,
+            pdf_tables=getattr(result, "pdf_tables", None),
         ) + text
     target.parent.mkdir(parents=True, exist_ok=True)
     target.write_text(text, encoding="utf-8")
@@ -941,11 +1190,25 @@ def _file_too_large(path: Path, max_bytes: int) -> bool:
 def _convert_file_to_target(path: Path, target: Path, opts: dict,
                             suffix: str, source_id: str) -> str:
     print(f"Converting {path.name} ...")
-    try:
-        result, note = _convert_file_data(path)
-    except Exception as exc:
-        print(f"[error] Failed to convert {path.name}: {exc}")
-        return "fail"
+    result = None
+    note = None
+    # PDF: сначала пытаемся извлечь таблицы по геометрии (pdfplumber).
+    # Если документ без таблиц или pdfplumber недоступен — откат на
+    # штатный путь MarkItDown ниже (поведение не меняется).
+    if suffix == ".pdf" and opts.get("pdf_tables", "auto") != "off":
+        try:
+            pdf_result = _pdf_tables_result(path)
+        except Exception:
+            pdf_result = None
+        if pdf_result is not None:
+            result = pdf_result
+            note = f"{pdf_result.pdf_tables} table(s) via pdfplumber"
+    if result is None:
+        try:
+            result, note = _convert_file_data(path)
+        except Exception as exc:
+            print(f"[error] Failed to convert {path.name}: {exc}")
+            return "fail"
 
     # PDF-специфичная диагностика: image-only / scan-only PDF.
     # Если у PDF нет текстового слоя — MarkItDown вернёт пустой/мусорный
@@ -986,6 +1249,7 @@ def _worker_payload(opts: dict) -> str:
         "keep_images": opts["keep_images"],
         "unsafe_raw_markdown": opts.get("unsafe_raw_markdown", False),
         "tool": opts["tool"],
+        "pdf_tables": opts.get("pdf_tables", "auto"),
     }
     return json.dumps(payload, ensure_ascii=False)
 
@@ -1170,6 +1434,7 @@ def _parse(tokens: list) -> dict:
     parser.add_argument("--mirror", "--preserve-tree", dest="mirror",
                         action="store_true")
     parser.add_argument("--only")
+    parser.add_argument("--pdf-tables", dest="pdf_tables", default="auto")
     parser.add_argument("-h", "--help", action="store_true")
     parser.add_argument("--version", action="store_true")
     parser.add_argument("patterns", nargs="*")
@@ -1237,6 +1502,12 @@ def _parse(tokens: list) -> dict:
         errors.append(f"[error] {exc}")
         conversion_timeout = _DEFAULT_CONVERSION_TIMEOUT
 
+    pdf_tables = (parsed.pdf_tables or "auto").strip().strip('"').strip("'")
+    pdf_tables = pdf_tables.lower()
+    if pdf_tables not in ("auto", "off"):
+        errors.append("[error] --pdf-tables requires auto or off.")
+        pdf_tables = "auto"
+
     return {
         "patterns": parsed.patterns, "force": parsed.force,
         "recursive": parsed.recursive, "frontmatter": parsed.frontmatter,
@@ -1249,7 +1520,7 @@ def _parse(tokens: list) -> dict:
         "conversion_timeout": conversion_timeout,
         "sandbox": parsed.sandbox,
         "out_dir": out_dir, "mirror": parsed.mirror,
-        "only": only, "errors": errors,
+        "only": only, "pdf_tables": pdf_tables, "errors": errors,
     }
 
 
@@ -1274,6 +1545,7 @@ def _build_opts(parsed: dict, default_only: list | None) -> dict:
         "mirror": parsed["mirror"],
         "mirror_roots": {},
         "scan": scan,
+        "pdf_tables": parsed.get("pdf_tables", "auto"),
         "tool": _tool_name(only),
         "planned": set(),
     }

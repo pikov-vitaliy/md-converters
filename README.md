@@ -83,6 +83,7 @@ md-converters\
 | `tomd https://site/page --url-timeout 10 --max-url-mb 20` | URL с лимитами |
 | `tomd http://127.0.0.1:8000 --allow-private-url` | локальный URL явно |
 | `tomd папка --only docx,xlsx` | брать только Word и Excel |
+| `tomd отчёт.pdf --pdf-tables off` | без извлечения таблиц из PDF |
 | `tomd отчёт.docx --keep-images` | оставить картинки как base64 |
 | `tomd отчёт.html --unsafe-raw-markdown` | не очищать опасные ссылки/HTML |
 | `tomd отчёт.pdf --max-input-mb 200 --conversion-timeout 300` | лимиты файла |
@@ -352,12 +353,18 @@ Markdown прибирается (хвостовые пробелы, лишние
   структуру таблиц — они переводятся в аккуратные Markdown-таблицы. У Word
   есть мелкий нюанс: верхняя строка-заголовок может выйти пустой, а сами
   заголовки встанут первой строкой тела (данные при этом все на месте).
-- **PDF — таблицы ненадёжно.** В PDF нет структуры таблиц, только текст с
-  координатами на странице. Поэтому таблица из PDF может выйти и нормальной
-  Markdown-таблицей, и обычным текстом построчно — как повезёт с конкретным
-  файлом. Это ограничение самого формата PDF, а не утилиты. Если для каких-то
-  PDF таблицы критичны, можно подключить отдельный извлекатель
-  (pdfplumber / camelot) — скажите, добавлю.
+- **PDF — таблицы через pdfplumber (по геометрии).** Для PDF таблицы
+  извлекаются по геометрии страницы (линии/края заливок) библиотекой
+  `pdfplumber`, а не по координатам слов, как делает штатный путь
+  MarkItDown. Это надёжно переводит разлинованные и безбордюрные таблицы в
+  аккуратные Markdown-таблицы, отделяя их от прозы (текст и таблицы идут по
+  порядку чтения, без дублирования). Утилита склеивает таблицы,
+  перенесённые на следующую страницу (по повтору строки-заголовка), и
+  отбрасывает ложные «таблицы» из прозы. В front-matter пишется число
+  извлечённых таблиц: `pdf_tables: N`. Отключить и вернуться к штатному
+  тексту MarkItDown — флаг `--pdf-tables off`. Предел метода: полностью
+  «голые» таблицы без линий и фона и сканы (нет геометрии) — там результат
+  по-прежнему best-effort; для них помогает только OCR/ML-извлекатель.
 - **PDF без текстового слоя (сканы).** Если PDF — это отсканированные
   страницы без OCR, MarkItDown извлечёт пустой или мусорный Markdown.
   Утилита это распознаёт: печатает в stderr жёлтое предупреждение
@@ -565,6 +572,7 @@ tomd C:\reports -r -o C:\vault  # whole tree into one folder
 tomd C:\reports -r -o C:\vault --mirror  # preserve folders under vault
 tomd https://site/page          # a web page
 tomd folder --only docx,xlsx    # filter by type
+tomd report.pdf --pdf-tables off  # disable PDF table extraction
 ```
 
 Glob / folder / recursive input (skips `node_modules`, `.git`), overwrite
@@ -572,4 +580,6 @@ protection (`-f`), YAML front-matter, HTML encoding auto-detection, base64
 image collapsing (`--keep-images` keeps raw), tidy output, and a summary with
 a list of failures. `pdf2md` / `html2md` are the same tool restricted to one
 format. Tables convert cleanly from HTML / Word / Excel; PDF tables are
-best-effort (PDF stores no table structure).
+extracted by geometry via `pdfplumber` (cross-page joins, prose filtering,
+`pdf_tables: N` in front-matter; `--pdf-tables off` to disable). Fully
+borderless tables and scans remain best-effort.
