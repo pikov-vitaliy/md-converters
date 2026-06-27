@@ -49,6 +49,17 @@ def test_decode_utf8_bom_html():
     assert encoding == "utf-8-sig"
 
 
+def test_decode_utf32_le_bom_not_mistaken_for_utf16():
+    # UTF-32-LE начинается с \xff\xfe, как и UTF-16-LE; должен опознаться
+    # как utf-32 и декодироваться без мусора.
+    raw = "<html><body>Привет</body></html>".encode("utf-32")
+
+    text, encoding = convert_to_md.decode_html_bytes(raw)
+
+    assert "Привет" in text
+    assert encoding == "utf-32"
+
+
 def test_decode_fallback_reports_replacement(monkeypatch):
     class EmptyDetector:
         def best(self):

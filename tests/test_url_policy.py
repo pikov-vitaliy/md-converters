@@ -34,6 +34,17 @@ def test_public_url_policy_allows_public_resolved_ip(monkeypatch):
     )
 
 
+def test_cgnat_shared_address_is_not_public():
+    # 100.64.0.0/10 (RFC 6598) — не публичный; на Python <3.13 is_global
+    # ошибочно True, поэтому проверяем явное отвержение.
+    assert convert_to_md._is_public_ip("100.64.0.1") is False
+    assert convert_to_md._is_public_ip("100.127.255.254") is False
+
+
+def test_normal_public_ip_is_public():
+    assert convert_to_md._is_public_ip("93.184.216.34") is True
+
+
 def test_url_policy_rejects_non_http_schemes():
     with pytest.raises(ValueError, match="http and https"):
         convert_to_md._check_url_allowed(
@@ -160,3 +171,56 @@ def test_download_url_follows_checked_redirect(monkeypatch):
         "https://example.com/start",
         "https://example.com/final.html",
     ]
+
+
+def test_download_url_rejects_redirect_to_private_ip(monkeypatch):
+    """Редирект на приватный IP должен отклоняться (каждый hop
+    перепроверяется _check_url_allowed)."""
+    class Response:
+        def __init__(self, status_code, headers, url):
+            self.status_code = status_code
+            self.headers = headers
+            self.url = url
+
+        def raise_for_status(self):
+            pass
+
+        def close(self):
+            pass
+
+    class Session:
+        def __init__(self):
+            self.trust_env = True
+            self.headers = {}
+            self.calls = 0
+
+        def get(self, url, **kwargs):
+            self.calls += 1
+            return Response(
+                302, {"location": "http://127.0.0.1/secret"}, url
+            )
+
+        def close(self):
+            pass
+
+    session = Session()
+    monkeypatch.setitem(
+        sys.modules,
+        "requests",
+        SimpleNamespace(Session=lambda: session),
+    )
+    # example.com — публичный; литеральный 127.0.0.1 резолвится в себя.
+    monkeypatch.setattr(
+        convert_to_md,
+        "_resolved_ips",
+        lambda host: {"93.184.216.34"} if host == "example.com" else {host},
+    )
+
+    with pytest.raises(ValueError, match="non-public address"):
+        convert_to_md._download_url(
+            "https://example.com/start",
+            timeout=3,
+            max_bytes=100,
+            allow_private=False,
+        )
+    assert session.calls == 1  # дошли только до первого hop, дальше — отказ

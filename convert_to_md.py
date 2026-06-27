@@ -579,6 +579,8 @@ def _table_to_gfm(rows: list) -> str:
     """Строки -> GitHub-flavored Markdown. Экранирует `|`, схлопывает
     переносы, дополняет рваные строки. Без pandas/tabulate — те не
     экранируют `|` и тянут лишние зависимости."""
+    if not rows:
+        return ""
     width = max(len(r) for r in rows)
     norm = []
     for row in rows:
@@ -668,7 +670,8 @@ def _join_continued_tables(blocks: list) -> list:
     строку-заголовок (типично для экспорта из Word/PowerPoint)."""
     merged: list = []
     for kind, content in blocks:
-        if kind == "table" and merged and merged[-1][0] == "table":
+        if (kind == "table" and content and merged
+                and merged[-1][0] == "table" and merged[-1][1]):
             prev = merged[-1][1]
             same_cols = (max(len(r) for r in prev) ==
                          max(len(r) for r in content))
@@ -1101,6 +1104,12 @@ def decode_html_bytes(raw: bytes) -> tuple[str, str]:
         text = _decode_with(raw, "utf-8-sig")
         if text is not None:
             return text, "utf-8-sig"
+    # UTF-32 BOM проверяем ДО UTF-16: UTF-32-LE начинается с того же
+    # \xff\xfe, что и UTF-16-LE, иначе декодировалось бы в мусор.
+    if raw.startswith((b"\xff\xfe\x00\x00", b"\x00\x00\xfe\xff")):
+        text = _decode_with(raw, "utf-32")
+        if text is not None:
+            return text, "utf-32"
     if raw.startswith((b"\xff\xfe", b"\xfe\xff")):
         text = _decode_with(raw, "utf-16")
         if text is not None:
@@ -1166,9 +1175,19 @@ def _positive_float(value: str, name: str) -> float:
     return number
 
 
+# CGNAT / shared address space (RFC 6598). На Python <3.13 он ошибочно
+# проходит ip.is_global=True (исправлено в 3.13); отвергаем явно, чтобы
+# SSRF-проверка не зависела от версии Python (проект — 3.10..3.14).
+_SHARED_ADDRESS_SPACE = ipaddress.ip_network("100.64.0.0/10")
+
+
 def _is_public_ip(address: str) -> bool:
     ip = ipaddress.ip_address(address)
-    return ip.is_global
+    if not ip.is_global:
+        return False
+    if ip.version == 4 and ip in _SHARED_ADDRESS_SPACE:
+        return False
+    return True
 
 
 def _resolved_ips(hostname: str) -> set[str]:

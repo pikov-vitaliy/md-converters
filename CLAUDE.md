@@ -248,6 +248,19 @@ HTML (cp1251 и др.) через перекодировку во временн
     `pdf_tables: N` во front-matter; pdfplumber/pypdfium2 объявлены прямыми
     зависимостями. +21 тест (всего 77). Проверено на реальном документе
     (Предзащита_ВКР_Липатова, 21 стр., 7 таблиц). Обзор — в
-    `docs/pdf-tables-proposal.md`.
+    `docs/pdf-tables-proposal.md`. Доработки по обратной связи:
+    `_row_text` сохраняет переносы строк прозы (фикс «простыни» вокруг
+    таблиц); конвертация псевдографики таблиц (`│┌┬┐…`) в GFM
+    (`_convert_box_tables`/`_box_block_to_gfm` в `tidy`).
+11. **Хардинг по внешнему аудиту (2026-06-27).** Закрыты low-находки:
+    `_is_public_ip` явно отвергает CGNAT `100.64.0.0/10` (RFC 6598;
+    `is_global` ошибочен на Python <3.13); `decode_html_bytes` ловит
+    UTF-32 BOM до UTF-16 (иначе мусор); defensive-guard на пустой список
+    в `_table_to_gfm`/`_join_continued_tables`. +тесты: subprocess
+    TimeoutExpired→fail, редирект на приватный IP отвергается, CGNAT,
+    UTF-32. 90 pytest-тестов. Принято как есть (не баги): DNS-rebinding
+    TOCTOU URL (приемлемо для CLI с `--allow-private-url`), пин `magika`
+    (см. выше), Windows-CI без ruff/lock-check (платформонезависимы —
+    покрыты Linux-джобом).
 
 Проект считается завершённым и рабочим.

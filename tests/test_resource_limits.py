@@ -99,6 +99,37 @@ def test_subprocess_runner_uses_hidden_worker_and_timeout(
     assert calls["kwargs"]["errors"] == "strict"
 
 
+def test_subprocess_runner_returns_fail_on_timeout(tmp_path, monkeypatch):
+    src = tmp_path / "doc.html"
+    target = tmp_path / "doc.md"
+    src.write_text("<h1>ok</h1>", encoding="utf-8")
+
+    def fake_run(command, **kwargs):
+        raise convert_to_md.subprocess.TimeoutExpired(
+            cmd=command, timeout=kwargs.get("timeout", 9)
+        )
+
+    monkeypatch.setattr(convert_to_md.subprocess, "run", fake_run)
+    opts = {
+        "frontmatter": True,
+        "keep_images": False,
+        "unsafe_raw_markdown": False,
+        "tool": "tomd",
+        "conversion_timeout": 9,
+    }
+
+    status = convert_to_md._convert_file_subprocess(
+        src,
+        target,
+        opts,
+        ".html",
+        "path:abc",
+    )
+
+    assert status == "fail"
+    assert not target.exists()
+
+
 def test_subprocess_runner_fails_on_non_utf8_worker_output(
     tmp_path,
     monkeypatch,
