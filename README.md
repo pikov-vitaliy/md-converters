@@ -3,7 +3,7 @@
 [![CI](https://github.com/pikov-vitaliy/md-converters/actions/workflows/ci.yml/badge.svg)](https://github.com/pikov-vitaliy/md-converters/actions/workflows/ci.yml)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 
-Версия: **1.2.0**.
+Версия: **1.3.0**.
 
 Универсальный инструмент перевода документов в Markdown. Одна команда `tomd`
 понимает формат по расширению и конвертирует **что угодно**:
@@ -148,7 +148,7 @@ source_name: "sample-report.html"
 source_path: "examples\\sample-report.html"
 source_id: "path:..."
 converted: 2026-06-10
-generator: tomd 1.2.0 (MarkItDown)
+generator: tomd 1.3.0 (MarkItDown)
 ---
 
 # Отчёт об уязвимостях — demo-project
@@ -243,7 +243,7 @@ source_name: "имя-исходного-файла.docx"
 source_path: "путь\\к\\имя-исходного-файла.docx"
 source_id: "path:короткий-хэш-источника"
 converted: 2026-06-10
-generator: tomd 1.2.0 (MarkItDown)
+generator: tomd 1.3.0 (MarkItDown)
 ---
 ```
 
@@ -489,7 +489,7 @@ uv run --frozen pip-audit --progress-spinner off -r requirements-dev-audit.txt
 централизованно в `docs/vibe-audit/evidence/<ГГГГ-ММ-ДД>/` — по одной
 подпапке на дату.
 
-Идеи развития, которые не вошли в v1.2.0 (OCR сканов, пресет «для проверки
+Идеи развития, которые не вошли в текущую версию (OCR сканов, пресет «для проверки
 студенческих работ», выкидывание `.msg` из зависимостей), собраны в
 `docs/vibe-audit/future-ideas.md` — заметки на будущее, не план.
 
