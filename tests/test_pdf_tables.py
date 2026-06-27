@@ -1,10 +1,56 @@
 """PDF-таблицы через pdfplumber: чистые функции обработки строк, склейка
 переносных таблиц, поле front-matter, флаг --pdf-tables и интеграция в
-convert_file. Реальные PDF не нужны — тестируем логику на списках строк
-и мок-результатах (как в test_pdf_text_layer)."""
+convert_file. Большинство тестов — на списках строк и мок-результатах
+(как в test_pdf_text_layer); плюс несколько на реальном zero-dep PDF,
+чтобы покрыть саму pdfplumber-glue (find_tables/bbox/extract)."""
 from types import SimpleNamespace
 
+import pytest
+
 import convert_to_md as c
+
+
+def _ruled_table_pdf_bytes() -> bytes:
+    """Минимальный валидный PDF с разлинованной таблицей 2 кол. x 3 стр.
+    Сделан вручную, без сторонних библиотек (как tools/make_image_only_
+    pdf.py), чтобы не тащить reportlab в зависимости тестов."""
+    content = (
+        b"BT /F1 11 Tf 105 705 Td (Name) Tj ET\n"
+        b"BT /F1 11 Tf 225 705 Td (Value) Tj ET\n"
+        b"BT /F1 11 Tf 105 685 Td (alpha) Tj ET\n"
+        b"BT /F1 11 Tf 225 685 Td (1) Tj ET\n"
+        b"BT /F1 11 Tf 105 665 Td (beta) Tj ET\n"
+        b"BT /F1 11 Tf 225 665 Td (2) Tj ET\n"
+        b"0.5 w\n"
+        b"100 660 m 100 720 l S\n"
+        b"220 660 m 220 720 l S\n"
+        b"340 660 m 340 720 l S\n"
+        b"100 720 m 340 720 l S\n"
+        b"100 700 m 340 700 l S\n"
+        b"100 680 m 340 680 l S\n"
+        b"100 660 m 340 660 l S\n"
+    )
+    objs = [
+        b"<< /Type /Catalog /Pages 2 0 R >>",
+        b"<< /Type /Pages /Kids [3 0 R] /Count 1 >>",
+        b"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 595 842] "
+        b"/Resources << /Font << /F1 5 0 R >> >> /Contents 4 0 R >>",
+        b"<< /Length %d >>\nstream\n%s\nendstream" % (len(content), content),
+        b"<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>",
+    ]
+    out = b"%PDF-1.4\n"
+    offsets = []
+    for i, body in enumerate(objs, 1):
+        offsets.append(len(out))
+        out += b"%d 0 obj\n%s\nendobj\n" % (i, body)
+    xref_pos = len(out)
+    out += b"xref\n0 %d\n" % (len(objs) + 1)
+    out += b"0000000000 65535 f \n"
+    for off in offsets:
+        out += b"%010d 00000 n \n" % off
+    out += (b"trailer\n<< /Size %d /Root 1 0 R >>\nstartxref\n%d\n%%%%EOF\n"
+            % (len(objs) + 1, xref_pos))
+    return out
 
 
 # --- _table_to_gfm ---------------------------------------------------------
@@ -200,3 +246,41 @@ def test_convert_file_pdf_tables_off_skips_pdfplumber(tmp_path, monkeypatch):
     assert seen["pdf"] is False  # ветку pdfplumber не трогали
     body = (out / "doc.md").read_text(encoding="utf-8")
     assert "pdf_tables:" not in body  # двоеточие — само поле, не путь
+
+
+# --- реальный PDF: покрываем pdfplumber-glue (без моков) -------------------
+
+def test_pdf_tables_result_extracts_ruled_table(tmp_path):
+    pytest.importorskip("pdfplumber")
+    pdf = tmp_path / "ruled.pdf"
+    pdf.write_bytes(_ruled_table_pdf_bytes())
+    res = c._pdf_tables_result(pdf)
+    assert res is not None
+    assert res.pdf_tables == 1
+    assert "| Name | Value |" in res.text_content
+    assert "| alpha | 1 |" in res.text_content
+    assert "| beta | 2 |" in res.text_content
+
+
+def test_convert_file_real_ruled_pdf_end_to_end(tmp_path):
+    pytest.importorskip("pdfplumber")
+    src = tmp_path / "ruled.pdf"
+    src.write_bytes(_ruled_table_pdf_bytes())
+    out = tmp_path / "out"
+    out.mkdir()
+    opts = _pdf_opts(out)
+    opts["sandbox"] = False
+    assert c.convert_file(src, opts) == "ok"
+    body = (out / "ruled.md").read_text(encoding="utf-8")
+    assert "pdf_tables: 1" in body
+    assert "| Name | Value |" in body
+    assert "| alpha | 1 |" in body
+
+
+def test_pdf_tables_result_none_for_image_only_pdf(tmp_path):
+    pytest.importorskip("pdfplumber")
+    from tools.make_image_only_pdf import make_image_only_pdf
+    pdf = tmp_path / "scan.pdf"
+    make_image_only_pdf(pdf)
+    # Нет ни текста, ни таблиц -> None (откат на штатный путь MarkItDown).
+    assert c._pdf_tables_result(pdf) is None
