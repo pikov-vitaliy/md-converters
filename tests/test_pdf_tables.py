@@ -284,3 +284,56 @@ def test_pdf_tables_result_none_for_image_only_pdf(tmp_path):
     make_image_only_pdf(pdf)
     # Нет ни текста, ни таблиц -> None (откат на штатный путь MarkItDown).
     assert c._pdf_tables_result(pdf) is None
+
+
+# --- псевдографика таблиц (box-drawing) -> GFM ----------------------------
+
+_BOX_TABLE = (
+    "Что улучшилось:\n"
+    "┌──────────┬──────────┬──────────────┐\n"
+    "│ Метрика  │ Режим B  │ Режим C (НКК)│\n"
+    "│          │ (SCA/FIM)│              │\n"
+    "├──────────┼──────────┼──────────────┤\n"
+    "│ Recall   │ ~0,6     │ 0,96         │\n"
+    "│ F1       │ ~0,6     │ 0,97         │\n"
+    "└──────────┴──────────┴──────────────┘\n"
+    "Итог: улучшено."
+)
+
+
+def test_convert_box_tables_to_gfm():
+    out = c._convert_box_tables(_BOX_TABLE)
+    assert "Что улучшилось:" in out          # проза сверху сохранена
+    assert "Итог: улучшено." in out          # проза снизу сохранена
+    assert "| Метрика | Режим B (SCA/FIM) | Режим C (НКК) |" in out
+    assert "| --- | --- | --- |" in out
+    assert "| Recall | ~0,6 | 0,96 |" in out
+    assert "| F1 | ~0,6 | 0,97 |" in out
+    # символы псевдографики исчезли
+    assert not any(ch in out for ch in "│┌┐└┘├┤┬┴┼─")
+
+
+def test_convert_box_tables_leaves_plain_text():
+    txt = "Обычный текст без таблиц.\nВторая строка — с тире."
+    assert c._convert_box_tables(txt) == txt
+
+
+def test_convert_box_tables_leaves_ascii_gfm_untouched():
+    gfm = "| A | B |\n| --- | --- |\n| 1 | 2 |"
+    # ASCII-пайпы и дефисы не трогаем (ищем только │/┃)
+    assert c._convert_box_tables(gfm) == gfm
+
+
+def test_tidy_converts_box_table():
+    out = c.tidy(_BOX_TABLE, keep_images=False)
+    assert "| Recall | ~0,6 | 0,96 |" in out
+    assert "│" not in out
+
+
+# --- _row_text сохраняет переносы строк (анти-регрессия «простыни») --------
+
+def test_row_text_preserves_internal_newlines():
+    # Многострочная ячейка (абзац, попавший в таблицу) не должна
+    # схлопываться в одну строку.
+    assert c._row_text(["Строка 1\nСтрока 2\nСтрока 3"]) == \
+        "Строка 1\nСтрока 2\nСтрока 3"

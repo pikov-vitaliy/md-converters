@@ -514,7 +514,13 @@ def _row_populated(row) -> int:
 
 
 def _row_text(row) -> str:
-    return " ".join(_pdf_cell(c) for c in row if _pdf_cell(c))
+    """Текст строки как ПРОЗА (для блоков-склеек, не GFM-ячеек):
+    сохраняем внутренние переносы строк ячейки — иначе многострочный
+    абзац/заголовок, попавший в таблицу одной ячейкой, схлопнется в
+    «простыню» (регрессия)."""
+    cells = [str(c).strip() for c in row
+             if c is not None and str(c).strip()]
+    return "\n".join(cells)
 
 
 def _drop_empty_columns(rows: list) -> list:
@@ -785,13 +791,111 @@ def sanitize_markdown(text: str, keep_images: bool) -> str:
     return _REMAINING_DANGEROUS_SCHEME.sub("blocked", text)
 
 
+# Псевдографика таблиц (box-drawing, U+2500..U+257F). Такие таблицы рисуют
+# символами рамок прямо в тексте (часто — генераторы/ИИ); геометрии у них
+# нет, поэтому pdfplumber их не видит, а в Markdown-вьюере они разъезжаются.
+# Конвертируем их в GFM на этапе tidy (для любого формата; срабатывает
+# только при наличии вертикалей псевдографики — на прозу не влияет).
+_BOX_DRAW_CHARS = set(
+    "─━│┃┄┅┆┇┈┉┊┋╌╍╎╏"
+    "┌┍┎┏┐┑┒┓└┕┖┗┘┙┚┛├┝┞┟┠┡┢┣┤┥┦┧┨┩┪┫"
+    "┬┭┮┯┰┱┲┳┴┵┶┷┸┹┺┻┼┽┾┿╀╁╂╃╄╅╆╇╈╉╊╋"
+    "═║╔╦╗╠╬╣╚╩╝╒╓╕╖╗╘╙╛╜╞╟╡╢╤╥╧╨╪╫"
+)
+_BOX_VERTICAL = "│┃"
+
+
+def _is_box_row(line: str) -> bool:
+    return any(ch in line for ch in _BOX_VERTICAL)
+
+
+def _is_box_border(line: str) -> bool:
+    s = line.strip()
+    return bool(s) and all(ch in _BOX_DRAW_CHARS or ch.isspace() for ch in s)
+
+
+def _box_block_to_gfm(block: list) -> str | None:
+    """Блок строк псевдографики -> GFM-таблица или None (если непохоже)."""
+    rows = []
+    for line in block:
+        if not _is_box_row(line):
+            continue  # строка-граница — пропускаем
+        parts = re.split(r"[│┃]", line)
+        # срезаем по одной пустой ячейке с краёв (от внешних рамок),
+        # внутренние пустые ячейки сохраняем (позиции колонок важны)
+        if parts and parts[0].strip() == "":
+            parts = parts[1:]
+        if parts and parts[-1].strip() == "":
+            parts = parts[:-1]
+        cells = [p.strip() for p in parts]
+        if any(cells):
+            rows.append(cells)
+    if len(rows) < 2:
+        return None
+    width = max(len(r) for r in rows)
+    if width < 2:
+        return None
+    rows = [r + [""] * (width - len(r)) for r in rows]
+    # строки-продолжения (пустая первая ячейка) сливаем в предыдущую
+    merged = [rows[0]]
+    for r in rows[1:]:
+        if r[0] == "" and any(r):
+            prev = merged[-1]
+            for k in range(width):
+                if r[k]:
+                    prev[k] = (prev[k] + " " + r[k]).strip()
+        else:
+            merged.append(r)
+    if len(merged) < 2:
+        merged = rows  # после слияния осталась одна шапка — без слияния
+
+    def esc(cell: str) -> str:
+        return cell.replace("|", "\\|")
+    out = ["| " + " | ".join(esc(c) for c in merged[0]) + " |",
+           "| " + " | ".join("---" for _ in merged[0]) + " |"]
+    out += ["| " + " | ".join(esc(c) for c in r) + " |" for r in merged[1:]]
+    return "\n".join(out)
+
+
+def _convert_box_tables(text: str) -> str:
+    """Заменяет блоки псевдографики таблиц на GFM. Быстрый выход, если
+    вертикалей псевдографики нет (на обычный текст и GFM с ASCII `|` не
+    влияет — ищем только `│`/`┃`)."""
+    if not any(ch in text for ch in _BOX_VERTICAL):
+        return text
+    lines = text.split("\n")
+    out: list[str] = []
+    i = 0
+    n = len(lines)
+    while i < n:
+        if _is_box_row(lines[i]) or _is_box_border(lines[i]):
+            j = i
+            block = []
+            while j < n and (_is_box_row(lines[j])
+                             or _is_box_border(lines[j])):
+                block.append(lines[j])
+                j += 1
+            gfm = _box_block_to_gfm(block)
+            if gfm and any(_is_box_row(b) for b in block):
+                out.append(gfm)
+            else:
+                out.extend(block)
+            i = j
+        else:
+            out.append(lines[i])
+            i += 1
+    return "\n".join(out)
+
+
 def tidy(text: str, keep_images: bool, phantom_images: bool = False,
          safe_markdown: bool = True) -> str:
-    """Прибирает вывод: чистит управляющие символы, убирает хвостовые
-    пробелы, схлопывает пустые строки, обрезает края и (по умолчанию)
-    сворачивает base64-картинки и битые картинки-заглушки из PPTX."""
+    """Прибирает вывод: чистит управляющие символы, конвертирует
+    псевдографику таблиц в GFM, убирает хвостовые пробелы, схлопывает
+    пустые строки, обрезает края и (по умолчанию) сворачивает base64-
+    картинки и битые картинки-заглушки из PPTX."""
     text = _CTRL_TO_SPACE.sub(" ", text)
     text = _CTRL_DROP.sub("", text)
+    text = _convert_box_tables(text)
     if not keep_images:
         text = _DATA_IMG.sub(_img_placeholder, text)
         if phantom_images:
