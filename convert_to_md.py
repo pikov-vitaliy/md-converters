@@ -608,6 +608,28 @@ def _crop_text(page, top0: float, top1: float) -> str:
         return ""
 
 
+def _ranges_overlap(a0: float, a1: float, b0: float, b1: float) -> bool:
+    return a0 < b1 and b0 < a1
+
+
+def _region_to_blocks(rows: list) -> list:
+    """Сегментирует строки региона-таблицы в блоки ("table", rows) /
+    ("text", str): псевдо-таблицы из прозы демотятся в текст."""
+    out: list = []
+    for kind, block in _segment_table_rows(rows):
+        if kind == "text":
+            out.append(("text", block))
+            continue
+        block = _drop_empty_columns(block)
+        if _looks_like_table(block):
+            out.append(("table", block))
+        else:
+            joined = "\n".join(_row_text(r) for r in block if _row_text(r))
+            if joined:
+                out.append(("text", joined))
+    return out
+
+
 def _page_blocks(page) -> list:
     """Упорядоченные блоки страницы: ("text", str) / ("table", rows).
     Если настоящих таблиц нет — весь текст страницы одним блоком."""
@@ -639,26 +661,28 @@ def _page_blocks(page) -> list:
     regions.sort(key=lambda r: r[0][1])
     blocks: list = []
     cursor = 0.0
+    processed: list = []  # bbox уже выведенных регионов
     for bbox, rows in regions:
-        top, bottom = bbox[1], bbox[3]
-        if top < cursor - 1:  # перекрытие с уже обработанной таблицей
+        x0, top, x1, bottom = bbox[0], bbox[1], bbox[2], bbox[3]
+        if top < cursor - 1:  # перекрытие по вертикали с предыдущим
+            # Вложение/дубль (пересечение и по X) — пропускаем; таблицы
+            # рядом по горизонтали (side-by-side) — выводим без band-текста,
+            # чтобы не потерять контент (M-PDF-02).
+            nested = any(
+                _ranges_overlap(top, bottom, b[1], b[3])
+                and _ranges_overlap(x0, x1, b[0], b[2])
+                for b in processed
+            )
+            if nested:
+                continue
+            blocks.extend(_region_to_blocks(rows))
+            processed.append(bbox)
             continue
         above = _crop_text(page, cursor, top)
         if above:
             blocks.append(("text", above))
-        for kind, block in _segment_table_rows(rows):
-            if kind == "text":
-                blocks.append(("text", block))
-                continue
-            block = _drop_empty_columns(block)
-            if _looks_like_table(block):
-                blocks.append(("table", block))
-            else:
-                joined = "\n".join(
-                    _row_text(r) for r in block if _row_text(r)
-                )
-                if joined:
-                    blocks.append(("text", joined))
+        blocks.extend(_region_to_blocks(rows))
+        processed.append(bbox)
         cursor = max(cursor, bottom)
     below = _crop_text(page, cursor, page.height)
     if below:

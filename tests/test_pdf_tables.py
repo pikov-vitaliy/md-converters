@@ -250,6 +250,65 @@ def test_convert_file_pdf_tables_off_skips_pdfplumber(tmp_path, monkeypatch):
 
 # --- реальный PDF: покрываем pdfplumber-glue (без моков) -------------------
 
+def _wrap_pdf(content: bytes) -> bytes:
+    """Оборачивает поток содержимого в минимальный валидный PDF (1 стр.,
+    шрифт Helvetica). Используется для side-by-side фикстуры."""
+    objs = [
+        b"<< /Type /Catalog /Pages 2 0 R >>",
+        b"<< /Type /Pages /Kids [3 0 R] /Count 1 >>",
+        b"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 595 842] "
+        b"/Resources << /Font << /F1 5 0 R >> >> /Contents 4 0 R >>",
+        b"<< /Length %d >>\nstream\n%s\nendstream" % (len(content), content),
+        b"<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>",
+    ]
+    out = b"%PDF-1.4\n"
+    offsets = []
+    for i, body in enumerate(objs, 1):
+        offsets.append(len(out))
+        out += b"%d 0 obj\n%s\nendobj\n" % (i, body)
+    xref_pos = len(out)
+    out += b"xref\n0 %d\n" % (len(objs) + 1)
+    out += b"0000000000 65535 f \n"
+    for off in offsets:
+        out += b"%010d 00000 n \n" % off
+    out += (b"trailer\n<< /Size %d /Root 1 0 R >>\nstartxref\n%d\n%%%%EOF\n"
+            % (len(objs) + 1, xref_pos))
+    return out
+
+
+def _side_by_side_tables_pdf() -> bytes:
+    """Две разлинованные таблицы 3x2 рядом по горизонтали (одна Y)."""
+    txt = []
+    for label, bx in (("L", 75), ("R", 325)):
+        col2 = bx + 90
+        cells = [(label + "1", bx, 705), (label + "2", col2, 705),
+                 ("a" + label, bx, 685), ("b" + label, col2, 685),
+                 ("c" + label, bx, 665), ("d" + label, col2, 665)]
+        for t, x, y in cells:
+            txt.append(b"BT /F1 10 Tf %d %d Td (%s) Tj ET\n"
+                       % (x, y, t.encode()))
+    lines = [b"0.5 w\n"]
+    for lx in (70, 160, 250, 320, 410, 500):
+        lines.append(b"%d 660 m %d 720 l S\n" % (lx, lx))
+    for ly in (720, 700, 680, 660):
+        lines.append(b"70 %d m 250 %d l S\n" % (ly, ly))
+        lines.append(b"320 %d m 500 %d l S\n" % (ly, ly))
+    return _wrap_pdf(b"".join(txt) + b"".join(lines))
+
+
+def test_pdf_tables_result_keeps_side_by_side_tables(tmp_path):
+    # M-PDF-02: две таблицы на одной Y — обе извлекаются, контент не теряется.
+    pytest.importorskip("pdfplumber")
+    pdf = tmp_path / "sbs.pdf"
+    pdf.write_bytes(_side_by_side_tables_pdf())
+    res = c._pdf_tables_result(pdf)
+    assert res is not None
+    assert res.pdf_tables == 2          # обе таблицы, не одна
+    # контент обеих таблиц присутствует
+    assert "L1" in res.text_content and "aL" in res.text_content
+    assert "R1" in res.text_content and "aR" in res.text_content
+
+
 def test_pdf_tables_result_extracts_ruled_table(tmp_path):
     pytest.importorskip("pdfplumber")
     pdf = tmp_path / "ruled.pdf"
