@@ -406,6 +406,53 @@ def test_fence_does_not_touch_real_tables():
     assert c._fence_code_blocks(text) == text  # таблица не обёрнута
 
 
+# --- fence-aware tidy/sanitize (M-PDF-01, L-SAN-03, GAP-01) ----------------
+
+def test_tidy_preserves_dangerous_content_inside_fence():
+    # Для базы знаний по ИБ: <script>/javascript:/data: в код-примерах
+    # должны сохраняться (фенс-блок рендерится инертно).
+    f = "```"
+    body = (f + "\n<script>alert(1)</script>\n"
+            "[xss](javascript:alert(1))\ndata: app/json\n" + f + "\n")
+    out = c.tidy(body, keep_images=False)
+    assert "<script>alert(1)</script>" in out
+    assert "javascript:alert(1)" in out
+    assert "data: app/json" in out
+
+
+def test_tidy_still_sanitizes_outside_fence():
+    # Безопасность сохранена: опасное ВНЕ фенса по-прежнему чистится.
+    out = c.tidy("<script>alert(1)</script>\nобычный текст",
+                 keep_images=False)
+    assert "<script>" not in out
+
+
+def test_tidy_box_table_not_converted_inside_fence():
+    f = "```"
+    out = c.tidy(f + "\n│ a │ b │\n" + f + "\n", keep_images=False)
+    assert "│ a │ b │" in out  # псевдографика в коде не тронута
+
+
+# --- FP/FN refinements фенсинга (L-CF-01/02/03) ---------------------------
+
+def test_fence_skips_weak_single_term():
+    assert "```" not in c._fence_code_blocks("Python 3.12")
+    assert "```" not in c._fence_code_blocks("Nginx")
+    assert "```" not in c._fence_code_blocks("https://example.com/path")
+
+
+def test_fence_keeps_multiline_latin_code():
+    out = c._fence_code_blocks("NAME FSTYPE UUID\nvda ext4 44c1")
+    assert "```\nNAME FSTYPE UUID\nvda ext4 44c1\n```" in out
+
+
+def test_fence_russian_comment_continues_code_block():
+    out = c._fence_code_blocks(
+        "sudo nft add rule\n# настройка порта\nsudo nft list")
+    assert out.count("```") == 2          # один общий блок
+    assert "# настройка порта" in out
+
+
 def test_clean_pdf_text_strips_repeated_footer_and_page_numbers():
     lines = []
     for p in range(6):

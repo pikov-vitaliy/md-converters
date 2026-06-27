@@ -704,6 +704,28 @@ _GFM_ROW_RE = re.compile(r"^\s*\|.*\|\s*$")
 _CYR_RE = re.compile(r"[А-Яа-яЁё]")
 _LAT_RE = re.compile(r"[A-Za-z]")
 _CODE_STARTS = ("$", "{", "|-", "sudo ", "su ", "UUID=", "deb ", "./", "../")
+_CODE_PUNCT_RE = re.compile(r"[=;{}()<>$\\|/]|--|::")
+_BARE_URL_RE = re.compile(r"^https?://\S+$")
+
+
+def _has_code_marker(s: str) -> bool:
+    return bool(_CODE_SQL_RE.match(s) or s.startswith(_CODE_STARTS)
+                or s.endswith("\\") or _CODE_CLI_RE.match(s))
+
+
+def _is_weak_code_line(line: str) -> bool:
+    """Латинице-доминантная строка БЕЗ явных маркеров кода — вероятно
+    термин/название (Python 3.12, Nginx, Docker, MIT) или одиночный URL.
+    Одиночный такой «прогон» не фенсим (FP), но внутри блока кода он
+    остаётся (проверка применяется лишь к прогону из 1 строки)."""
+    s = line.strip()
+    if _has_code_marker(s):
+        return False
+    if _BARE_URL_RE.match(s):
+        return True
+    if _CODE_PUNCT_RE.search(s):
+        return False
+    return len(s.split()) <= 2
 
 
 def _escape_stray_heading(line: str) -> str:
@@ -748,11 +770,17 @@ def _fence_code_blocks(text: str) -> str:
     pending: list[str] = []
 
     def flush() -> None:
-        if run:
+        if not run:
+            return
+        nonblank = [r for r in run if r.strip()]
+        # Одиночная слабая строка (термин/URL без маркеров) — не фенсим.
+        if len(nonblank) == 1 and _is_weak_code_line(nonblank[0]):
+            out.extend(run)
+        else:
             out.append(_FENCE)
             out.extend(run)
             out.append(_FENCE)
-            run.clear()
+        run.clear()
 
     for ln in text.split("\n"):
         cl = _classify_code_line(ln)
@@ -774,6 +802,13 @@ def _fence_code_blocks(text: str) -> str:
                 pending.append(ln)  # одиночный пробел внутри блока кода
             else:
                 out.append(ln)
+        elif cl == "prose" and run and ln.lstrip().startswith("#"):
+            # Русскоязычный комментарий внутри блока кода — продолжение,
+            # не разрываем фенс (FN-фикс L-CF-03).
+            if pending:
+                run.extend(pending)
+                pending.clear()
+            run.append(ln)
         else:  # prose | gfm — граница блока
             flush()
             if pending:
@@ -1040,21 +1075,61 @@ def _convert_box_tables(text: str) -> str:
     return "\n".join(out)
 
 
+def _apply_outside_fences(text: str, fn) -> str:
+    """Применяет fn к сегментам ВНЕ код-блоков (```), оставляя содержимое
+    фенсов нетронутым. Так sanitize/конвертация псевдографики/сворачивание
+    картинок не искажают технический контент в код-блоках (важно для базы
+    знаний по ИБ: `<script>`, `javascript:`, `data:` в примерах). Контент
+    вне фенсов по-прежнему санитизируется — посторонняя активная разметка
+    не проходит (фенс-блок рендерится как инертный <pre><code>)."""
+    out: list[str] = []
+    prose: list[str] = []
+    in_fence = False
+
+    def flush() -> None:
+        if prose:
+            out.append(fn("\n".join(prose)))
+            prose.clear()
+
+    for line in text.split("\n"):
+        if line.strip() == _FENCE:
+            if in_fence:
+                out.append(line)
+                in_fence = False
+            else:
+                flush()
+                out.append(line)
+                in_fence = True
+        elif in_fence:
+            out.append(line)
+        else:
+            prose.append(line)
+    flush()
+    return "\n".join(out)
+
+
 def tidy(text: str, keep_images: bool, phantom_images: bool = False,
          safe_markdown: bool = True) -> str:
     """Прибирает вывод: чистит управляющие символы, конвертирует
     псевдографику таблиц в GFM, убирает хвостовые пробелы, схлопывает
     пустые строки, обрезает края и (по умолчанию) сворачивает base64-
-    картинки и битые картинки-заглушки из PPTX."""
+    картинки и битые картинки-заглушки из PPTX. Конвертация псевдографики,
+    сворачивание картинок и санитизация применяются только ВНЕ код-блоков
+    (```), чтобы не искажать технический контент в примерах кода."""
     text = _CTRL_TO_SPACE.sub(" ", text)
     text = _CTRL_DROP.sub("", text)
-    text = _convert_box_tables(text)
-    if not keep_images:
-        text = _DATA_IMG.sub(_img_placeholder, text)
-        if phantom_images:
-            text = _PHANTOM_IMG.sub(_img_placeholder, text)
-    if safe_markdown:
-        text = sanitize_markdown(text, keep_images)
+
+    def _transform_prose(seg: str) -> str:
+        seg = _convert_box_tables(seg)
+        if not keep_images:
+            seg = _DATA_IMG.sub(_img_placeholder, seg)
+            if phantom_images:
+                seg = _PHANTOM_IMG.sub(_img_placeholder, seg)
+        if safe_markdown:
+            seg = sanitize_markdown(seg, keep_images)
+        return seg
+
+    text = _apply_outside_fences(text, _transform_prose)
     out: list[str] = []
     blank = False
     for line in text.replace("\r\n", "\n").replace("\r", "\n").split("\n"):
