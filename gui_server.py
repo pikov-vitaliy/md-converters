@@ -19,6 +19,7 @@ import tempfile
 import time
 import uuid
 import webbrowser
+import zipfile
 from collections import OrderedDict
 from pathlib import Path
 from typing import AsyncGenerator
@@ -106,6 +107,36 @@ def _purge_expired_downloads():
     ]
     for k in expired:
         _downloads.pop(k, None)
+
+
+# --- ③ ZIP-хранилище (папка из браузера → один .zip) ---
+_MAX_ZIP_ENTRIES = 5
+_ZIP_STORE: OrderedDict[str, tuple[str, bytes]] = OrderedDict()
+
+
+def _add_zip(zip_id: str, filename: str, data: bytes):
+    _ZIP_STORE[zip_id] = (filename, data)
+    _ZIP_STORE.move_to_end(zip_id)
+    while len(_ZIP_STORE) > _MAX_ZIP_ENTRIES:
+        _ZIP_STORE.popitem(last=False)
+
+
+def _safe_rel(rel_path: str, fallback: str) -> Path:
+    """Безопасный ОТНОСИТЕЛЬНЫЙ путь из webkitRelativePath.
+
+    Подпапки сохраняем, '..'/абсолютное/диск-части выкидываем —
+    защита от выхода за tmpdir и от zip-slip (имя записи берём
+    из md_path.relative_to(tmpdir)).
+    """
+    parts = []
+    for raw in rel_path.replace("\\", "/").split("/"):
+        raw = raw.strip()
+        if raw in ("", ".", "..") or ":" in raw:
+            continue
+        parts.append(raw)
+    if not parts:
+        parts = [fallback]
+    return Path(*parts)
 
 
 # --- Port finding (BLK-3) ---
@@ -648,6 +679,119 @@ async def convert_picked(
 
     return StreamingResponse(
         generate(), media_type="text/event-stream",
+    )
+
+
+@app.post("/api/convert/zip")
+async def convert_zip(
+    files: list[UploadFile],
+    paths: str = Form("[]"),
+    force: bool = Form(False),
+    frontmatter: bool = Form(True),
+    keep_images: bool = Form(False),
+    pdf_tables: str = Form("auto"),
+    only: str | None = Form(None),
+) -> StreamingResponse:
+    """③ Папка из браузера → один .zip с .md (структура сохранена).
+
+    Относительные пути приходят отдельным JSON-полем paths
+    (параллельно files), НЕ в имени файла — его H1 срезает до
+    basename. Дерево зеркалится в tmpdir, .md пишется на месте,
+    имя записи zip = md_path относительно tmpdir.
+    """
+    opts = _gui_opts(
+        force, frontmatter, keep_images, pdf_tables, only, None,
+    )
+    try:
+        rel_paths = json.loads(paths)
+        if not isinstance(rel_paths, list):
+            rel_paths = []
+    except ValueError:
+        rel_paths = []
+
+    async def generate() -> AsyncGenerator[str, None]:
+        tmpdir = Path(tempfile.mkdtemp(prefix="md_zip_"))
+        collected: list[tuple[str, str]] = []
+        try:
+            jobs = []
+            for i, upload in enumerate(files):
+                base = _safe_filename(
+                    upload.filename or f"file{i}"
+                )
+                rel = rel_paths[i] if i < len(rel_paths) else base
+                src = tmpdir / _safe_rel(rel, base)
+                try:
+                    await _save_upload_streaming(upload, src)
+                except (ValueError, OSError) as exc:
+                    yield _sse("error", {
+                        "file": rel, "error": str(exc),
+                    })
+                    continue
+                yield _sse("start", {"file": rel})
+                jobs.append((src, rel))
+            for src, rel in jobs:
+                try:
+                    res = await _run_conversion(
+                        _convert_with_capture, src, opts
+                    )
+                except Exception as exc:
+                    yield _sse("error", {
+                        "file": rel,
+                        "error": f"{type(exc).__name__}: {exc}",
+                    })
+                    continue
+                md_path = res["md_path"]
+                full_content, preview = _read_output(md_path)
+                if full_content and md_path:
+                    entry = md_path.relative_to(tmpdir).as_posix()
+                    collected.append((entry, full_content))
+                yield _sse("done", {
+                    "file": rel,
+                    "status": res["status"],
+                    "log": res["log"],
+                    "warnings": res["warnings"],
+                    "preview": preview,
+                    "download_id": "",
+                })
+            zip_id = ""
+            if collected:
+                buf = io.BytesIO()
+                with zipfile.ZipFile(
+                    buf, "w", zipfile.ZIP_DEFLATED
+                ) as zf:
+                    for entry, content in collected:
+                        zf.writestr(entry, content)
+                zip_id = uuid.uuid4().hex[:12]
+                _add_zip(zip_id, "markdown.zip", buf.getvalue())
+            yield _sse("zip", {
+                "zip_id": zip_id, "count": len(collected),
+            })
+            yield _sse("complete", {})
+        finally:
+            shutil.rmtree(tmpdir, ignore_errors=True)
+
+    return StreamingResponse(
+        generate(), media_type="text/event-stream",
+    )
+
+
+@app.get("/api/download_zip")
+async def download_zip(zip_id: str):
+    """③ Скачивание собранного .zip из памяти."""
+    entry = _ZIP_STORE.get(zip_id)
+    if not entry:
+        return JSONResponse(
+            {"error": "not found"}, status_code=404
+        )
+    filename, data = entry
+    return StreamingResponse(
+        iter([data]),
+        media_type="application/zip",
+        headers={
+            "Content-Disposition": (
+                f'attachment; filename="{filename}"'
+            )
+        },
     )
 
 

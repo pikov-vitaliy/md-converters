@@ -114,6 +114,18 @@ flex-wrap:wrap">
   папку…</button>
 </div>
 
+<!-- ③ Папка через браузер → один .zip (структура сохранена) -->
+<div style="display:flex;gap:8px;align-items:center;margin:16px 0;
+flex-wrap:wrap">
+  <span style="color:#aaa;font-size:.9rem">Папка через браузер
+  (скачать .zip):</span>
+  <input type="file" id="dirInput" webkitdirectory directory multiple
+  style="display:none">
+  <button class="btn"
+  onclick="document.getElementById('dirInput').click()">Папка →
+  ZIP</button>
+</div>
+
 <div class="section-title">Результаты</div>
 <div class="results" id="results"></div>
 
@@ -204,6 +216,14 @@ dropZone.addEventListener("drop", (e) => {
   convertFiles(e.dataTransfer.files);
 });
 
+const dirInput = document.getElementById("dirInput");
+if (dirInput) {
+  dirInput.addEventListener("change", () => {
+    if (dirInput.files.length > 0)
+      convertFolderZip(dirInput.files);
+  });
+}
+
 function addResult(name, status, extra) {
   var div = document.createElement("div");
   div.className = "result-item";
@@ -285,9 +305,56 @@ async function convertPicked(kind) {
   await readStream(resp);
 }
 
+// ③ Папка из браузера → один .zip (структура сохранена)
+async function convertFolderZip(fileList) {
+  const files = Array.from(fileList).filter(checkSize);
+  if (files.length === 0) return;
+  const fd = new FormData();
+  const paths = [];
+  files.forEach(f => {
+    fd.append("files", f);
+    paths.push(f.webkitRelativePath || f.name);
+  });
+  fd.append("paths", JSON.stringify(paths));
+  flagsToForm(fd, true);   // out_dir не нужен — отдаём zip
+  const resp = await fetch("/api/convert/zip", {
+    method: "POST", body: fd,
+  });
+  await readStream(resp);
+}
+
+function downloadZip(zipId) {
+  window.open(
+    "/api/download_zip?zip_id=" + encodeURIComponent(zipId)
+  );
+}
+
 function handleSSE(data) {
   if (data.event === "cancelled") {
     return;  // выбор в диалоге отменён — ничего не делаем
+  }
+  if (data.event === "zip") {
+    if (data.zip_id) {
+      var zdiv = document.createElement("div");
+      zdiv.className = "result-item";
+      zdiv.style.background = "#16313e";
+      var znm = document.createElement("span");
+      znm.className = "name";
+      znm.textContent = "Архив готов: " + data.count + " файл(ов)";
+      var zact = document.createElement("span");
+      zact.className = "actions";
+      var zb = document.createElement("button");
+      zb.className = "btn btn-sm";
+      zb.textContent = "Скачать всё (.zip)";
+      zb.addEventListener("click", function() {
+        downloadZip(data.zip_id);
+      });
+      zact.appendChild(zb);
+      zdiv.appendChild(znm);
+      zdiv.appendChild(zact);
+      document.getElementById("results").prepend(zdiv);
+    }
+    return;
   }
   if (data.event === "start") {
     addResult(data.file, "pending");

@@ -5,6 +5,7 @@
 """
 import io
 import json
+import zipfile
 
 import pytest
 
@@ -276,3 +277,76 @@ def test_url_endpoint_reads_form_not_query(client):
     )
     assert r.status_code == 200
     assert '"event"' in r.text
+
+
+def _zip_id(body):
+    for line in body.split("\n"):
+        line = line.strip()
+        if line.startswith("data: ") and '"zip"' in line:
+            return json.loads(line[6:]).get("zip_id")
+    return None
+
+
+def test_zip_folder_preserves_tree_and_dedups(client):
+    """③: папка из браузера → zip, структура и dedup сохранены."""
+    files = [
+        ("files", ("report.csv",
+                   io.BytesIO(b"m,v\nA,1\n"), "text/csv")),
+        ("files", ("report.html",
+                   io.BytesIO(b"<p>B</p>"), "text/html")),
+        ("files", ("data.json",
+                   io.BytesIO(b'{"k":"C"}'), "application/json")),
+    ]
+    paths = [
+        "proj/a/report.csv",
+        "proj/a/report.html",
+        "proj/b/data.json",
+    ]
+    r = client.post(
+        "/api/convert/zip", files=files,
+        data={"paths": json.dumps(paths)},
+    )
+    assert r.status_code == 200
+    zid = _zip_id(r.text)
+    assert zid
+    zr = client.get("/api/download_zip", params={"zip_id": zid})
+    assert zr.status_code == 200
+    assert zr.headers["content-type"] == "application/zip"
+    z = zipfile.ZipFile(io.BytesIO(zr.content))
+    assert sorted(z.namelist()) == [
+        "proj/a/report (2).md",
+        "proj/a/report.md",
+        "proj/b/data.md",
+    ]
+
+
+def test_zip_paths_traversal_sanitized(client):
+    """③: '..'/абсолютные части в путях не дают выйти за дерево."""
+    files = [
+        ("files", ("x.csv",
+                   io.BytesIO(b"a,b\n1,2\n"), "text/csv")),
+    ]
+    paths = ["../../evil/x.csv"]
+    r = client.post(
+        "/api/convert/zip", files=files,
+        data={"paths": json.dumps(paths)},
+    )
+    assert r.status_code == 200
+    zid = _zip_id(r.text)
+    assert zid
+    z = zipfile.ZipFile(io.BytesIO(
+        client.get(
+            "/api/download_zip", params={"zip_id": zid}
+        ).content
+    ))
+    for n in z.namelist():
+        assert ".." not in n
+        assert not n.startswith("/")
+
+
+def test_download_zip_not_found(client):
+    """③: неизвестный zip_id → 404."""
+    r = client.get(
+        "/api/download_zip", params={"zip_id": "nope123"}
+    )
+    assert r.status_code == 404
