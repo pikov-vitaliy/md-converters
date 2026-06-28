@@ -236,8 +236,11 @@ def _sse(event: str, data: dict) -> str:
 # --- Safe filename (H1) ---
 
 def _safe_filename(name: str) -> str:
-    """H1: только basename, без пути и .. — защита от traversal."""
-    return Path(name).name or "unknown"
+    """H1: только basename — защита от traversal. И / и \\ как
+    разделители: загрузка может прийти с Windows-клиента на
+    Linux-сервер, где Path(...).name не срежет обратные слэши."""
+    base = name.replace("\\", "/").split("/")[-1]
+    return Path(base).name or "unknown"
 
 
 # --- Streaming upload (BLK-5) ---
