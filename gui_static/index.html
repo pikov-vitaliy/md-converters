@@ -25,26 +25,23 @@ margin-top:4px}
 select{background:#1a1a2e;border:1px solid #444;color:#e0e0e0;
 padding:4px;border-radius:4px}
 .results{margin:16px 0}
-/* Строка результата — три выровненные области: имя · кнопки · путь.
-   Колонка кнопок ФИКСИРОВАННОЙ ширины (124px): каждая строка —
-   свой grid, поэтому только фикс/fr-доли (а не auto) дают одинаковые
-   колонки во всех строках → ничего «не едет» при длинных именах. */
+/* Строка результата в ДВА ряда: имя на всю ширину (переносится
+   целиком, не режется), а кнопки + путь — строкой ниже под именем. */
 .result-item{padding:10px 14px;margin:6px 0;background:#16213e;
-border-radius:6px;display:grid;
-grid-template-columns:minmax(0,1fr) 124px minmax(0,1.3fr);
-gap:14px;align-items:center}
-.cell-name{display:flex;align-items:center;gap:8px;min-width:0}
+border-radius:6px;display:flex;flex-direction:column;gap:6px}
+.cell-name{display:flex;align-items:flex-start;gap:8px;min-width:0}
 .cell-name .status{flex:none;min-width:20px}
 .cell-name .name{font-family:monospace;font-size:.9rem;
-white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
-.cell-actions{display:flex;gap:6px;justify-content:flex-start;
-flex:none}
-.cell-path{font-size:.78rem;color:#7d8aa5;min-width:0;
-white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
-.cell-path:not(:empty){cursor:pointer}
-.cell-path:not(:empty):hover{color:#aab6d6;text-decoration:underline}
-.result-note{grid-column:1/-1;font-size:.78rem;
-padding:2px 0 0 28px;word-break:break-word}
+white-space:normal;overflow-wrap:anywhere;word-break:break-word}
+.cell-meta{display:flex;align-items:center;gap:12px;
+padding-left:28px;flex-wrap:wrap}
+.cell-actions{display:flex;gap:6px;flex:none}
+.cell-path{font-size:.78rem;color:#7d8aa5;min-width:0;flex:1;
+white-space:nowrap;overflow:hidden;text-overflow:ellipsis;
+cursor:pointer}
+.cell-path:hover{color:#aab6d6;text-decoration:underline}
+.result-note{font-size:.78rem;padding-left:28px;
+word-break:break-word}
 .btn{background:#7f7fff;color:#fff;border:none;padding:6px 14px;
 border-radius:4px;cursor:pointer;font-size:.85rem}
 .btn:hover{background:#6a6aff}
@@ -281,30 +278,35 @@ function renderRow(data) {
   nameCell.appendChild(st);
   nameCell.appendChild(nm);
 
-  var actCell = document.createElement("div");
-  actCell.className = "cell-actions";
-  if (data.preview)
-    actCell.appendChild(makeBtn("Превью", false, function() {
-      showPreview(data.preview);
-    }));
-  if (data.download_id)
-    actCell.appendChild(makeBtn("⬇", true, function() {
-      download(data.download_id);
-    }));
-
-  var pathCell = document.createElement("div");
-  pathCell.className = "cell-path";
-  if (data.output) {
-    pathCell.textContent = data.output;
-    pathCell.title = data.output;
-    pathCell.addEventListener("click", function() {
-      copyPath(data.output);
-    });
-  }
-
   div.appendChild(nameCell);
-  div.appendChild(actCell);
-  div.appendChild(pathCell);
+
+  // Строка 2: кнопки + путь ПОД именем (имя сверху на всю ширину)
+  if (data.preview || data.download_id || data.output) {
+    var meta = document.createElement("div");
+    meta.className = "cell-meta";
+    var actCell = document.createElement("div");
+    actCell.className = "cell-actions";
+    if (data.preview)
+      actCell.appendChild(makeBtn("Превью", false, function() {
+        showPreview(data.preview);
+      }));
+    if (data.download_id)
+      actCell.appendChild(makeBtn("⬇", true, function() {
+        download(data.download_id);
+      }));
+    meta.appendChild(actCell);
+    if (data.output) {
+      var pathCell = document.createElement("div");
+      pathCell.className = "cell-path";
+      pathCell.textContent = "→ " + data.output;
+      pathCell.title = data.output;
+      pathCell.addEventListener("click", function() {
+        copyPath(data.output);
+      });
+      meta.appendChild(pathCell);
+    }
+    div.appendChild(meta);
+  }
 
   var note = (data.status === "fail")
     ? (data.error
