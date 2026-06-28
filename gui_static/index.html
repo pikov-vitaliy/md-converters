@@ -25,11 +25,26 @@ margin-top:4px}
 select{background:#1a1a2e;border:1px solid #444;color:#e0e0e0;
 padding:4px;border-radius:4px}
 .results{margin:16px 0}
+/* Строка результата — три выровненные области: имя · кнопки · путь.
+   Колонка кнопок ФИКСИРОВАННОЙ ширины (124px): каждая строка —
+   свой grid, поэтому только фикс/fr-доли (а не auto) дают одинаковые
+   колонки во всех строках → ничего «не едет» при длинных именах. */
 .result-item{padding:10px 14px;margin:6px 0;background:#16213e;
-border-radius:6px;display:flex;align-items:center;gap:10px}
-.result-item .name{flex:1;font-family:monospace;font-size:.9rem}
-.result-item .status{font-weight:bold;min-width:24px}
-.result-item .actions{display:flex;gap:6px}
+border-radius:6px;display:grid;
+grid-template-columns:minmax(0,1fr) 124px minmax(0,1.3fr);
+gap:14px;align-items:center}
+.cell-name{display:flex;align-items:center;gap:8px;min-width:0}
+.cell-name .status{flex:none;min-width:20px}
+.cell-name .name{font-family:monospace;font-size:.9rem;
+white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.cell-actions{display:flex;gap:6px;justify-content:flex-start;
+flex:none}
+.cell-path{font-size:.78rem;color:#7d8aa5;min-width:0;
+white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.cell-path:not(:empty){cursor:pointer}
+.cell-path:not(:empty):hover{color:#aab6d6;text-decoration:underline}
+.result-note{grid-column:1/-1;font-size:.78rem;
+padding:2px 0 0 28px;word-break:break-word}
 .btn{background:#7f7fff;color:#fff;border:none;padding:6px 14px;
 border-radius:4px;cursor:pointer;font-size:.85rem}
 .btn:hover{background:#6a6aff}
@@ -226,19 +241,82 @@ if (dirInput) {
   });
 }
 
-function addResult(name, status, extra) {
+function makeBtn(label, isIcon, onClick) {
+  var b = document.createElement("button");
+  b.className = "btn btn-sm";
+  if (isIcon) b.innerHTML = label; else b.textContent = label;
+  b.addEventListener("click", onClick);
+  return b;
+}
+
+function copyPath(p) {
+  if (navigator.clipboard)
+    navigator.clipboard.writeText(p).catch(function(){});
+}
+
+// Единая строка результата — три выровненные области:
+// имя · кнопки · путь. L1: имя/путь через textContent (XSS).
+function renderRow(data) {
+  var icons = {ok:"✅", skip:"⏭️",
+    fail:"❌", pending:"⏳"};
   var div = document.createElement("div");
   div.className = "result-item";
-  div.setAttribute("data-file", name);
-  div.setAttribute("data-status", status);
-  var icons = {ok:"\u2705", skip:"\u23ed\ufe0f",
-    fail:"\u274c", pending:"\u23f3"};
-  var icon = icons[status] || "\u23f3";
-  // L1: name через textContent, не innerHTML (защита от XSS)
-  div.innerHTML = '<span class="status">' + icon +
-    '</span><span class="name"></span>' +
-    '<span class="actions">' + (extra||"") + '</span>';
-  div.querySelector(".name").textContent = name;
+  div.setAttribute("data-file", data.file);
+  div.setAttribute("data-status", data.status || "pending");
+
+  var nameCell = document.createElement("div");
+  nameCell.className = "cell-name";
+  var st = document.createElement("span");
+  st.className = "status";
+  st.textContent = icons[data.status] || icons.pending;
+  var nm = document.createElement("span");
+  nm.className = "name";
+  nm.textContent = data.file;
+  nm.title = data.file;
+  nameCell.appendChild(st);
+  nameCell.appendChild(nm);
+
+  var actCell = document.createElement("div");
+  actCell.className = "cell-actions";
+  if (data.preview)
+    actCell.appendChild(makeBtn("Превью", false, function() {
+      showPreview(data.preview);
+    }));
+  if (data.download_id)
+    actCell.appendChild(makeBtn("⬇", true, function() {
+      download(data.download_id);
+    }));
+
+  var pathCell = document.createElement("div");
+  pathCell.className = "cell-path";
+  if (data.output) {
+    pathCell.textContent = data.output;
+    pathCell.title = data.output;
+    pathCell.addEventListener("click", function() {
+      copyPath(data.output);
+    });
+  }
+
+  div.appendChild(nameCell);
+  div.appendChild(actCell);
+  div.appendChild(pathCell);
+
+  var note = (data.status === "fail")
+    ? (data.error
+        || (data.log ? data.log.substring(0, 200) : ""))
+    : "";
+  if (note) {
+    var n = document.createElement("div");
+    n.className = "result-note";
+    n.style.color = "#ff6666";
+    n.textContent = note;
+    div.appendChild(n);
+  }
+  return div;
+}
+
+function addResult(name, status) {
+  var div = renderRow({file: name, status: status});
   document.getElementById("results").prepend(div);
   return div;
 }
@@ -340,20 +418,22 @@ function handleSSE(data) {
       var zdiv = document.createElement("div");
       zdiv.className = "result-item";
       zdiv.style.background = "#16313e";
-      var znm = document.createElement("span");
-      znm.className = "name";
-      znm.textContent = "Архив готов: " + data.count + " файл(ов)";
-      var zact = document.createElement("span");
-      zact.className = "actions";
-      var zb = document.createElement("button");
-      zb.className = "btn btn-sm";
-      zb.textContent = "Скачать всё (.zip)";
-      zb.addEventListener("click", function() {
-        downloadZip(data.zip_id);
-      });
-      zact.appendChild(zb);
+      // сводная строка архива — широкая кнопка, поэтому flex, не grid
+      zdiv.style.display = "flex";
+      zdiv.style.gap = "12px";
+      var znm = document.createElement("div");
+      znm.className = "cell-name";
+      znm.textContent = "📦 Архив готов: "
+        + data.count + " файл(ов)";
+      var zact = document.createElement("div");
+      zact.className = "cell-actions";
+      zact.appendChild(makeBtn("Скачать всё (.zip)", false,
+        function() { downloadZip(data.zip_id); }));
+      var zpath = document.createElement("div");
+      zpath.className = "cell-path";
       zdiv.appendChild(znm);
       zdiv.appendChild(zact);
+      zdiv.appendChild(zpath);
       document.getElementById("results").prepend(zdiv);
     }
     return;
@@ -369,53 +449,7 @@ function handleSSE(data) {
         el.remove();
     });
 
-    var icons = {ok:"\u2705", skip:"\u23ed\ufe0f",
-      fail:"\u274c", pending:"\u23f3"};
-    var div = document.createElement("div");
-    div.className = "result-item";
-    div.setAttribute("data-file", data.file);
-    div.setAttribute("data-status", data.status);
-
-    // L1: name через textContent, не innerHTML (защита от XSS)
-    div.innerHTML = '<span class="status">' +
-      (icons[data.status]||"\u23f3") +
-      '</span><span class="name"></span>' +
-      '<span class="actions"></span>';
-    div.querySelector(".name").textContent = data.file;
-
-    var actions = div.querySelector(".actions");
-
-    // Кнопка «Превью» — показывает превью этого файла
-    if (data.preview) {
-      var btnPv = document.createElement("button");
-      btnPv.className = "btn btn-sm";
-      btnPv.textContent = "Превью";
-      btnPv.addEventListener("click", function() {
-        showPreview(data.preview);
-      });
-      actions.appendChild(btnPv);
-    }
-
-    // Кнопка «Скачать» — скачивает .md
-    if (data.download_id) {
-      var btnDl = document.createElement("button");
-      btnDl.className = "btn btn-sm";
-      btnDl.innerHTML = "\u2B07";
-      btnDl.addEventListener("click", function() {
-        download(data.download_id);
-      });
-      actions.appendChild(btnDl);
-    }
-
-    // Путь сохранённого .md (для «на месте» / out_dir)
-    if (data.output) {
-      var outDiv = document.createElement("div");
-      outDiv.style.cssText = "color:#888;font-size:.75rem;"
-        + "padding:2px 14px;margin-left:24px;word-break:break-all";
-      outDiv.textContent = "→ " + data.output;
-      div.appendChild(outDiv);
-    }
-
+    var div = renderRow(data);
     document.getElementById("results").prepend(div);
 
     // Автопревью первого успешного результата
@@ -423,29 +457,10 @@ function handleSSE(data) {
       showPreview(data.preview);
     }
 
-    // Показать ошибку
-    if (data.status === "fail" && data.log) {
-      var errDiv = document.createElement("div");
-      errDiv.style.cssText = "color:#ff6666;font-size:.8rem;"
-        + "padding:4px 14px;margin-left:24px";
-      errDiv.textContent = data.log.substring(0, 200);
-      div.appendChild(errDiv);
-    }
   } else if (data.event === "error") {
-    addResult(data.file, "fail");
-    if (data.error) {
-      var items2 = document.querySelectorAll(".result-item");
-      items2.forEach(function(el) {
-        if (el.getAttribute("data-file") === data.file
-            && el.getAttribute("data-status") === "fail") {
-          var e = document.createElement("div");
-          e.style.cssText = "color:#ff6666;font-size:.8rem;"
-            + "padding:4px 14px;margin-left:24px";
-          e.textContent = data.error;
-          el.appendChild(e);
-        }
-      });
-    }
+    var d = renderRow({file: data.file, status: "fail",
+      error: data.error});
+    document.getElementById("results").prepend(d);
   }
 }
 
