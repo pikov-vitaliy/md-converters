@@ -389,7 +389,12 @@ if ($LASTEXITCODE -eq 0 -and $hasGui -eq 'ok') {
     try {
         $ws2 = New-Object -ComObject WScript.Shell
         $sc2 = $ws2.CreateShortcut($guiLnk)
-        $sc2.TargetPath       = $python
+        # pythonw.exe — без чёрного консольного окна (python.exe его
+        # всегда рисует и пугает пользователей). gui_server.main()
+        # переживает отсутствие stdout под pythonw.
+        $pythonw = $python -replace 'python\.exe$', 'pythonw.exe'
+        if (-not (Test-Path -LiteralPath $pythonw)) { $pythonw = $python }
+        $sc2.TargetPath       = $pythonw
         $sc2.Arguments        = '-m gui_server'
         $sc2.WorkingDirectory = $kit
         $sc2.IconLocation     = $iconValue
