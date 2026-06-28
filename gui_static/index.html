@@ -39,6 +39,24 @@ border-radius:4px;cursor:pointer;font-size:.85rem}
 border-radius:6px;padding:14px;overflow-x:auto;
 white-space:pre-wrap;font-size:.85rem;line-height:1.5;max-height:
 500px;overflow-y:auto}
+#preview{background:#0f0f23;border:1px solid #333;border-radius:6px;
+padding:14px;max-height:500px;overflow-y:auto;line-height:1.6}
+#preview h1,#preview h2,#preview h3{color:#9f9fff;margin:12px 0 6px}
+#preview h1{font-size:1.3rem}#preview h2{font-size:1.15rem}
+#preview h3{font-size:1rem}
+#preview table{border-collapse:collapse;width:100%;margin:8px 0}
+#preview th,#preview td{border:1px solid #444;padding:6px 10px;
+text-align:left}
+#preview th{background:#1a1a3e}
+#preview code{background:#222;padding:2px 5px;border-radius:3px;
+font-family:monospace;font-size:.85rem;color:#ffcc66}
+#preview pre{background:#0a0a18;padding:10px;border-radius:4px;
+overflow-x:auto;margin:8px 0}
+#preview pre code{background:none;padding:0;color:#e0e0e0}
+#preview blockquote{border-left:3px solid #555;margin:8px 0;
+padding-left:12px;color:#999}
+#preview a{color:#7f7fff}
+#preview img{max-width:100%}
 .url-section{display:flex;gap:8px;margin:16px 0}
 .url-section input{flex:1;background:#16213e;border:1px solid #444;
 color:#e0e0e0;padding:8px;border-radius:4px}
@@ -91,9 +109,11 @@ border-bottom:1px solid #333;padding-bottom:4px}
 
 <div class="preview-section" id="previewSection" style="display:none">
   <div class="section-title">Превью</div>
-  <pre id="preview"></pre>
+  <div id="preview"></div>
 </div>
 
+<script src="marked.min.js"></script>
+<script src="purify.min.js"></script>
 <script>
 let currentPreview = "";
 
@@ -277,7 +297,10 @@ function handleSSE(data) {
 
 function showPreview() {
   document.getElementById("previewSection").style.display = "block";
-  document.getElementById("preview").textContent = currentPreview;
+  // BLK-7: marked.js рендерит, DOMPurify чистит от XSS
+  const raw = marked.parse(currentPreview);
+  const clean = DOMPurify.sanitize(raw);
+  document.getElementById("preview").innerHTML = clean;
 }
 
 function download(path) {
