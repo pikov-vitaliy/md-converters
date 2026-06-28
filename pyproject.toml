@@ -85,7 +85,7 @@ py-modules = ["convert_to_md", "gui_server", "_nostd"]
 include = ["gui_static*"]
 
 [tool.setuptools.package-data]
-"gui_static" = ["*.html", "*.js"]
+"gui_static" = ["*.html", "*.js", "*.svg"]
 
 [tool.ruff]
 line-length = 79

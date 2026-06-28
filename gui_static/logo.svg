@@ -1,0 +1,29 @@
+<svg viewBox="0 0 64 64" xmlns="http://www.w3.org/2000/svg"
+     role="img" aria-label="md-converters">
+  <defs>
+    <linearGradient id="mdLogo" x1="0" y1="0" x2="64" y2="64"
+                    gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#46E0A0"/>
+      <stop offset=".55" stop-color="#3E5FB0"/>
+      <stop offset="1" stop-color="#2E2A6E"/>
+    </linearGradient>
+  </defs>
+  <rect width="64" height="64" rx="15" fill="url(#mdLogo)"/>
+  <!-- документ: правый край заворачивается вниз к стрелке -->
+  <path d="M23 15h14a3 3 0 0 1 3 3v15a6 6 0 0 1-6 6h-2"
+        fill="none" stroke="#fff" stroke-width="3"
+        stroke-linecap="round" stroke-linejoin="round"/>
+  <path d="M23 15v25" fill="none" stroke="#fff" stroke-width="3"
+        stroke-linecap="round"/>
+  <!-- строки текста -->
+  <g stroke="#fff" stroke-width="2.6" stroke-linecap="round">
+    <path d="M28 22h8"/>
+    <path d="M28 27h8"/>
+    <path d="M28 32h5"/>
+  </g>
+  <!-- стрелка вниз -->
+  <g fill="#fff">
+    <rect x="29.6" y="36" width="4.8" height="8" rx="2.4"/>
+    <path d="M23.5 42.5h17L32 53z"/>
+  </g>
+</svg>
