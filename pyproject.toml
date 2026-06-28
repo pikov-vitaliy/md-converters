@@ -77,8 +77,11 @@ gui = [
 [tool.setuptools]
 py-modules = ["convert_to_md", "gui_server"]
 
+[tool.setuptools.packages.find]
+include = ["gui_static*"]
+
 [tool.setuptools.package-data]
-gui_static = ["*.html", "*.js"]
+"gui_static" = ["*.html", "*.js"]
 
 [tool.ruff]
 line-length = 79

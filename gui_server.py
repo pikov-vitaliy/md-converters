@@ -9,15 +9,14 @@ import asyncio
 import contextlib
 import io
 import json
-import os
 import shutil
-import signal
 import socket
 import sys
 import tempfile
 import time
 import uuid
 import webbrowser
+from collections import OrderedDict
 from pathlib import Path
 from typing import AsyncGenerator
 from urllib.parse import quote
@@ -39,12 +38,71 @@ _PORT_TRIES = 5
 _MAX_UPLOAD_BYTES = 100 * 1024 * 1024
 _ALLOWED_HOSTS = {"127.0.0.1", "localhost"}
 _PREVIEW_CHARS = 5000
+# Запретные корни для out_dir (защита от записи в системные папки)
+_FORBIDDEN_OUT_DIRS = {
+    Path("C:\\Windows"), Path("C:\\Program Files"),
+    Path("C:\\Program Files (x86)"),
+    Path("C:\\ProgramData"),
+    Path("C:\\Windows\\System32"),
+}
+
+
+def _validate_out_dir(raw: str | None) -> Path | None:
+    """Валидация папки вывода: не системная, не UNC, создава­емая."""
+    if not raw or not raw.strip():
+        return None
+    p = Path(raw.strip())
+    if str(p).startswith("\\\\"):
+        raise ValueError("UNC-пути не разрешены для папки вывода")
+    resolved = p.resolve()
+    for forbidden in _FORBIDDEN_OUT_DIRS:
+        try:
+            if resolved == forbidden or forbidden in (
+                resolved.parents
+            ):
+                msg = (
+                    f"Папка вывода не может быть внутри"
+                    f" {forbidden}"
+                )
+                raise ValueError(msg)
+        except (OSError, ValueError):
+            pass
+    return p
 
 _port: int = _PORT_DEFAULT
 _last_heartbeat = time.time()
 
-# Хранилище для скачивания: {dl_id: (filename, content)}
-_downloads: dict[str, tuple[str, str]] = {}
+# LRU-хранилище для скачивания: {dl_id: (filename, content, timestamp)}
+# Максимум 20 записей / 50 МБ суммарно, TTL 30 минут.
+_MAX_DL_ENTRIES = 20
+_MAX_DL_BYTES = 50 * 1024 * 1024
+_DL_TTL = 30 * 60
+_downloads: OrderedDict[
+    str, tuple[str, str, float]
+] = OrderedDict()
+
+
+def _add_download(dl_id: str, filename: str, content: str):
+    """Добавляет результат с LRU-очисткой по счётчику и размеру."""
+    _downloads[dl_id] = (filename, content, time.time())
+    _downloads.move_to_end(dl_id)
+    while len(_downloads) > _MAX_DL_ENTRIES:
+        _downloads.popitem(last=False)
+    total = sum(len(v[1]) for v in _downloads.values())
+    while total > _MAX_DL_BYTES and len(_downloads) > 1:
+        _, _, _ = _downloads.popitem(last=False)
+        total = sum(len(v[1]) for v in _downloads.values())
+
+
+def _purge_expired_downloads():
+    """Удаляет записи старше _DL_TTL."""
+    now = time.time()
+    expired = [
+        k for k, v in _downloads.items()
+        if now - v[2] > _DL_TTL
+    ]
+    for k in expired:
+        _downloads.pop(k, None)
 
 
 # --- Port finding (BLK-3) ---
@@ -70,9 +128,12 @@ def _find_free_port() -> int:
 
 # --- Lifespan ---
 
+# Глобальная ссылка на uvicorn-сервер для graceful shutdown
+_uvicorn_server: uvicorn.Server | None = None
+
 @contextlib.asynccontextmanager
 async def _lifespan(app: FastAPI):
-    global _port
+    global _port, _uvicorn_server
     asyncio.create_task(_open_browser_when_ready(_port))
     asyncio.create_task(_auto_shutdown_check())
     yield
@@ -228,7 +289,7 @@ def _gui_opts(
             core._DEFAULT_CONVERSION_TIMEOUT
         ),
         "sandbox": True,
-        "out_dir": Path(out_dir) if out_dir else None,
+        "out_dir": _validate_out_dir(out_dir),
         "mirror": False,
         "only": only,
         "pdf_tables": pdf_tables,
@@ -240,21 +301,34 @@ def _gui_opts(
 # --- Find output .md ---
 
 def _find_output(
-    src: Path, opts: dict
+    src: Path, opts: dict,
+    before: set[Path] | None = None,
 ) -> Path | None:
-    """Находит .md рядом с исходником (или в out_dir)."""
+    """Находит НОВЫЙ .md, созданный конвертацией.
+
+    Снимок до/после: если before передан — возвращает .md, которого
+    не было в before. Это единственный надёжный способ при одинаковых
+    stem в батче (report.pdf + report.docx → report (2).md).
+    Без before — fallback на glob по stem.
+    """
     dest_dir = opts.get("out_dir") or src.parent
+    if before is not None:
+        after = set(dest_dir.glob("*.md"))
+        new_files = after - before
+        if len(new_files) == 1:
+            return new_files.pop()
+        if len(new_files) > 1:
+            # Несколько новых — берём свежий по mtime
+            return sorted(
+                new_files,
+                key=lambda p: p.stat().st_mtime,
+                reverse=True,
+            )[0]
+        return None
+    # Fallback: glob по stem
     candidate = dest_dir / (src.stem + ".md")
     if candidate.exists():
         return candidate
-    n = 2
-    while True:
-        c = dest_dir / f"{src.stem} ({n}).md"
-        if c.exists():
-            return c
-        if not c.with_suffix("").exists():
-            break
-        n += 1
     return None
 
 
@@ -295,6 +369,9 @@ async def get_flags():
     }
 
 
+_CONVERT_SEMAPHORE = asyncio.Semaphore(3)
+
+
 # B1: Form(...) — параметры читаются из multipart body
 @app.post("/api/convert/files")
 async def convert_files(
@@ -312,11 +389,52 @@ async def convert_files(
         pdf_tables, only, out_dir,
     )
 
+    async def _convert_one(
+        src: Path, name: str,
+        before: set[Path],
+    ) -> dict:
+        """Конвертация одного файла с семафором (до 3 параллельно)."""
+        async with _CONVERT_SEMAPHORE:
+            try:
+                result = await asyncio.to_thread(
+                    _convert_with_capture, src, opts
+                )
+            except Exception as exc:
+                return {
+                    "file": name,
+                    "error": (
+                        f"{type(exc).__name__}: {exc}"
+                    ),
+                }
+            md_path = _find_output(src, opts, before)
+            preview = ""
+            full_content = ""
+            if md_path and md_path.exists():
+                full_content = md_path.read_text(
+                    encoding="utf-8"
+                )
+                preview = full_content[:_PREVIEW_CHARS]
+            dl_id = ""
+            if full_content:
+                dl_id = uuid.uuid4().hex[:12]
+                _add_download(
+                    dl_id, src.stem + ".md", full_content
+                )
+            return {
+                "file": name,
+                "status": result["status"],
+                "log": result["log"],
+                "warnings": result["warnings"],
+                "preview": preview,
+                "download_id": dl_id,
+            }
+
     async def generate() -> AsyncGenerator[str, None]:
         tmpdir = Path(tempfile.mkdtemp(prefix="md_gui_"))
         try:
+            # 1. Загрузка всех файлов (последовательно — upload stream)
+            jobs = []
             for upload in files:
-                # H1: безопасное имя файла
                 name = _safe_filename(
                     upload.filename or "unknown"
                 )
@@ -331,52 +449,31 @@ async def convert_files(
                         "error": str(exc),
                     })
                     continue
-
                 yield _sse("start", {"file": name})
+                jobs.append((src, name))
 
-                # BLK-1: threadpool
-                try:
-                    result = await asyncio.to_thread(
-                        _convert_with_capture, src, opts
-                    )
-                except Exception as exc:
-                    yield _sse("error", {
-                        "file": name,
-                        "error": (
-                            f"{type(exc).__name__}: {exc}"
-                        ),
-                    })
-                    continue
+            # 2. Параллельная конвертация (до 3 одновременно)
+            if jobs:
+                # Снимок dest_dir ДО конвертации — чтобы найти
+                # именно новые файлы (защита от same-stem)
+                dest_dir = opts.get("out_dir") or tmpdir
+                before = set(dest_dir.glob("*.md"))
+                tasks = [
+                    _convert_one(src, name, before)
+                    for src, name in jobs
+                ]
+                results = await asyncio.gather(
+                    *tasks, return_exceptions=False
+                )
+                # 3. Отдаём результаты последовательно
+                for r in results:
+                    if "error" in r:
+                        yield _sse("error", r)
+                    else:
+                        yield _sse("done", r)
 
-                # B2: читаем контент в память ДО удаления tmpdir
-                md_path = _find_output(src, opts)
-                preview = ""
-                full_content = ""
-                if md_path and md_path.exists():
-                    full_content = md_path.read_text(
-                        encoding="utf-8"
-                    )
-                    preview = full_content[:_PREVIEW_CHARS]
-
-                dl_id = ""
-                if full_content:
-                    dl_id = uuid.uuid4().hex[:12]
-                    out_name = src.stem + ".md"
-                    _downloads[dl_id] = (
-                        out_name, full_content
-                    )
-
-                yield _sse("done", {
-                    "file": name,
-                    "status": result["status"],
-                    "log": result["log"],
-                    "warnings": result["warnings"],
-                    "preview": preview,
-                    "download_id": dl_id,
-                })
             yield _sse("complete", {})
         finally:
-            # B2: tmpdir удаляется, но контент уже в _downloads
             shutil.rmtree(tmpdir, ignore_errors=True)
 
     return StreamingResponse(
@@ -402,6 +499,8 @@ async def convert_url_endpoint(
 
     async def generate() -> AsyncGenerator[str, None]:
         yield _sse("start", {"file": url})
+        dest_dir = opts.get("out_dir") or Path.cwd()
+        before = set(dest_dir.glob("*.md"))
         try:
             result = await asyncio.to_thread(
                 _convert_url_with_capture, url, opts
@@ -414,12 +513,14 @@ async def convert_url_endpoint(
             yield _sse("complete", {})
             return
 
+        # Находим НОВЫЙ .md через снимок до/после
         stem = core._url_stem(url)
-        dest_dir = opts.get("out_dir") or Path.cwd()
-        md_path = dest_dir / f"{stem}.md"
+        md_path = _find_output(
+            Path(f"{stem}.csv"), opts, before
+        )
         preview = ""
         full_content = ""
-        if md_path.exists():
+        if md_path and md_path.exists():
             full_content = md_path.read_text(
                 encoding="utf-8"
             )
@@ -428,8 +529,8 @@ async def convert_url_endpoint(
         dl_id = ""
         if full_content:
             dl_id = uuid.uuid4().hex[:12]
-            _downloads[dl_id] = (
-                f"{stem}.md", full_content
+            _add_download(
+                dl_id, f"{stem}.md", full_content
             )
 
         yield _sse("done", {
@@ -458,12 +559,13 @@ async def heartbeat():
 @app.get("/api/download")
 async def download_file(dl_id: str):
     """Скачивание готового .md из памяти."""
+    _purge_expired_downloads()
     entry = _downloads.get(dl_id)
     if not entry:
         return JSONResponse(
             {"error": "File not found"}, status_code=404
         )
-    filename, content = entry
+    filename, content, _ts = entry
     encoded = quote(filename, safe="")
     return StreamingResponse(
         iter([content.encode("utf-8")]),
@@ -480,30 +582,45 @@ async def download_file(dl_id: str):
 # --- Auto-shutdown ---
 
 async def _auto_shutdown_check():
-    """Авто-выключение: если вкладка закрыта 15с → shutdown."""
+    """Авто-выключение: если вкладка закрыта 60с → graceful stop.
+
+    Порог 60с (не 15): Chrome троттлит JS в фоновых вкладках
+    до ~1/мин. 15с приводило к ложному убийству сервера.
+    """
     while True:
-        await asyncio.sleep(5)
-        if time.time() - _last_heartbeat > 15:
-            os.kill(os.getpid(), signal.SIGINT)
+        await asyncio.sleep(10)
+        if time.time() - _last_heartbeat > 60:
+            if _uvicorn_server is not None:
+                _uvicorn_server.should_exit = True
+            else:
+                # Fallback для TestClient (без uvicorn server)
+                import os
+                import signal
+                os.kill(
+                    os.getpid(), signal.SIGINT
+                )
+            return
 
 
 # --- Entrypoint ---
 
 def main():
     """Точка входа tomd-gui: старт сервера."""
-    global _port
+    global _port, _uvicorn_server
     _port = _find_free_port()
     if sys.stdout.encoding and \
        sys.stdout.encoding.lower() not in ("utf-8", "utf8"):
         sys.stdout.reconfigure(encoding="utf-8")
     print(f"MD Converter GUI: http://127.0.0.1:{_port}/")
-    uvicorn.run(
+    config = uvicorn.Config(
         app,
         host="127.0.0.1",
         port=_port,
         log_level="warning",
         server_header=False,
     )
+    _uvicorn_server = uvicorn.Server(config)
+    _uvicorn_server.run()
 
 
 if __name__ == "__main__":
