@@ -57,6 +57,8 @@ overflow-x:auto;margin:8px 0}
 padding-left:12px;color:#999}
 #preview a{color:#7f7fff}
 #preview img{max-width:100%}
+#preview img[src=""],#preview img:not([src]){display:none}
+#preview hr{border:none;border-top:1px solid #333;margin:10px 0}
 .url-section{display:flex;gap:8px;margin:16px 0}
 .url-section input{flex:1;background:#16213e;border:1px solid #444;
 color:#e0e0e0;padding:8px;border-radius:4px}
@@ -447,28 +449,47 @@ function handleSSE(data) {
   }
 }
 
+// YAML-шапка ---...--- в начале .md не понимается marked (видит её
+// как setext-заголовок → огромный жирный блок). В ПРЕВЬЮ её убираем
+// (в самом .md-файле она остаётся). Метаданные кладём в <details>.
+function splitFrontMatter(md) {
+  var m = md.match(
+    /^---\r?\n([\s\S]*?)\r?\n---[ \t]*\r?\n?/
+  );
+  if (!m) return {meta: "", body: md};
+  return {meta: m[1], body: md.slice(m[0].length)};
+}
+
+function esc(s) {
+  return s.replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;").replace(/>/g, "&gt;");
+}
+
 function showPreview(text) {
   if (text) currentPreview = text;
   if (!currentPreview) return;
   document.getElementById("previewSection").style.display = "block";
   var el = document.getElementById("preview");
-  // BLK-7: marked.js рендерит, DOMPurify чистит от XSS
-  if (typeof marked !== "undefined" && typeof DOMPurify !== "undefined") {
+  var fm = splitFrontMatter(currentPreview);
+  // Метаданные — компактно и сворачиваемо, не мешают контенту
+  var metaHtml = fm.meta
+    ? '<details style="margin-bottom:10px;color:#888;'
+      + 'font-size:.8rem"><summary style="cursor:pointer">'
+      + 'метаданные (front-matter)</summary><pre>'
+      + esc(fm.meta) + '</pre></details>'
+    : "";
+  // BLK-7: marked рендерит контент, DOMPurify чистит от XSS
+  if (typeof marked !== "undefined"
+      && typeof DOMPurify !== "undefined") {
     try {
-      var raw = marked.parse(currentPreview);
-      var clean = DOMPurify.sanitize(raw);
-      el.innerHTML = clean;
+      el.innerHTML = metaHtml
+        + DOMPurify.sanitize(marked.parse(fm.body));
     } catch(e) {
-      el.innerHTML = "<pre>" + currentPreview
-        .replace(/&/g,"&amp;").replace(/</g,"&lt;")
-        .replace(/>/g,"&gt;") + "</pre>";
+      el.innerHTML = metaHtml + "<pre>" + esc(fm.body) + "</pre>";
     }
   } else {
-    el.innerHTML = "<pre>" + currentPreview
-      .replace(/&/g,"&amp;").replace(/</g,"&lt;")
-      .replace(/>/g,"&gt;") + "</pre>";
+    el.innerHTML = metaHtml + "<pre>" + esc(fm.body) + "</pre>";
   }
-  // Прокрутка к превью
   document.getElementById("previewSection")
     .scrollIntoView({behavior:"smooth", block:"nearest"});
 }
