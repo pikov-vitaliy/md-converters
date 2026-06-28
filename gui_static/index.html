@@ -94,7 +94,7 @@ border-bottom:1px solid #333;padding-bottom:4px}
 <div class="settings">
   <label title="Перезаписать существующий .md. Без галочки — если .md уже лежит рядом, файл пропускается (skip)."><input type="checkbox" id="force" onchange="save()"> Перезаписать (force)</label>
   <label title="Добавлять в начало .md служебную YAML-шапку: источник, дата, чем сконвертировано, число PDF-таблиц. Выкл — чистый .md без шапки."><input type="checkbox" id="frontmatter" checked onchange="save()"> YAML front-matter</label>
-  <label title="Встраивать картинки в .md как base64 — файл самодостаточный (картинки видно), но размер сильно растёт. Выкл (по умолчанию) — картинки заменяются плейсхолдером ![...]()."><input type="checkbox" id="keepImages" onchange="save()"> Сохранить картинки</label>
+  <label title="Встраивать картинки в .md как base64. Для PDF — извлекает встроенные растровые картинки (по страницам) и встраивает их; для HTML/DOCX — сохраняет уже встроенные. Файл самодостаточный (картинки видно), но размер сильно растёт. Выкл (по умолчанию) — без картинок (плейсхолдер ![...]())."><input type="checkbox" id="keepImages" onchange="save()"> Сохранить картинки</label>
   <label title="Извлекать таблицы из PDF по геометрии (pdfplumber) — аккуратные таблицы. Выкл — обычный текстовый путь MarkItDown, таблицы могут разъезжаться."><input type="checkbox" id="pdfTables" checked onchange="save()"> PDF-таблицы</label>
   <label title="Снимает проверку HTTPS-сертификата для URL. Включайте только для доверенных внутренних хостов — без защиты от MITM."><input type="checkbox" id="insecureSsl" onchange="save()"> URL: не проверять SSL</label>
   <br>

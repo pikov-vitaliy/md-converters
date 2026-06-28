@@ -539,3 +539,18 @@ def test_clean_pdf_text_protects_table_rows():
     out = c._clean_pdf_text(text, page_count=10)
     assert "| FOOT | x |" in out   # строка таблицы не тронута
     assert "\nFOOT\n" not in ("\n" + out + "\n")  # одиночный колонтитул убран
+
+
+def test_pdf_images_extracted(tmp_path):
+    """PDF со встроенной растровой картинкой → base64 в Markdown."""
+    Image = pytest.importorskip("PIL.Image")
+    p = tmp_path / "pic.pdf"
+    Image.new("RGB", (24, 24), (200, 50, 50)).save(str(p), "PDF")
+    md = c._pdf_images_markdown(p)
+    assert "data:image/png;base64," in md
+    assert "Картинки страницы 1" in md
+
+
+def test_pdf_images_empty_on_missing(tmp_path):
+    """Битый/несуществующий путь → пусто, без исключения."""
+    assert c._pdf_images_markdown(tmp_path / "nope.pdf") == ""

@@ -53,6 +53,7 @@ from __future__ import annotations
 
 import glob
 import argparse
+import base64
 import hashlib
 import io
 import ipaddress
@@ -927,6 +928,87 @@ def _pdf_tables_result(path: Path):
     return _PdfResult(text + "\n", table_count)
 
 
+_MAX_PDF_IMG_B64 = 60 * 1024 * 1024  # потолок суммарного base64
+
+
+class _ImgResult:
+    """Прокси результата: text_content переопределён (добавлены
+    картинки PDF), остальное делегируется исходному результату."""
+
+    def __init__(self, base, text_content: str) -> None:
+        object.__setattr__(self, "_base", base)
+        object.__setattr__(self, "text_content", text_content)
+
+    def __getattr__(self, name):
+        return getattr(self._base, name)
+
+
+def _pdf_image_png_b64(obj) -> str | None:
+    """Встроенная картинка PDF (PdfImage) → base64 PNG, либо None."""
+    try:
+        bitmap = obj.get_bitmap(render=False)
+        pil = bitmap.to_pil()
+        buf = io.BytesIO()
+        pil.save(buf, format="PNG")
+        return base64.b64encode(buf.getvalue()).decode("ascii")
+    except Exception:
+        return None
+
+
+def _pdf_images_markdown(path: Path) -> str:
+    """Встроенные растровые картинки PDF → Markdown (base64 data-URI,
+    сгруппированы по страницам). Пусто, если картинок нет, pypdfium2/
+    Pillow недоступны или превышен потолок размера."""
+    if pypdfium2 is None:
+        return ""
+    try:
+        pdf = pypdfium2.PdfDocument(str(path))
+    except Exception:
+        return ""
+    img_type = getattr(
+        getattr(pypdfium2, "raw", None), "FPDF_PAGEOBJ_IMAGE", 3
+    )
+    sections: list[str] = []
+    total = 0
+    capped = False
+    try:
+        for i in range(len(pdf)):
+            page = pdf[i]
+            imgs: list[str] = []
+            try:
+                for obj in page.get_objects():
+                    if obj.type != img_type:
+                        continue
+                    b64 = _pdf_image_png_b64(obj)
+                    if not b64:
+                        continue
+                    if total + len(b64) > _MAX_PDF_IMG_B64:
+                        capped = True
+                        break
+                    total += len(b64)
+                    imgs.append(b64)
+            except Exception:
+                pass
+            finally:
+                page.close()
+            if imgs:
+                lines = [f"### Картинки страницы {i + 1}"]
+                for n, b64 in enumerate(imgs, 1):
+                    lines.append(
+                        f"![страница {i + 1}, картинка {n}]"
+                        f"(data:image/png;base64,{b64})"
+                    )
+                sections.append("\n\n".join(lines))
+            if capped:
+                sections.append(
+                    "_(картинки обрезаны: превышен лимит размера)_"
+                )
+                break
+    finally:
+        pdf.close()
+    return "\n\n".join(sections)
+
+
 def _img_placeholder(match: re.Match) -> str:
     alt = _markdown_label(match.group("alt") or "embedded image")
     return f"![{alt}]()"
@@ -1613,6 +1695,18 @@ def _convert_file_to_target(path: Path, target: Path, opts: dict,
                     f"(requires Tesseract).",
                     file=sys.stderr,
                 )
+
+    # PDF: «Сохранить картинки» извлекает встроенные растровые
+    # изображения из PDF и дописывает их (base64) в .md по страницам.
+    # Без галочки PDF-картинки не трогаем (их в тексте и так нет).
+    if suffix == ".pdf" and opts.get("keep_images"):
+        img_md = _pdf_images_markdown(path)
+        if img_md:
+            combined = result.text_content.rstrip() + "\n\n" + img_md
+            try:
+                result.text_content = combined
+            except (AttributeError, TypeError):
+                result = _ImgResult(result, combined)
 
     try:
         _emit(target, result, path.name, opts["frontmatter"],

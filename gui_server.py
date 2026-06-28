@@ -130,7 +130,8 @@ def _safe_rel(rel_path: str, fallback: str) -> Path:
     """
     parts = []
     for raw in rel_path.replace("\\", "/").split("/"):
-        raw = raw.strip()
+        # L-1: вырезаем NUL — на Linux C-рантайм может усечь путь
+        raw = raw.replace("\x00", "").strip()
         if raw in ("", ".", "..") or ":" in raw:
             continue
         parts.append(raw)
@@ -431,6 +432,9 @@ _TAR_SUFFIXES = (
     ".tar", ".tar.gz", ".tgz", ".tar.bz2", ".tbz2",
     ".tar.xz", ".txz",
 )
+# M-1: потолок суммарного РАСПАКОВАННОГО размера 7z (защита от OOM:
+# маленький .7z может развернуться в гигабайты).
+_MAX_UNCOMPRESSED = 500 * 1024 * 1024
 
 
 def _archive_kind(path: Path) -> str | None:
@@ -479,6 +483,17 @@ def _extract_archive(src: Path, inner: Path) -> None:
                     _write(m.name, sf)
     elif kind == "7z":
         import py7zr
+        # M-1: 7z readall() грузит всё в ОЗУ; сжатый .7z может
+        # развернуться в гигабайты. Сначала проверяем РАСПАКОВАННЫЙ
+        # размер по заголовку (без чтения данных) и отвергаем сверх
+        # лимита, чтобы не словить OOM.
+        with py7zr.SevenZipFile(src, "r") as zf:
+            total = getattr(zf.archiveinfo(), "uncompressed", 0)
+        if total and total > _MAX_UNCOMPRESSED:
+            raise ValueError(
+                "архив слишком большой в распакованном виде "
+                f"({total // (1024 * 1024)} МБ)"
+            )
         with py7zr.SevenZipFile(src, "r") as zf:
             for name, bio in zf.readall().items():
                 if bio is None:
