@@ -64,9 +64,20 @@ Homepage = "https://github.com/pikov-vitaliy/md-converters"
 tomd = "convert_to_md:cli_tomd"
 pdf2md = "convert_to_md:cli_pdf"
 html2md = "convert_to_md:cli_html"
+tomd-gui = "gui_server:main"
+
+[project.optional-dependencies]
+gui = [
+    "fastapi>=0.115,<1.0",
+    "uvicorn[standard]>=0.32,<1.0",
+    "python-multipart>=0.0.12,<1.0",
+]
 
 [tool.setuptools]
-py-modules = ["convert_to_md"]
+py-modules = ["convert_to_md", "gui_server"]
+
+[tool.setuptools.package-data]
+gui_static = ["*.html", "*.js"]
 
 [tool.ruff]
 line-length = 79

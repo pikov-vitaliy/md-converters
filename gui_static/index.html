@@ -1,0 +1,301 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>md-converters</title>
+<style>
+*{margin:0;padding:0;box-sizing:border-box}
+body{font-family:-apple-system,system-ui,sans-serif;
+background:#1a1a2e;color:#e0e0e0;padding:20px;max-width:900px;
+margin:0 auto}
+h1{font-size:1.4rem;margin-bottom:16px;color:#7f7fff}
+.drop-zone{border:2px dashed #555;border-radius:12px;padding:40px;
+text-align:center;cursor:pointer;transition:border-color .2s}
+.drop-zone:hover,.drop-zone.drag-over{border-color:#7f7fff;
+background:rgba(127,127,255,.05)}
+.drop-zone p{margin:8px 0;color:#999}
+.settings{margin:16px 0;padding:16px;background:#16213e;
+border-radius:8px}
+.settings label{display:inline-block;margin:4px 12px 4px 0;
+cursor:pointer}
+.settings input[type=text]{background:#1a1a2e;border:1px solid #444;
+color:#e0e0e0;padding:6px 10px;border-radius:4px;width:100%;
+margin-top:4px}
+select{background:#1a1a2e;border:1px solid #444;color:#e0e0e0;
+padding:4px;border-radius:4px}
+.results{margin:16px 0}
+.result-item{padding:10px 14px;margin:6px 0;background:#16213e;
+border-radius:6px;display:flex;align-items:center;gap:10px}
+.result-item .name{flex:1;font-family:monospace;font-size:.9rem}
+.result-item .status{font-weight:bold;min-width:24px}
+.result-item .actions{display:flex;gap:6px}
+.btn{background:#7f7fff;color:#fff;border:none;padding:6px 14px;
+border-radius:4px;cursor:pointer;font-size:.85rem}
+.btn:hover{background:#6a6aff}
+.btn-sm{padding:4px 10px;font-size:.8rem}
+.preview-section{margin:16px 0}
+.preview-section pre{background:#0f0f23;border:1px solid #333;
+border-radius:6px;padding:14px;overflow-x:auto;
+white-space:pre-wrap;font-size:.85rem;line-height:1.5;max-height:
+500px;overflow-y:auto}
+.url-section{display:flex;gap:8px;margin:16px 0}
+.url-section input{flex:1;background:#16213e;border:1px solid #444;
+color:#e0e0e0;padding:8px;border-radius:4px}
+.progress{margin:8px 0;color:#ffcc00;font-size:.85rem}
+.section-title{font-size:1rem;color:#aaa;margin:16px 0 8px;
+border-bottom:1px solid #333;padding-bottom:4px}
+</style>
+</head>
+<body>
+<h1>md-converters <span id="ver" style="font-size:.8rem;color:#666"></span></h1>
+
+<div class="drop-zone" id="dropZone">
+  <p><strong>Перетащите файлы сюда</strong></p>
+  <p>или нажмите «Выбрать»</p>
+  <p style="font-size:.8rem;color:#666">PDF, HTML, DOCX, XLSX, PPTX, CSV, JSON</p>
+  <input type="file" id="fileInput" multiple
+  style="display:none"
+  accept=".pdf,.html,.htm,.docx,.xlsx,.pptx,.csv,.json,.xml,.epub,.msg,.ipynb,.rss">
+</div>
+
+<div class="settings">
+  <label><input type="checkbox" id="force" onchange="save()"> Перезаписать (force)</label>
+  <label><input type="checkbox" id="frontmatter" checked onchange="save()"> YAML front-matter</label>
+  <label><input type="checkbox" id="keepImages" onchange="save()"> Сохранить картинки</label>
+  <label><input type="checkbox" id="pdfTables" checked onchange="save()"> PDF-таблицы</label>
+  <br>
+  <label style="display:inline-block;margin-top:8px">Форматы:
+    <select id="only" onchange="save()">
+      <option value="">все</option>
+      <option value="pdf">только PDF</option>
+      <option value="html,htm">только HTML</option>
+      <option value="docx">только DOCX</option>
+      <option value="xlsx">только XLSX</option>
+    </select>
+  </label>
+  <br>
+  <label style="display:block;margin-top:8px">Папка вывода:
+    <input type="text" id="outDir" placeholder="(рядом с источником)" onchange="save()">
+  </label>
+</div>
+
+<div class="url-section">
+  <input type="text" id="urlInput" placeholder="https://example.com/report"
+  onkeydown="if(event.key==='Enter')convertURL()">
+  <button class="btn" onclick="convertURL()">Конвертировать URL</button>
+</div>
+
+<div class="section-title">Результаты</div>
+<div class="results" id="results"></div>
+
+<div class="preview-section" id="previewSection" style="display:none">
+  <div class="section-title">Превью</div>
+  <pre id="preview"></pre>
+</div>
+
+<script>
+let currentPreview = "";
+
+function loadSettings() {
+  try {
+    const s = JSON.parse(
+      localStorage.getItem("md-conv-settings") || "{}"
+    );
+    if (s.force !== undefined)
+      document.getElementById("force").checked = s.force;
+    if (s.frontmatter !== undefined)
+      document.getElementById("frontmatter").checked = s.frontmatter;
+    if (s.keepImages !== undefined)
+      document.getElementById("keepImages").checked = s.keepImages;
+    if (s.pdfTables !== undefined)
+      document.getElementById("pdfTables").checked = s.pdfTables;
+    if (s.only)
+      document.getElementById("only").value = s.only;
+    if (s.outDir)
+      document.getElementById("outDir").value = s.outDir;
+  } catch(e) {}
+}
+
+function save() {
+  const s = {
+    force: document.getElementById("force").checked,
+    frontmatter: document.getElementById("frontmatter").checked,
+    keepImages: document.getElementById("keepImages").checked,
+    pdfTables: document.getElementById("pdfTables").checked,
+    only: document.getElementById("only").value,
+    outDir: document.getElementById("outDir").value,
+  };
+  localStorage.setItem("md-conv-settings", JSON.stringify(s));
+}
+
+function getFlags() {
+  const pdfTables = document.getElementById("pdfTables").checked
+    ? "auto" : "off";
+  return {
+    force: document.getElementById("force").checked,
+    frontmatter: document.getElementById("frontmatter").checked,
+    keep_images: document.getElementById("keepImages").checked,
+    pdf_tables: pdfTables,
+    only: document.getElementById("only").value || null,
+    out_dir: document.getElementById("outDir").value || null,
+  };
+}
+
+function checkSize(file) {
+  const maxMB = 100;
+  if (file.size > maxMB * 1024 * 1024) {
+    alert("Файл " + file.name + ": "
+      + (file.size / 1048576).toFixed(0)
+      + " МБ — лимит " + maxMB + " МБ");
+    return false;
+  }
+  return true;
+}
+
+const dropZone = document.getElementById("dropZone");
+const fileInput = document.getElementById("fileInput");
+
+dropZone.addEventListener("click", () => fileInput.click());
+fileInput.addEventListener("change", () => {
+  if (fileInput.files.length > 0)
+    convertFiles(fileInput.files);
+});
+dropZone.addEventListener("dragover", (e) => {
+  e.preventDefault();
+  dropZone.classList.add("drag-over");
+});
+dropZone.addEventListener("dragleave", () => {
+  dropZone.classList.remove("drag-over");
+});
+dropZone.addEventListener("drop", (e) => {
+  e.preventDefault();
+  dropZone.classList.remove("drag-over");
+  convertFiles(e.dataTransfer.files);
+});
+
+function addResult(name, status, extra) {
+  const div = document.createElement("div");
+  div.className = "result-item";
+  const icons = {ok:"\u2705", skip:"\u23ed\ufe0f",
+    fail:"\u274c", pending:"\u23f3"};
+  const icon = icons[status] || "\u23f3";
+  div.innerHTML = '<span class="status">' + icon +
+    '</span><span class="name">' + name +
+    '</span><span class="actions">' + (extra||"") + '</span>';
+  document.getElementById("results").prepend(div);
+  return div;
+}
+
+async function convertFiles(fileList) {
+  const files = Array.from(fileList).filter(checkSize);
+  if (files.length === 0) return;
+  const flags = getFlags();
+  const fd = new FormData();
+  files.forEach(f => fd.append("files", f));
+  Object.keys(flags).forEach(k => {
+    if (flags[k] !== null && flags[k] !== false)
+      fd.append(k, flags[k]);
+  });
+
+  const resp = await fetch("/api/convert/files", {
+    method: "POST", body: fd,
+  });
+
+  const reader = resp.body.getReader();
+  const dec = new TextDecoder();
+  let buf = "";
+
+  while (true) {
+    const {done, value} = await reader.read();
+    if (done) break;
+    buf += dec.decode(value, {stream: true});
+    const parts = buf.split("\n\n");
+    buf = parts.pop();
+    for (const part of parts) {
+      if (!part.trim()) continue;
+      const data = JSON.parse(part.replace(/^data: /, ""));
+      handleSSE(data);
+    }
+  }
+}
+
+async function convertURL() {
+  const url = document.getElementById("urlInput").value.trim();
+  if (!url) return;
+  const flags = getFlags();
+  const params = new URLSearchParams({url});
+  Object.keys(flags).forEach(k => {
+    if (flags[k] !== null && flags[k] !== false)
+      params.append(k, flags[k]);
+  });
+
+  const resp = await fetch("/api/convert/url?" + params, {
+    method: "POST",
+  });
+
+  const reader = resp.body.getReader();
+  const dec = new TextDecoder();
+  let buf = "";
+  while (true) {
+    const {done, value} = await reader.read();
+    if (done) break;
+    buf += dec.decode(value, {stream: true});
+    const parts = buf.split("\n\n");
+    buf = parts.pop();
+    for (const part of parts) {
+      if (!part.trim()) continue;
+      const data = JSON.parse(part.replace(/^data: /, ""));
+      handleSSE(data);
+    }
+  }
+}
+
+function handleSSE(data) {
+  if (data.event === "start") {
+    addResult(data.file, "pending");
+  } else if (data.event === "done") {
+    const results = document.getElementById("results");
+    const first = results.querySelector(".result-item");
+    if (first) first.remove();
+    const dl = data.output
+      ? '<button class="btn btn-sm" onclick="download(\'' +
+        data.output + '\')">\u2B07</button>' : '';
+    const pv = data.preview
+      ? '<button class="btn btn-sm" onclick="showPreview(' +
+        data.preview.length + ')">Превью</button>' : '';
+    addResult(data.file, data.status, dl + pv);
+    if (data.preview) {
+      currentPreview = data.preview;
+      if (data.status === "ok")
+        showPreview(data.preview.length);
+    }
+  } else if (data.event === "error") {
+    addResult(data.file, "fail");
+  }
+}
+
+function showPreview() {
+  document.getElementById("previewSection").style.display = "block";
+  document.getElementById("preview").textContent = currentPreview;
+}
+
+function download(path) {
+  window.open("/api/download?path=" + encodeURIComponent(path));
+}
+
+document.addEventListener("keydown", (e) => {
+  if (e.key === "Escape") {
+    document.getElementById("previewSection")
+      .style.display = "none";
+  }
+});
+
+setInterval(() => fetch("/api/heartbeat", {method: "POST"}), 5000);
+loadSettings();
+fetch("/api/flags").then(r => r.json()).then(d => {
+  document.getElementById("ver").textContent = "v" + d.version;
+});
+</script>
+</body>
+</html>

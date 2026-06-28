@@ -14,6 +14,7 @@ sendto-convert.cmd
 .gigacode/
 .qwen/
 .codegraph/
+.kilo/
 
 # Windows / macOS
 Thumbs.db
