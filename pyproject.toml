@@ -75,7 +75,7 @@ gui = [
 ]
 
 [tool.setuptools]
-py-modules = ["convert_to_md", "gui_server"]
+py-modules = ["convert_to_md", "gui_server", "_nostd"]
 
 [tool.setuptools.packages.find]
 include = ["gui_static*"]

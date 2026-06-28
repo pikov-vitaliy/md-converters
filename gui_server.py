@@ -5,6 +5,7 @@
 """
 from __future__ import annotations
 
+import _nostd  # noqa: F401  # ПЕРВЫМ: чинит None-потоки под pythonw
 import asyncio
 import contextlib
 import importlib.util
@@ -947,13 +948,6 @@ async def _auto_shutdown_check():
 def main():
     """Точка входа tomd-gui: старт сервера."""
     global _port, _uvicorn_server
-    # Под pythonw (ярлык без консоли) sys.stdout/err = None — иначе
-    # print() и логгер uvicorn падают с AttributeError. Направляем
-    # в никуда: окно терминала не нужно конечному пользователю.
-    if sys.stdout is None:
-        sys.stdout = open(os.devnull, "w", encoding="utf-8")
-    if sys.stderr is None:
-        sys.stderr = open(os.devnull, "w", encoding="utf-8")
     _port = _find_free_port()
     if sys.stdout.encoding and \
        sys.stdout.encoding.lower() not in ("utf-8", "utf8"):
