@@ -483,10 +483,11 @@ def _extract_archive(src: Path, inner: Path) -> None:
                     _write(m.name, sf)
     elif kind == "7z":
         import py7zr
-        # M-1: 7z readall() грузит всё в ОЗУ; сжатый .7z может
-        # развернуться в гигабайты. Сначала проверяем РАСПАКОВАННЫЙ
-        # размер по заголовку (без чтения данных) и отвергаем сверх
-        # лимита, чтобы не словить OOM.
+        # M-1/OOM: сначала проверяем РАСПАКОВАННЫЙ размер по заголовку
+        # (без чтения данных) и отвергаем сверх лимита. py7zr 1.x убрал
+        # readall(): извлекаем на диск (extractall, без RAM-словаря) в
+        # отдельный temp, затем перекладываем в inner через _safe_rel
+        # (zip-slip-защита поверх собственной защиты py7zr).
         with py7zr.SevenZipFile(src, "r") as zf:
             total = getattr(zf.archiveinfo(), "uncompressed", 0)
         if total and total > _MAX_UNCOMPRESSED:
@@ -494,11 +495,16 @@ def _extract_archive(src: Path, inner: Path) -> None:
                 "архив слишком большой в распакованном виде "
                 f"({total // (1024 * 1024)} МБ)"
             )
-        with py7zr.SevenZipFile(src, "r") as zf:
-            for name, bio in zf.readall().items():
-                if bio is None:
-                    continue
-                _write(name, bio)
+        raw = Path(tempfile.mkdtemp(prefix="md_7z_"))
+        try:
+            with py7zr.SevenZipFile(src, "r") as zf:
+                zf.extractall(path=raw)
+            for f in raw.rglob("*"):
+                if f.is_file():
+                    with f.open("rb") as sf:
+                        _write(f.relative_to(raw).as_posix(), sf)
+        finally:
+            shutil.rmtree(raw, ignore_errors=True)
     else:
         raise ValueError("неподдерживаемый формат архива")
 
