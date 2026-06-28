@@ -98,6 +98,7 @@ border-bottom:1px solid #333;padding-bottom:4px}
   <label><input type="checkbox" id="frontmatter" checked onchange="save()"> YAML front-matter</label>
   <label><input type="checkbox" id="keepImages" onchange="save()"> Сохранить картинки</label>
   <label><input type="checkbox" id="pdfTables" checked onchange="save()"> PDF-таблицы</label>
+  <label title="Снимает проверку HTTPS-сертификата для URL. Включайте только для доверенных внутренних хостов — без защиты от MITM."><input type="checkbox" id="insecureSsl" onchange="save()"> URL: не проверять SSL</label>
   <br>
   <label style="display:inline-block;margin-top:8px">Форматы:
     <select id="only" onchange="save()">
@@ -169,6 +170,8 @@ function loadSettings() {
       document.getElementById("keepImages").checked = s.keepImages;
     if (s.pdfTables !== undefined)
       document.getElementById("pdfTables").checked = s.pdfTables;
+    if (s.insecureSsl !== undefined)
+      document.getElementById("insecureSsl").checked = s.insecureSsl;
     if (s.only)
       document.getElementById("only").value = s.only;
     if (s.outDir)
@@ -182,6 +185,7 @@ function save() {
     frontmatter: document.getElementById("frontmatter").checked,
     keepImages: document.getElementById("keepImages").checked,
     pdfTables: document.getElementById("pdfTables").checked,
+    insecureSsl: document.getElementById("insecureSsl").checked,
     only: document.getElementById("only").value,
     outDir: document.getElementById("outDir").value,
   };
@@ -198,6 +202,7 @@ function getFlags() {
     pdf_tables: pdfTables,
     only: document.getElementById("only").value || null,
     out_dir: document.getElementById("outDir").value || null,
+    insecure_ssl: document.getElementById("insecureSsl").checked,
   };
 }
 

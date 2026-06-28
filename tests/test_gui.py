@@ -350,3 +350,62 @@ def test_download_zip_not_found(client):
         "/api/download_zip", params={"zip_id": "nope123"}
     )
     assert r.status_code == 404
+
+
+def test_zip_upload_expands_to_md_zip(client):
+    """Загрузка .zip: распаковка + конвертация каждого → .zip с .md."""
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, "w") as z:
+        z.writestr("report.csv", "m,v\nA,1\n")
+        z.writestr("sub/data.json", '{"k":"B"}')
+    r = client.post(
+        "/api/convert/files",
+        files={"files": (
+            "bundle.zip", io.BytesIO(buf.getvalue()),
+            "application/zip",
+        )},
+    )
+    assert r.status_code == 200
+    zid = _zip_id(r.text)
+    assert zid, "архив не дал zip_id"
+    z = zipfile.ZipFile(io.BytesIO(
+        client.get(
+            "/api/download_zip", params={"zip_id": zid}
+        ).content
+    ))
+    assert sorted(z.namelist()) == ["report.md", "sub/data.md"]
+
+
+def test_insecure_ssl_flag_reaches_download(client, monkeypatch):
+    """insecure_ssl=true → verify_ssl=False доходит до _download_url."""
+    cap = {}
+
+    def fake(url, timeout, max_bytes, allow_private,
+             verify_ssl=True):
+        cap["v"] = verify_ssl
+        raise ValueError("stop")
+
+    monkeypatch.setattr(gui_server.core, "_download_url", fake)
+    r = client.post(
+        "/api/convert/url",
+        data={"url": "https://example.com/x",
+              "insecure_ssl": "true"},
+    )
+    assert r.status_code == 200
+    assert cap.get("v") is False
+
+
+def test_ssl_verified_by_default(client, monkeypatch):
+    """Без флага verify_ssl=True (строгая проверка по умолчанию)."""
+    cap = {}
+
+    def fake(url, timeout, max_bytes, allow_private,
+             verify_ssl=True):
+        cap["v"] = verify_ssl
+        raise ValueError("stop")
+
+    monkeypatch.setattr(gui_server.core, "_download_url", fake)
+    client.post(
+        "/api/convert/url", data={"url": "https://example.com/x"}
+    )
+    assert cap.get("v") is True

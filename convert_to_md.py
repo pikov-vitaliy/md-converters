@@ -1494,11 +1494,21 @@ def _read_limited_response(response, max_bytes: int) -> bytes:
 
 
 def _download_url(url: str, timeout: float, max_bytes: int,
-                  allow_private: bool) -> tuple[bytes, str, str | None]:
+                  allow_private: bool,
+                  verify_ssl: bool = True
+                  ) -> tuple[bytes, str, str | None]:
     try:
         import requests
     except ImportError as exc:
         raise ValueError("URL mode requires the 'requests' package") from exc
+    if not verify_ssl:
+        # явный opt-in: гасим InsecureRequestWarning от urllib3
+        try:
+            import urllib3
+            urllib3.disable_warnings(
+                urllib3.exceptions.InsecureRequestWarning)
+        except Exception:
+            pass
 
     current = url.strip()
     session = requests.Session()
@@ -1516,6 +1526,7 @@ def _download_url(url: str, timeout: float, max_bytes: int,
                 allow_redirects=False,
                 stream=True,
                 timeout=(timeout, timeout),
+                verify=verify_ssl,
             )
             try:
                 if 300 <= response.status_code < 400:
@@ -1543,6 +1554,7 @@ def _convert_url_data(url: str, opts: dict) -> tuple:
         timeout=opts["url_timeout"],
         max_bytes=opts["max_url_bytes"],
         allow_private=opts["allow_private_url"],
+        verify_ssl=opts.get("verify_ssl", True),
     )
     result = _md().convert_stream(
         io.BytesIO(data),
@@ -1914,6 +1926,7 @@ def _build_opts(parsed: dict, default_only: list | None) -> dict:
         "keep_images": parsed["keep_images"],
         "unsafe_raw_markdown": parsed["unsafe_raw_markdown"],
         "allow_private_url": parsed["allow_private_url"],
+        "verify_ssl": parsed.get("verify_ssl", True),
         "url_timeout": parsed["url_timeout"],
         "max_url_bytes": int(parsed["max_url_mb"] * 1024 * 1024),
         "max_input_mb": parsed["max_input_mb"],

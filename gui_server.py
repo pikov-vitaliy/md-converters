@@ -305,6 +305,7 @@ def _gui_opts(
     pdf_tables: str = "auto",
     only_spec: str | None = None,
     out_dir: str | None = None,
+    verify_ssl: bool = True,
 ) -> dict:
     """BLK-4: новый opts на каждый запрос."""
     only = None
@@ -316,6 +317,7 @@ def _gui_opts(
         "keep_images": keep_images,
         "unsafe_raw_markdown": False,
         "allow_private_url": False,
+        "verify_ssl": verify_ssl,
         "url_timeout": core._DEFAULT_URL_TIMEOUT,
         "max_url_mb": core._DEFAULT_MAX_URL_MB,
         "max_input_mb": core._DEFAULT_MAX_INPUT_MB,
@@ -398,6 +400,81 @@ def _read_output(md_path: Path | None) -> tuple[str, str]:
         full = md_path.read_text(encoding="utf-8")
         return full, full[:_PREVIEW_CHARS]
     return "", ""
+
+
+# --- Архивы: распаковать и конвертировать каждый файл → .zip с .md ---
+_ARCHIVE_EXTS = {".zip"}
+
+
+async def _convert_archive(src: Path, opts: dict, label: str):
+    """Распаковывает .zip, конвертирует каждый файл внутри, собирает
+    .md в ОДИН .zip. Async-gen: SSE per-member + финальный 'zip'.
+    zip-slip-safe (_safe_rel). Вложенные архивы не разворачиваем."""
+    inner = Path(tempfile.mkdtemp(prefix="md_unzip_"))
+    collected: list[tuple[str, str]] = []
+    try:
+        try:
+            with zipfile.ZipFile(src) as zf:
+                for n in zf.namelist():
+                    if n.endswith("/"):
+                        continue
+                    dest = inner / _safe_rel(n, "file")
+                    dest.parent.mkdir(parents=True, exist_ok=True)
+                    with zf.open(n) as sf, dest.open("wb") as df:
+                        shutil.copyfileobj(sf, df)
+        except zipfile.BadZipFile:
+            yield _sse("error", {
+                "file": label, "error": "Битый или не-ZIP архив",
+            })
+            yield _sse("zip", {"zip_id": "", "count": 0})
+            return
+        files = await asyncio.to_thread(
+            core.collect, str(inner), True, opts["scan"]
+        )
+        files = [
+            f for f in files
+            if f.suffix.lower() not in _ARCHIVE_EXTS
+        ]
+        for member in files:
+            yield _sse("start", {"file": member.name})
+            try:
+                res = await _run_conversion(
+                    _convert_with_capture, member, opts
+                )
+            except Exception as exc:
+                yield _sse("error", {
+                    "file": member.name,
+                    "error": f"{type(exc).__name__}: {exc}",
+                })
+                continue
+            md_path = res["md_path"]
+            full, preview = _read_output(md_path)
+            if full and md_path:
+                entry = md_path.relative_to(inner).as_posix()
+                collected.append((entry, full))
+            yield _sse("done", {
+                "file": member.name,
+                "status": res["status"],
+                "log": res["log"],
+                "warnings": res["warnings"],
+                "preview": preview,
+                "download_id": "",
+            })
+        zip_id = ""
+        if collected:
+            buf = io.BytesIO()
+            with zipfile.ZipFile(
+                buf, "w", zipfile.ZIP_DEFLATED
+            ) as zf:
+                for entry, content in collected:
+                    zf.writestr(entry, content)
+            zip_id = uuid.uuid4().hex[:12]
+            _add_zip(zip_id, src.stem + "_md.zip", buf.getvalue())
+        yield _sse("zip", {
+            "zip_id": zip_id, "count": len(collected),
+        })
+    finally:
+        shutil.rmtree(inner, ignore_errors=True)
 
 
 # --- ② Нативный выбор файла/папки с диска (конвертация на месте) ---
@@ -502,6 +579,13 @@ async def convert_files(
 
             # 2. Конвертация по одному файлу за раз
             for src, name in jobs:
+                # .zip → распаковать и конвертировать каждый файл
+                if src.suffix.lower() in _ARCHIVE_EXTS:
+                    async for ev in _convert_archive(
+                        src, opts, name
+                    ):
+                        yield ev
+                    continue
                 try:
                     res = await _run_conversion(
                         _convert_with_capture, src, opts
@@ -552,11 +636,13 @@ async def convert_url_endpoint(
     pdf_tables: str = Form("auto"),
     only: str | None = Form(None),
     out_dir: str | None = Form(None),
+    insecure_ssl: bool = Form(False),
 ) -> StreamingResponse:
     """Конвертация URL с SSE-прогрессом."""
     opts = _gui_opts(
         force, frontmatter, keep_images,
         pdf_tables, only, out_dir,
+        verify_ssl=not insecure_ssl,
     )
 
     has_out_dir = opts.get("out_dir") is not None
@@ -649,6 +735,13 @@ async def convert_picked(
             yield _sse("complete", {})
             return
         for src in files:
+            # .zip → распаковать и конвертировать каждый файл
+            if src.suffix.lower() in _ARCHIVE_EXTS:
+                async for ev in _convert_archive(
+                    src, opts, src.name
+                ):
+                    yield ev
+                continue
             yield _sse("start", {"file": src.name})
             try:
                 res = await _run_conversion(
