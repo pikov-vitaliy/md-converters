@@ -684,6 +684,7 @@ dependencies = [
     { name = "onnxruntime", version = "1.26.0", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version >= '3.11'" },
     { name = "pdfplumber" },
     { name = "pypdfium2" },
+    { name = "requests" },
 ]
 
 [package.dev-dependencies]
@@ -702,6 +703,7 @@ requires-dist = [
     { name = "onnxruntime", marker = "python_full_version >= '3.11'", specifier = ">=1.26,<2" },
     { name = "pdfplumber", specifier = ">=0.11.9,<1.0.0" },
     { name = "pypdfium2", specifier = ">=4,<6" },
+    { name = "requests", specifier = ">=2.32,<3" },
 ]
 
 [package.metadata.requires-dev]

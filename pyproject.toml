@@ -42,6 +42,12 @@ dependencies = [
     # сломать импорт. MIT / BSD-3 / Apache-2.0 — без AGPL.
     "pdfplumber>=0.11.9,<1.0.0",
     "pypdfium2>=4,<6",
+    # requests импортируется напрямую в convert_url (загрузка URL под
+    # SSRF-контролем). Приходит транзитивно через markitdown, но объявлен
+    # явной зависимостью по той же причине, что pdfplumber/pypdfium2:
+    # прямой импорт не должен зависеть от состава транзитивных зависимостей
+    # под потолком markitdown<1.0.0. Apache-2.0 — без AGPL.
+    "requests>=2.32,<3",
 ]
 
 [dependency-groups]
