@@ -356,6 +356,28 @@ if (Test-Path $sample) {
     & $python (Join-Path $kit 'convert_to_md.py') $sample --force
 }
 
+# --- 6) Ярлык Web-GUI (если установлен fastapi) --------------------------
+$hasGui = & $python -c "import fastapi; print('ok')" 2>$null
+if ($LASTEXITCODE -eq 0 -and $hasGui -eq 'ok') {
+    $desktop = [Environment]::GetFolderPath('Desktop')
+    $guiLnk = Join-Path $desktop 'MD Converter.lnk'
+    try {
+        $ws2 = New-Object -ComObject WScript.Shell
+        $sc2 = $ws2.CreateShortcut($guiLnk)
+        $sc2.TargetPath       = $python
+        $sc2.Arguments        = '-m gui_server'
+        $sc2.WorkingDirectory = $kit
+        $sc2.IconLocation     = $iconValue
+        $sc2.Save()
+        Write-Host "`nЯрлык «MD Converter» создан на рабочем столе." -ForegroundColor Green
+    } catch {
+        Write-Host "Не удалось создать ярлык GUI (не критично): $_" -ForegroundColor Yellow
+    }
+} else {
+    Write-Host "`nWeb-GUI (fastapi) не установлен — ярлык не создан." -ForegroundColor Yellow
+    Write-Host "Установка GUI:  pip install `".[gui]`"" -ForegroundColor Cyan
+}
+
 Write-Host "`n=== Готово! ===" -ForegroundColor Green
 Write-Host "Откройте НОВОЕ окно PowerShell (или выполните:  . `$PROFILE )"
 Write-Host "Команды:  tomd  (любой формат),  pdf2md,  html2md"

@@ -55,6 +55,7 @@ dev = [
     "pip-audit>=2.9,<3",
     "pytest>=9,<10",
     "ruff>=0.13,<0.14",
+    "httpx>=0.28,<1.0",
 ]
 
 [project.urls]

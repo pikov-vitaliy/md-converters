@@ -9,7 +9,9 @@ import asyncio
 import contextlib
 import io
 import json
+import os
 import shutil
+import signal
 import socket
 import sys
 import tempfile
@@ -69,6 +71,7 @@ async def _lifespan(app: FastAPI):
     global _port
     asyncio.create_task(_open_browser_when_ready(_port))
     asyncio.create_task(_cleanup_loop())
+    asyncio.create_task(_auto_shutdown_check())
     yield
 
 
@@ -188,10 +191,10 @@ def _gui_opts(
         "keep_images": keep_images,
         "unsafe_raw_markdown": False,
         "allow_private_url": False,
-        "url_timeout": str(core._DEFAULT_URL_TIMEOUT),
-        "max_url_mb": str(core._DEFAULT_MAX_URL_MB),
-        "max_input_mb": str(core._DEFAULT_MAX_INPUT_MB),
-        "conversion_timeout": str(
+        "url_timeout": core._DEFAULT_URL_TIMEOUT,
+        "max_url_mb": core._DEFAULT_MAX_URL_MB,
+        "max_input_mb": core._DEFAULT_MAX_INPUT_MB,
+        "conversion_timeout": (
             core._DEFAULT_CONVERSION_TIMEOUT
         ),
         "sandbox": True,
@@ -447,9 +450,17 @@ async def download_file(path: str):
 # --- Cleanup ---
 
 async def _cleanup_loop():
-    """G-9: удаляем старые jobs (заглушка для этапа 4)."""
+    """G-9: заглушка — jobs хранятся in-memory, очистка не нужна."""
     while True:
         await asyncio.sleep(60)
+
+
+async def _auto_shutdown_check():
+    """Авто-выключение: если вкладка закрыта 15с → shutdown."""
+    while True:
+        await asyncio.sleep(5)
+        if time.time() - _last_heartbeat > 15:
+            os.kill(os.getpid(), signal.SIGINT)
 
 
 # --- Entrypoint ---
