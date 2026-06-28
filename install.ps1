@@ -231,9 +231,14 @@ if ($Menu) {
 $shellKey = 'Registry::HKEY_CURRENT_USER\Software\Classes\*\shell\ConvertToMarkdown'
 $appBase  = 'Registry::HKEY_CURRENT_USER\Software\Classes\Applications\sendto-convert.cmd'
 $finalLnk = Join-Path $env:APPDATA 'Microsoft\Windows\SendTo\Конвертировать в Markdown.lnk'
+# Пункты для ПАПОК (правый клик по папке и по фону папки) — рекурсивно.
+$dirKey = 'Registry::HKEY_CURRENT_USER\Software\Classes\Directory\shell\ConvertToMarkdown'
+$bgKey  = 'Registry::HKEY_CURRENT_USER\Software\Classes\Directory\Background\shell\ConvertToMarkdown'
 if (Test-Path -LiteralPath $shellKey) { Remove-Item -LiteralPath $shellKey -Recurse -Force }
 if (Test-Path -LiteralPath $appBase)  { Remove-Item -LiteralPath $appBase  -Recurse -Force }
 if (Test-Path -LiteralPath $finalLnk) { Remove-Item -LiteralPath $finalLnk -Force }
+if (Test-Path -LiteralPath $dirKey)   { Remove-Item -LiteralPath $dirKey   -Recurse -Force }
+if (Test-Path -LiteralPath $bgKey)    { Remove-Item -LiteralPath $bgKey    -Recurse -Force }
 
 if ($installMenu) {
     $cmdPath = Join-Path $kit 'sendto-convert.cmd'
@@ -312,6 +317,26 @@ pause
         Write-Host "Не удалось добавить пункт в 'Show more options' (не критично): $_" -ForegroundColor Yellow
     }
 
+    # --- 4-2b) Directory — правый клик по ПАПКЕ: конвертировать всё ------
+    # рекурсивно, .md рядом с каждым исходником (то, что неудобно делать
+    # через браузерный GUI: тот не знает реальных путей файлов).
+    $folderTitle = 'Конвертировать папку в Markdown'
+    $dirCmd = '"' + $cmdPath + '" -r "%1"'   # %1 — выбранная папка
+    $bgCmd  = '"' + $cmdPath + '" -r "%V"'   # %V — текущая папка (фон)
+    try {
+        foreach ($pair in @(@($dirKey, $dirCmd), @($bgKey, $bgCmd))) {
+            $key = $pair[0]; $cmd = $pair[1]
+            New-Item -Path $key -Force | Out-Null
+            Set-ItemProperty -LiteralPath $key -Name '(default)' -Value $folderTitle
+            Set-ItemProperty -LiteralPath $key -Name 'Icon'      -Value $iconValue
+            New-Item -Path "$key\command" -Force | Out-Null
+            Set-ItemProperty -LiteralPath "$key\command" -Name '(default)' -Value $cmd
+        }
+        Write-Host "Пункт «Конвертировать папку в Markdown» добавлен (ПКМ по папке)." -ForegroundColor Green
+    } catch {
+        Write-Host "Не удалось добавить пункт для папок (не критично): $_" -ForegroundColor Yellow
+    }
+
     # --- 4-3) Applications\... — для подменю "Open with" в Win11 ---------
     $appName  = "$appBase\shell\ConvertToMarkdown"
     $appCmd   = "$appName\command"
@@ -387,5 +412,7 @@ if ($installMenu) {
     Write-Host "  - Open with (Win11 22H2+): «Конвертировать в Markdown»"
     Write-Host "  - Show more options (Win11) / прямое меню (Win10):"
     Write-Host "    «Конвертировать в Markdown»"
+    Write-Host "  - ПКМ по ПАПКЕ (или по фону внутри неё):"
+    Write-Host "    «Конвертировать папку в Markdown» — рекурсивно, .md рядом"
 }
 Write-Host "Справка:  tomd --help"
