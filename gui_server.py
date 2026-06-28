@@ -16,12 +16,14 @@ import socket
 import sys
 import tempfile
 import time
+import uuid
 import webbrowser
 from pathlib import Path
 from typing import AsyncGenerator
+from urllib.parse import quote
 
 import uvicorn
-from fastapi import FastAPI, Request, UploadFile
+from fastapi import FastAPI, Form, Request, UploadFile
 from fastapi.responses import (
     HTMLResponse,
     JSONResponse,
@@ -35,13 +37,14 @@ _STATIC = Path(__file__).parent / "gui_static"
 _PORT_DEFAULT = 8765
 _PORT_TRIES = 5
 _MAX_UPLOAD_BYTES = 100 * 1024 * 1024
-_MAX_JOBS = 20
-_JOB_TTL = 30 * 60
 _ALLOWED_HOSTS = {"127.0.0.1", "localhost"}
 _PREVIEW_CHARS = 5000
 
 _port: int = _PORT_DEFAULT
 _last_heartbeat = time.time()
+
+# Хранилище для скачивания: {dl_id: (filename, content)}
+_downloads: dict[str, tuple[str, str]] = {}
 
 
 # --- Port finding (BLK-3) ---
@@ -71,13 +74,14 @@ def _find_free_port() -> int:
 async def _lifespan(app: FastAPI):
     global _port
     asyncio.create_task(_open_browser_when_ready(_port))
-    asyncio.create_task(_cleanup_loop())
     asyncio.create_task(_auto_shutdown_check())
     yield
 
 
 app = FastAPI(lifespan=_lifespan)
-app.mount("/static", StaticFiles(directory=_STATIC), name="static")
+app.mount(
+    "/static", StaticFiles(directory=_STATIC), name="static"
+)
 
 
 # --- Browser open after port ready (BLK-2) ---
@@ -97,16 +101,30 @@ async def _open_browser_when_ready(port: int) -> None:
             await asyncio.sleep(0.5)
 
 
-# --- DNS rebinding protection (BLK-6) ---
+# --- DNS rebinding / CSRF protection (BLK-6, S1) ---
 
 @app.middleware("http")
 async def _check_origin(request: Request, call_next):
-    """BLK-6: отвергаем запросы не с localhost."""
+    """BLK-6+S1: отвергаем запросы не с localhost.
+
+    Проверяем И Host, И Origin — браузер ставит Host
+    автоматически, но Origin защищает от CSRF с
+    соседнего сайта.
+    """
     host = request.headers.get("host", "").split(":")[0]
     if host not in _ALLOWED_HOSTS:
         return JSONResponse(
             {"error": "forbidden"}, status_code=403
         )
+    origin = request.headers.get("origin", "")
+    if origin:
+        origin_host = (
+            origin.split("//")[-1].split("/")[0].split(":")[0]
+        )
+        if origin_host not in _ALLOWED_HOSTS:
+            return JSONResponse(
+                {"error": "forbidden"}, status_code=403
+            )
     return await call_next(request)
 
 
@@ -119,12 +137,20 @@ def _sse(event: str, data: dict) -> str:
     return f"data: {payload}\n\n"
 
 
+# --- Safe filename (H1) ---
+
+def _safe_filename(name: str) -> str:
+    """H1: только basename, без пути и .. — защита от traversal."""
+    return Path(name).name or "unknown"
+
+
 # --- Streaming upload (BLK-5) ---
 
 async def _save_upload_streaming(
     upload: UploadFile, dest: Path
 ) -> int:
     """BLK-5: чанки по 1 МБ, без загрузки в RAM."""
+    dest.parent.mkdir(parents=True, exist_ok=True)
     total = 0
     with dest.open("wb") as f:
         while True:
@@ -146,7 +172,9 @@ async def _save_upload_streaming(
 
 # --- stdout/stderr capture ---
 
-def _convert_with_capture(path: Path, opts: dict) -> dict:
+def _convert_with_capture(
+    path: Path, opts: dict
+) -> dict:
     """Конвертация с перехватом stdout/stderr."""
     out, err = io.StringIO(), io.StringIO()
     with contextlib.redirect_stdout(out), \
@@ -159,9 +187,9 @@ def _convert_with_capture(path: Path, opts: dict) -> dict:
     }
 
 
-# --- URL convert with capture ---
-
-def _convert_url_with_capture(url: str, opts: dict) -> dict:
+def _convert_url_with_capture(
+    url: str, opts: dict
+) -> dict:
     out, err = io.StringIO(), io.StringIO()
     with contextlib.redirect_stdout(out), \
          contextlib.redirect_stderr(err):
@@ -211,13 +239,14 @@ def _gui_opts(
 
 # --- Find output .md ---
 
-def _find_output(src: Path, opts: dict) -> Path | None:
+def _find_output(
+    src: Path, opts: dict
+) -> Path | None:
     """Находит .md рядом с исходником (или в out_dir)."""
     dest_dir = opts.get("out_dir") or src.parent
     candidate = dest_dir / (src.stem + ".md")
     if candidate.exists():
         return candidate
-    # Имя могло получить суффикс (2) при коллизии
     n = 2
     while True:
         c = dest_dir / f"{src.stem} ({n}).md"
@@ -240,7 +269,12 @@ async def index():
             "<h1>gui_static/index.html not found</h1>", 500
         )
     return HTMLResponse(
-        index_path.read_text(encoding="utf-8")
+        index_path.read_text(encoding="utf-8"),
+        headers={
+            "Cache-Control": (
+                "no-cache, no-store, must-revalidate"
+            ),
+        },
     )
 
 
@@ -254,20 +288,23 @@ async def get_flags():
         "pdf_tables": "auto",
         "only": None,
         "version": core.__version__,
-        "supported_formats": sorted(core.SUPPORTED_SUFFIXES),
+        "supported_formats": sorted(
+            core.SUPPORTED_SUFFIXES
+        ),
         "max_upload_mb": _MAX_UPLOAD_BYTES // (1024 * 1024),
     }
 
 
+# B1: Form(...) — параметры читаются из multipart body
 @app.post("/api/convert/files")
 async def convert_files(
     files: list[UploadFile],
-    force: bool = False,
-    frontmatter: bool = True,
-    keep_images: bool = False,
-    pdf_tables: str = "auto",
-    only: str | None = None,
-    out_dir: str | None = None,
+    force: bool = Form(False),
+    frontmatter: bool = Form(True),
+    keep_images: bool = Form(False),
+    pdf_tables: str = Form("auto"),
+    only: str | None = Form(None),
+    out_dir: str | None = Form(None),
 ) -> StreamingResponse:
     """Конвертация файлов с SSE-прогрессом (BLK-1: threadpool)."""
     opts = _gui_opts(
@@ -279,11 +316,16 @@ async def convert_files(
         tmpdir = Path(tempfile.mkdtemp(prefix="md_gui_"))
         try:
             for upload in files:
-                name = upload.filename or "unknown"
+                # H1: безопасное имя файла
+                name = _safe_filename(
+                    upload.filename or "unknown"
+                )
                 src = tmpdir / name
                 try:
-                    await _save_upload_streaming(upload, src)
-                except ValueError as exc:
+                    await _save_upload_streaming(
+                        upload, src
+                    )
+                except (ValueError, OSError) as exc:
                     yield _sse("error", {
                         "file": name,
                         "error": str(exc),
@@ -292,7 +334,7 @@ async def convert_files(
 
                 yield _sse("start", {"file": name})
 
-                # BLK-1: конвертация в threadpool
+                # BLK-1: threadpool
                 try:
                     result = await asyncio.to_thread(
                         _convert_with_capture, src, opts
@@ -300,16 +342,29 @@ async def convert_files(
                 except Exception as exc:
                     yield _sse("error", {
                         "file": name,
-                        "error": f"{type(exc).__name__}: {exc}",
+                        "error": (
+                            f"{type(exc).__name__}: {exc}"
+                        ),
                     })
                     continue
 
+                # B2: читаем контент в память ДО удаления tmpdir
                 md_path = _find_output(src, opts)
                 preview = ""
+                full_content = ""
                 if md_path and md_path.exists():
-                    preview = md_path.read_text(
+                    full_content = md_path.read_text(
                         encoding="utf-8"
-                    )[:_PREVIEW_CHARS]
+                    )
+                    preview = full_content[:_PREVIEW_CHARS]
+
+                dl_id = ""
+                if full_content:
+                    dl_id = uuid.uuid4().hex[:12]
+                    out_name = src.stem + ".md"
+                    _downloads[dl_id] = (
+                        out_name, full_content
+                    )
 
                 yield _sse("done", {
                     "file": name,
@@ -317,10 +372,11 @@ async def convert_files(
                     "log": result["log"],
                     "warnings": result["warnings"],
                     "preview": preview,
-                    "output": str(md_path) if md_path else None,
+                    "download_id": dl_id,
                 })
             yield _sse("complete", {})
         finally:
+            # B2: tmpdir удаляется, но контент уже в _downloads
             shutil.rmtree(tmpdir, ignore_errors=True)
 
     return StreamingResponse(
@@ -330,13 +386,13 @@ async def convert_files(
 
 @app.post("/api/convert/url")
 async def convert_url_endpoint(
-    url: str,
-    force: bool = False,
-    frontmatter: bool = True,
-    keep_images: bool = False,
-    pdf_tables: str = "auto",
-    only: str | None = None,
-    out_dir: str | None = None,
+    url: str = Form(...),
+    force: bool = Form(False),
+    frontmatter: bool = Form(True),
+    keep_images: bool = Form(False),
+    pdf_tables: str = Form("auto"),
+    only: str | None = Form(None),
+    out_dir: str | None = Form(None),
 ) -> StreamingResponse:
     """Конвертация URL с SSE-прогрессом."""
     opts = _gui_opts(
@@ -346,18 +402,35 @@ async def convert_url_endpoint(
 
     async def generate() -> AsyncGenerator[str, None]:
         yield _sse("start", {"file": url})
+        try:
+            result = await asyncio.to_thread(
+                _convert_url_with_capture, url, opts
+            )
+        except Exception as exc:
+            yield _sse("error", {
+                "file": url,
+                "error": f"{type(exc).__name__}: {exc}",
+            })
+            yield _sse("complete", {})
+            return
 
-        result = await asyncio.to_thread(
-            _convert_url_with_capture, url, opts
-        )
         stem = core._url_stem(url)
         dest_dir = opts.get("out_dir") or Path.cwd()
         md_path = dest_dir / f"{stem}.md"
         preview = ""
+        full_content = ""
         if md_path.exists():
-            preview = md_path.read_text(
+            full_content = md_path.read_text(
                 encoding="utf-8"
-            )[:_PREVIEW_CHARS]
+            )
+            preview = full_content[:_PREVIEW_CHARS]
+
+        dl_id = ""
+        if full_content:
+            dl_id = uuid.uuid4().hex[:12]
+            _downloads[dl_id] = (
+                f"{stem}.md", full_content
+            )
 
         yield _sse("done", {
             "file": url,
@@ -365,63 +438,7 @@ async def convert_url_endpoint(
             "log": result["log"],
             "warnings": result["warnings"],
             "preview": preview,
-            "output": str(md_path) if md_path.exists() else None,
-        })
-        yield _sse("complete", {})
-
-    return StreamingResponse(
-        generate(), media_type="text/event-stream",
-    )
-
-
-@app.post("/api/convert/path")
-async def convert_local_path(
-    path: str,
-    force: bool = False,
-    frontmatter: bool = True,
-    keep_images: bool = False,
-    pdf_tables: str = "auto",
-    only: str | None = None,
-    out_dir: str | None = None,
-) -> StreamingResponse:
-    """Конвертация локального файла по пути (без upload)."""
-    src = Path(path).resolve()
-    # Path traversal protection
-    if not src.exists():
-        return JSONResponse(
-            {"error": f"File not found: {path}"}, status_code=404
-        )
-    if ".." in Path(path).parts:
-        return JSONResponse(
-            {"error": "Path traversal not allowed"},
-            status_code=400,
-        )
-
-    opts = _gui_opts(
-        force, frontmatter, keep_images,
-        pdf_tables, only, out_dir,
-    )
-
-    async def generate() -> AsyncGenerator[str, None]:
-        yield _sse("start", {"file": src.name})
-
-        result = await asyncio.to_thread(
-            _convert_with_capture, src, opts
-        )
-        md_path = _find_output(src, opts)
-        preview = ""
-        if md_path and md_path.exists():
-            preview = md_path.read_text(
-                encoding="utf-8"
-            )[:_PREVIEW_CHARS]
-
-        yield _sse("done", {
-            "file": src.name,
-            "status": result["status"],
-            "log": result["log"],
-            "warnings": result["warnings"],
-            "preview": preview,
-            "output": str(md_path) if md_path else None,
+            "download_id": dl_id,
         })
         yield _sse("complete", {})
 
@@ -439,31 +456,28 @@ async def heartbeat():
 
 
 @app.get("/api/download")
-async def download_file(path: str):
-    """Скачивание готового .md файла."""
-    p = Path(path).resolve()
-    if not p.exists() or not p.suffix == ".md":
+async def download_file(dl_id: str):
+    """Скачивание готового .md из памяти."""
+    entry = _downloads.get(dl_id)
+    if not entry:
         return JSONResponse(
             {"error": "File not found"}, status_code=404
         )
+    filename, content = entry
+    encoded = quote(filename, safe="")
     return StreamingResponse(
-        p.open("rb"),
-        media_type="text/markdown",
+        iter([content.encode("utf-8")]),
+        media_type="text/markdown; charset=utf-8",
         headers={
             "Content-Disposition": (
-                f'attachment; filename="{p.name}"'
+                f"attachment; filename=\"{encoded}\"; "
+                f"filename*=UTF-8''{encoded}"
             )
         },
     )
 
 
-# --- Cleanup ---
-
-async def _cleanup_loop():
-    """G-9: заглушка — jobs хранятся in-memory, очистка не нужна."""
-    while True:
-        await asyncio.sleep(60)
-
+# --- Auto-shutdown ---
 
 async def _auto_shutdown_check():
     """Авто-выключение: если вкладка закрыта 15с → shutdown."""

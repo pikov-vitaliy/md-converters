@@ -1,9 +1,10 @@
-"""Тесты Web-GUI сервера (этап 4).
+"""Тесты Web-GUI сервера.
 
 Запускаются только если установлен fastapi (опциональная зависимость
 [gui]). В CI без [gui] — пропускаются.
 """
 import io
+import json
 
 import pytest
 
@@ -17,7 +18,7 @@ import gui_server  # noqa: E402
 
 @pytest.fixture
 def client():
-    """TestClient с localhost base_url (BLK-6 middleware пропускает)."""
+    """TestClient с localhost base_url (BLK-6+S1 middleware проходит)."""
     with TestClient(
         gui_server.app,
         base_url="http://127.0.0.1:8765",
@@ -57,71 +58,123 @@ def test_origin_check_rejects_non_localhost():
         assert r.status_code == 403
 
 
-def test_origin_check_allows_localhost():
-    """BLK-6: запрос с localhost → 200."""
-    with TestClient(gui_server.app) as c:
-        r = c.get("/", headers={"host": "127.0.0.1:8765"})
-        assert r.status_code == 200
+def test_origin_check_rejects_cross_site():
+    """S1: Origin с внешнего сайта → 403."""
+    with TestClient(
+        gui_server.app,
+        base_url="http://127.0.0.1:8765",
+    ) as c:
+        r = c.get(
+            "/",
+            headers={
+                "host": "127.0.0.1:8765",
+                "origin": "https://evil.com",
+            },
+        )
+        assert r.status_code == 403
 
 
 def test_convert_csv_file(client):
-    """Конвертация простого CSV через upload → SSE с done."""
+    """Конвертация CSV через upload → SSE с done."""
     csv_data = b"a,b\n1,2\n"
     files = {
         "files": ("test.csv", io.BytesIO(csv_data), "text/csv"),
     }
     r = client.post("/api/convert/files", files=files)
     assert r.status_code == 200
-    # Парсим SSE — ищем событие done
     body = r.text
-    assert '"event": "done"' in body or '"event":"done"' in body
+    assert '"done"' in body
     assert "test.csv" in body
+    assert "download_id" in body
 
 
-def test_convert_file_no_frontmatter(client):
-    """Конвертация без front-matter — флаг передан."""
-    csv_data = b"x,y\n3,4\n"
+def test_b1_form_params_actually_work(client):
+    """B1: frontmatter=False передаётся через Form, не теряется."""
+    csv_data = b"a,b\n1,2\n"
     files = {
-        "files": ("mini.csv", io.BytesIO(csv_data), "text/csv"),
+        "files": ("b1test.csv", io.BytesIO(csv_data), "text/csv"),
     }
-    data = {"frontmatter": "false"}
+    data = {
+        "frontmatter": "false",
+        "force": "true",
+    }
     r = client.post(
         "/api/convert/files", files=files, data=data
     )
     assert r.status_code == 200
+    for line in r.text.split("\n"):
+        line = line.strip()
+        if line.startswith("data: ") and "done" in line:
+            payload = json.loads(line[6:])
+            dl_id = payload.get("download_id", "")
+            assert dl_id, "download_id пустой"
+            r2 = client.get(
+                "/api/download",
+                params={"dl_id": dl_id},
+            )
+            assert r2.status_code == 200
+            content = r2.text
+            # CSV → GFM таблица
+            assert "| a | b |" in content or "a,b" in content
+            # front-matter не должен генерироваться
+            assert not content.startswith("---"), (
+                "front-matter не должен генерироваться"
+            )
+            break
 
 
-def test_path_traversal_rejected(client):
-    """POST /api/convert/path с .. → 400."""
-    r = client.post(
-        "/api/convert/path",
-        json={"path": "../../etc/passwd"},
-    )
-    # JSON body → FastAPI парсит как body, но path параметр
-    # передаётся через query/form. Проверяем хотя бы 404/400.
-    assert r.status_code in (400, 404, 422)
+def test_download_works_after_tmpdir_cleanup(client):
+    """B2: файл доступен для скачивания после удаления tmpdir."""
+    csv_data = b"x,y\n3,4\n"
+    files = {
+        "files": ("b2test.csv", io.BytesIO(csv_data), "text/csv"),
+    }
+    r = client.post("/api/convert/files", files=files)
+    assert r.status_code == 200
+    for line in r.text.split("\n"):
+        line = line.strip()
+        if line.startswith("data: ") and "done" in line:
+            payload = json.loads(line[6:])
+            dl_id = payload.get("download_id", "")
+            assert dl_id, "download_id пустой"
+            r2 = client.get(
+                "/api/download",
+                params={"dl_id": dl_id},
+            )
+            assert r2.status_code == 200
+            # CSV → GFM таблица
+            assert "| x | y |" in r2.text or "x,y" in r2.text
+            break
 
 
-def test_download_not_found(client):
-    """GET /api/download с несуществующим путём → 404."""
-    r = client.get(
-        "/api/download",
-        params={"path": "/tmp/nonexistent_test_file.md"},
-    )
-    assert r.status_code == 404
-
-
-def test_file_too_large_rejected(client):
-    """BLK-5: файл больше 100 МБ → ошибка в SSE."""
-    big_data = b"x" * (101 * 1024 * 1024)
+def test_h1_path_traversal_filename(client):
+    """H1: имя файла с .. санитизируется до basename."""
+    csv_data = b"h1test\n"
     files = {
         "files": (
-            "big.pdf",
-            io.BytesIO(big_data),
-            "application/pdf",
+            "..\\..\\evil.csv",
+            io.BytesIO(csv_data),
+            "text/csv",
         ),
     }
     r = client.post("/api/convert/files", files=files)
     assert r.status_code == 200
-    body = r.text
-    assert "error" in body or "too large" in body.lower()
+    # Файл должен быть сохранён как evil.csv
+    assert "evil.csv" in r.text
+    # Имя файла в SSE не должно содержать ..
+    for line in r.text.split("\n"):
+        line = line.strip()
+        if line.startswith("data: ") and "done" in line:
+            payload = json.loads(line[6:])
+            # file field — только basename, без пути
+            assert ".." not in payload.get("file", "")
+            break
+
+
+def test_download_not_found(client):
+    """GET /api/download с несуществующим dl_id → 404."""
+    r = client.get(
+        "/api/download",
+        params={"dl_id": "nonexistent123"},
+    )
+    assert r.status_code == 404

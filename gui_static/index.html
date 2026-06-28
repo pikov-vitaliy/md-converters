@@ -201,9 +201,11 @@ function addResult(name, status, extra) {
   var icons = {ok:"\u2705", skip:"\u23ed\ufe0f",
     fail:"\u274c", pending:"\u23f3"};
   var icon = icons[status] || "\u23f3";
+  // L1: name через textContent, не innerHTML (защита от XSS)
   div.innerHTML = '<span class="status">' + icon +
-    '</span><span class="name">' + name +
-    '</span><span class="actions">' + (extra||"") + '</span>';
+    '</span><span class="name"></span>' +
+    '<span class="actions">' + (extra||"") + '</span>';
+  div.querySelector(".name").textContent = name;
   document.getElementById("results").prepend(div);
   return div;
 }
@@ -291,10 +293,12 @@ function handleSSE(data) {
     div.setAttribute("data-file", data.file);
     div.setAttribute("data-status", data.status);
 
-    var html = '<span class="status">' + (icons[data.status]||"\u23f3") +
-      '</span><span class="name">' + data.file + '</span>' +
+    // L1: name через textContent, не innerHTML (защита от XSS)
+    div.innerHTML = '<span class="status">' +
+      (icons[data.status]||"\u23f3") +
+      '</span><span class="name"></span>' +
       '<span class="actions"></span>';
-    div.innerHTML = html;
+    div.querySelector(".name").textContent = data.file;
 
     var actions = div.querySelector(".actions");
 
@@ -310,12 +314,12 @@ function handleSSE(data) {
     }
 
     // Кнопка «Скачать» — скачивает .md
-    if (data.output) {
+    if (data.download_id) {
       var btnDl = document.createElement("button");
       btnDl.className = "btn btn-sm";
       btnDl.innerHTML = "\u2B07";
       btnDl.addEventListener("click", function() {
-        download(data.output);
+        download(data.download_id);
       });
       actions.appendChild(btnDl);
     }
@@ -379,8 +383,8 @@ function showPreview(text) {
     .scrollIntoView({behavior:"smooth", block:"nearest"});
 }
 
-function download(path) {
-  window.open("/api/download?path=" + encodeURIComponent(path));
+function download(dlId) {
+  window.open("/api/download?dl_id=" + encodeURIComponent(dlId));
 }
 
 document.addEventListener("keydown", (e) => {
