@@ -165,12 +165,18 @@ def _find_free_port() -> int:
 
 # Глобальная ссылка на uvicorn-сервер для graceful shutdown
 _uvicorn_server: uvicorn.Server | None = None
+# Открывать браузер и авто-выключаться — ТОЛЬКО при реальном запуске
+# (main()). Под TestClient/в тестах эти задачи не нужны: иначе каждый
+# тест открывал бы вкладку браузера (если порт 8765 кем-то занят) и
+# мог бы сам себя выключить.
+_SERVE_MODE = False
+
 
 @contextlib.asynccontextmanager
 async def _lifespan(app: FastAPI):
-    global _port, _uvicorn_server
-    asyncio.create_task(_open_browser_when_ready(_port))
-    asyncio.create_task(_auto_shutdown_check())
+    if _SERVE_MODE:
+        asyncio.create_task(_open_browser_when_ready(_port))
+        asyncio.create_task(_auto_shutdown_check())
     yield
 
 
@@ -972,7 +978,8 @@ async def _auto_shutdown_check():
 
 def main():
     """Точка входа tomd-gui: старт сервера."""
-    global _port, _uvicorn_server
+    global _port, _uvicorn_server, _SERVE_MODE
+    _SERVE_MODE = True  # только тут включаем браузер + авто-выключение
     _port = _find_free_port()
     if sys.stdout.encoding and \
        sys.stdout.encoding.lower() not in ("utf-8", "utf8"):

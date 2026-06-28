@@ -426,6 +426,31 @@ def test_zip_upload_to_outdir_copies(client, tmp_path):
     assert not _zip_id(r.text)
 
 
+def test_testclient_does_not_open_browser(monkeypatch):
+    """Под TestClient lifespan НЕ открывает браузер и не авто-выключает.
+
+    Иначе каждый тест/агент-аудитор открывал бы вкладку браузера
+    (если порт 8765 занят запущенным GUI). Браузер/авто-выключение —
+    только при реальном запуске main() (_SERVE_MODE)."""
+    assert gui_server._SERVE_MODE is False
+    called = {"b": False, "s": False}
+
+    async def fake_b(port):
+        called["b"] = True
+
+    async def fake_s():
+        called["s"] = True
+
+    monkeypatch.setattr(gui_server, "_open_browser_when_ready", fake_b)
+    monkeypatch.setattr(gui_server, "_auto_shutdown_check", fake_s)
+    with TestClient(
+        gui_server.app, base_url="http://127.0.0.1:8765"
+    ):
+        pass
+    assert called["b"] is False
+    assert called["s"] is False
+
+
 def test_insecure_ssl_flag_reaches_download(client, monkeypatch):
     """insecure_ssl=true → verify_ssl=False доходит до _download_url."""
     cap = {}
