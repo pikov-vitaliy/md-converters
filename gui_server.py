@@ -298,40 +298,6 @@ def _gui_opts(
     return core._build_opts(parsed, default_only=None)
 
 
-# --- Find output .md ---
-
-def _find_output(
-    src: Path, opts: dict,
-    before: set[Path] | None = None,
-) -> Path | None:
-    """Находит НОВЫЙ .md, созданный конвертацией.
-
-    Снимок до/после: если before передан — возвращает .md, которого
-    не было в before. Это единственный надёжный способ при одинаковых
-    stem в батче (report.pdf + report.docx → report (2).md).
-    Без before — fallback на glob по stem.
-    """
-    dest_dir = opts.get("out_dir") or src.parent
-    if before is not None:
-        after = set(dest_dir.glob("*.md"))
-        new_files = after - before
-        if len(new_files) == 1:
-            return new_files.pop()
-        if len(new_files) > 1:
-            # Несколько новых — берём свежий по mtime
-            return sorted(
-                new_files,
-                key=lambda p: p.stat().st_mtime,
-                reverse=True,
-            )[0]
-        return None
-    # Fallback: glob по stem
-    candidate = dest_dir / (src.stem + ".md")
-    if candidate.exists():
-        return candidate
-    return None
-
-
 # --- Routes ---
 
 @app.get("/", response_class=HTMLResponse)
@@ -369,7 +335,35 @@ async def get_flags():
     }
 
 
-_CONVERT_SEMAPHORE = asyncio.Semaphore(3)
+# Конвертации сериализуем процесс-широко: core печатает через
+# print(), а _convert_*_with_capture перенаправляет ГЛОБАЛЬНЫЙ
+# sys.stdout — два параллельных перехвата затирают друг друга и
+# ломают вывод. Плюс общий opts["planned"]/last_target нельзя
+# трогать из двух потоков. Один файл за раз — для локального
+# однопользовательского GUI этого достаточно.
+_CONVERT_LOCK = asyncio.Lock()
+
+
+async def _run_conversion(fn, arg, opts: dict) -> dict | None:
+    """Сериализованная конвертация + точный target от ядра.
+
+    Возвращает dict результата (status/log/warnings/md_path) или
+    None, если to_thread бросил исключение наружу.
+    """
+    async with _CONVERT_LOCK:
+        result = await asyncio.to_thread(fn, arg, opts)
+        # last_target ставит ядро (convert_file/convert_url) —
+        # точная цель записи, без угадывания по stem.
+        result["md_path"] = opts.get("last_target")
+    return result
+
+
+def _read_output(md_path: Path | None) -> tuple[str, str]:
+    """Читает .md (полностью + превью). Пусто, если файла нет."""
+    if md_path and md_path.exists():
+        full = md_path.read_text(encoding="utf-8")
+        return full, full[:_PREVIEW_CHARS]
+    return "", ""
 
 
 # B1: Form(...) — параметры читаются из multipart body
@@ -383,56 +377,17 @@ async def convert_files(
     only: str | None = Form(None),
     out_dir: str | None = Form(None),
 ) -> StreamingResponse:
-    """Конвертация файлов с SSE-прогрессом (BLK-1: threadpool)."""
+    """Конвертация файлов с SSE-прогрессом (последовательно)."""
     opts = _gui_opts(
         force, frontmatter, keep_images,
         pdf_tables, only, out_dir,
     )
-
-    async def _convert_one(
-        src: Path, name: str,
-        before: set[Path],
-    ) -> dict:
-        """Конвертация одного файла с семафором (до 3 параллельно)."""
-        async with _CONVERT_SEMAPHORE:
-            try:
-                result = await asyncio.to_thread(
-                    _convert_with_capture, src, opts
-                )
-            except Exception as exc:
-                return {
-                    "file": name,
-                    "error": (
-                        f"{type(exc).__name__}: {exc}"
-                    ),
-                }
-            md_path = _find_output(src, opts, before)
-            preview = ""
-            full_content = ""
-            if md_path and md_path.exists():
-                full_content = md_path.read_text(
-                    encoding="utf-8"
-                )
-                preview = full_content[:_PREVIEW_CHARS]
-            dl_id = ""
-            if full_content:
-                dl_id = uuid.uuid4().hex[:12]
-                _add_download(
-                    dl_id, src.stem + ".md", full_content
-                )
-            return {
-                "file": name,
-                "status": result["status"],
-                "log": result["log"],
-                "warnings": result["warnings"],
-                "preview": preview,
-                "download_id": dl_id,
-            }
+    has_out_dir = opts.get("out_dir") is not None
 
     async def generate() -> AsyncGenerator[str, None]:
         tmpdir = Path(tempfile.mkdtemp(prefix="md_gui_"))
         try:
-            # 1. Загрузка всех файлов (последовательно — upload stream)
+            # 1. Загрузка (последовательно — это поток upload)
             jobs = []
             for upload in files:
                 name = _safe_filename(
@@ -440,38 +395,49 @@ async def convert_files(
                 )
                 src = tmpdir / name
                 try:
-                    await _save_upload_streaming(
-                        upload, src
-                    )
+                    await _save_upload_streaming(upload, src)
                 except (ValueError, OSError) as exc:
                     yield _sse("error", {
-                        "file": name,
-                        "error": str(exc),
+                        "file": name, "error": str(exc),
                     })
                     continue
                 yield _sse("start", {"file": name})
                 jobs.append((src, name))
 
-            # 2. Параллельная конвертация (до 3 одновременно)
-            if jobs:
-                # Снимок dest_dir ДО конвертации — чтобы найти
-                # именно новые файлы (защита от same-stem)
-                dest_dir = opts.get("out_dir") or tmpdir
-                before = set(dest_dir.glob("*.md"))
-                tasks = [
-                    _convert_one(src, name, before)
-                    for src, name in jobs
-                ]
-                results = await asyncio.gather(
-                    *tasks, return_exceptions=False
-                )
-                # 3. Отдаём результаты последовательно
-                for r in results:
-                    if "error" in r:
-                        yield _sse("error", r)
-                    else:
-                        yield _sse("done", r)
-
+            # 2. Конвертация по одному файлу за раз
+            for src, name in jobs:
+                try:
+                    res = await _run_conversion(
+                        _convert_with_capture, src, opts
+                    )
+                except Exception as exc:
+                    yield _sse("error", {
+                        "file": name,
+                        "error": f"{type(exc).__name__}: {exc}",
+                    })
+                    continue
+                md_path = res["md_path"]
+                full_content, preview = _read_output(md_path)
+                dl_id = ""
+                if full_content:
+                    dl_id = uuid.uuid4().hex[:12]
+                    _add_download(
+                        dl_id, md_path.name, full_content
+                    )
+                yield _sse("done", {
+                    "file": name,
+                    "status": res["status"],
+                    "log": res["log"],
+                    "warnings": res["warnings"],
+                    "preview": preview,
+                    "download_id": dl_id,
+                    # Реальный путь показываем, только если он
+                    # стабилен (out_dir задан); иначе tmp удалится.
+                    "output": (
+                        str(md_path)
+                        if has_out_dir and md_path else None
+                    ),
+                })
             yield _sse("complete", {})
         finally:
             shutil.rmtree(tmpdir, ignore_errors=True)
@@ -497,12 +463,12 @@ async def convert_url_endpoint(
         pdf_tables, only, out_dir,
     )
 
+    has_out_dir = opts.get("out_dir") is not None
+
     async def generate() -> AsyncGenerator[str, None]:
         yield _sse("start", {"file": url})
-        dest_dir = opts.get("out_dir") or Path.cwd()
-        before = set(dest_dir.glob("*.md"))
         try:
-            result = await asyncio.to_thread(
+            res = await _run_conversion(
                 _convert_url_with_capture, url, opts
             )
         except Exception as exc:
@@ -513,33 +479,24 @@ async def convert_url_endpoint(
             yield _sse("complete", {})
             return
 
-        # Находим НОВЫЙ .md через снимок до/после
-        stem = core._url_stem(url)
-        md_path = _find_output(
-            Path(f"{stem}.csv"), opts, before
-        )
-        preview = ""
-        full_content = ""
-        if md_path and md_path.exists():
-            full_content = md_path.read_text(
-                encoding="utf-8"
-            )
-            preview = full_content[:_PREVIEW_CHARS]
-
+        md_path = res["md_path"]
+        full_content, preview = _read_output(md_path)
         dl_id = ""
         if full_content:
             dl_id = uuid.uuid4().hex[:12]
-            _add_download(
-                dl_id, f"{stem}.md", full_content
-            )
+            _add_download(dl_id, md_path.name, full_content)
 
         yield _sse("done", {
             "file": url,
-            "status": result["status"],
-            "log": result["log"],
-            "warnings": result["warnings"],
+            "status": res["status"],
+            "log": res["log"],
+            "warnings": res["warnings"],
             "preview": preview,
             "download_id": dl_id,
+            "output": (
+                str(md_path)
+                if has_out_dir and md_path else None
+            ),
         })
         yield _sse("complete", {})
 

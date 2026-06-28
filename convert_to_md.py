@@ -1686,6 +1686,10 @@ def _worker_convert(argv: list[str]) -> int:
 
 
 def convert_file(path: Path, opts: dict) -> str:
+    # last_target: реальная цель записи .md, чтобы вызывающий (GUI)
+    # не угадывал путь по stem. Сбрасываем в начале — иначе при
+    # early-return останется цель предыдущего файла в общем opts.
+    opts["last_target"] = None
     if not path.exists():
         print(f"[error] File not found: {path.resolve()}")
         return "fail"
@@ -1695,6 +1699,7 @@ def convert_file(path: Path, opts: dict) -> str:
               "trying anyway.")
 
     target, source_id = _plan_file_target(path, opts, opts["planned"])
+    opts["last_target"] = target
     if target.exists() and not opts["force"]:
         print(f"[skip] {target.name} already exists "
               "(use -f / --force to overwrite)")
@@ -1722,7 +1727,9 @@ def _url_stem(url: str) -> str:
 
 
 def convert_url(url: str, opts: dict) -> str:
+    opts["last_target"] = None
     target, source_id = _plan_url_target(url, opts, opts["planned"])
+    opts["last_target"] = target
     if target.exists() and not opts["force"]:
         print(f"[skip] {target.name} already exists "
               "(use -f / --force to overwrite)")

@@ -178,3 +178,52 @@ def test_download_not_found(client):
         params={"dl_id": "nonexistent123"},
     )
     assert r.status_code == 404
+
+
+def _done_events(body):
+    return [
+        json.loads(p[6:])
+        for p in body.split("\n\n")
+        if p.strip().startswith("data: ")
+        and json.loads(p.strip()[6:]).get("event") == "done"
+    ]
+
+
+def test_same_stem_batch_no_cross_assignment(client):
+    """HIGH#1: файлы с ОДИНАКОВЫМ stem в батче не путают контент.
+
+    report.csv + report.html + report.json — у каждого свой маркер;
+    превью и скачивание каждого должны отдавать ИМЕННО его контент,
+    а не чужой (раньше угадывание по stem отдавало report.md всем).
+    """
+    files = [
+        ("files", ("report.csv",
+                   io.BytesIO(b"m,v\nCSVUNIQUE,1\n"), "text/csv")),
+        ("files", ("report.html",
+                   io.BytesIO(b"<p>HTMLUNIQUE</p>"), "text/html")),
+        ("files", ("report.json",
+                   io.BytesIO(b'{"k":"JSONUNIQUE"}'),
+                   "application/json")),
+    ]
+    r = client.post("/api/convert/files", files=files)
+    assert r.status_code == 200
+    dones = _done_events(r.text)
+    assert len(dones) == 3
+    markers = {
+        "csv": "CSVUNIQUE",
+        "html": "HTMLUNIQUE",
+        "json": "JSONUNIQUE",
+    }
+    for d in dones:
+        ext = d["file"].rsplit(".", 1)[-1]
+        want = markers[ext]
+        dl_id = d.get("download_id", "")
+        assert dl_id, f"нет download_id для {d['file']}"
+        content = client.get(
+            "/api/download", params={"dl_id": dl_id}
+        ).text
+        assert want in content, (
+            f"{d['file']}: ожидался {want}, получен чужой контент"
+        )
+        # И превью того же файла — его собственное
+        assert want in d.get("preview", "")
