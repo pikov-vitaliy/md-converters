@@ -411,10 +411,18 @@ _ARCHIVE_EXTS = {".zip"}
 
 
 async def _convert_archive(src: Path, opts: dict, label: str):
-    """Распаковывает .zip, конвертирует каждый файл внутри, собирает
-    .md в ОДИН .zip. Async-gen: SSE per-member + финальный 'zip'.
+    """Распаковывает .zip, конвертирует каждый файл внутри в .md.
+
+    Async-gen: per-member SSE (статус + превью + скачивание по одному),
+    затем финальный 'zip'. Если задана out_dir — .md копируются туда;
+    иначе собирается ОДИН .zip ТОЛЬКО с .md (без исходников).
     zip-slip-safe (_safe_rel). Вложенные архивы не разворачиваем."""
     inner = Path(tempfile.mkdtemp(prefix="md_unzip_"))
+    # Конвертируем ВНУТРИ inner (out_dir=None), копию в out_dir — сами.
+    member_opts = dict(opts)
+    member_opts["out_dir"] = None
+    member_opts["planned"] = set()
+    out_dir = opts.get("out_dir")
     collected: list[tuple[str, str]] = []
     try:
         try:
@@ -443,7 +451,7 @@ async def _convert_archive(src: Path, opts: dict, label: str):
             yield _sse("start", {"file": member.name})
             try:
                 res = await _run_conversion(
-                    _convert_with_capture, member, opts
+                    _convert_with_capture, member, member_opts
                 )
             except Exception as exc:
                 yield _sse("error", {
@@ -453,19 +461,33 @@ async def _convert_archive(src: Path, opts: dict, label: str):
                 continue
             md_path = res["md_path"]
             full, preview = _read_output(md_path)
+            dl_id = ""
+            out_path = None
             if full and md_path:
-                entry = md_path.relative_to(inner).as_posix()
-                collected.append((entry, full))
+                rel = md_path.relative_to(inner)
+                collected.append((rel.as_posix(), full))
+                dl_id = uuid.uuid4().hex[:12]
+                _add_download(dl_id, md_path.name, full)
+                if out_dir is not None:
+                    dest = out_dir / rel
+                    try:
+                        dest.parent.mkdir(parents=True, exist_ok=True)
+                        dest.write_text(full, encoding="utf-8")
+                        out_path = str(dest)
+                    except OSError:
+                        out_path = None
             yield _sse("done", {
                 "file": member.name,
                 "status": res["status"],
                 "log": res["log"],
                 "warnings": res["warnings"],
                 "preview": preview,
-                "download_id": "",
+                "download_id": dl_id,
+                "output": out_path,
             })
+        # Общий .zip только с .md — если выходная папка НЕ задана
         zip_id = ""
-        if collected:
+        if collected and out_dir is None:
             buf = io.BytesIO()
             with zipfile.ZipFile(
                 buf, "w", zipfile.ZIP_DEFLATED

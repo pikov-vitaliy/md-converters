@@ -376,6 +376,56 @@ def test_zip_upload_expands_to_md_zip(client):
     assert sorted(z.namelist()) == ["report.md", "sub/data.md"]
 
 
+def test_zip_upload_per_file_download(client):
+    """Загрузка .zip: у каждого файла свой download_id (по одному)."""
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, "w") as z:
+        z.writestr("a.csv", "m,v\nAAA,1\n")
+        z.writestr("b.html", "<p>BBB</p>")
+    r = client.post(
+        "/api/convert/files",
+        files={"files": (
+            "bundle.zip", io.BytesIO(buf.getvalue()),
+            "application/zip",
+        )},
+    )
+    assert r.status_code == 200
+    dones = _done_events(r.text)
+    assert len(dones) == 2
+    for d in dones:
+        dl = d.get("download_id", "")
+        assert dl, f"нет download_id у {d['file']}"
+        content = client.get(
+            "/api/download", params={"dl_id": dl}
+        ).text
+        marker = "AAA" if d["file"].endswith(".csv") else "BBB"
+        assert marker in content
+
+
+def test_zip_upload_to_outdir_copies(client, tmp_path):
+    """Загрузка .zip с «Папкой вывода»: .md копируются туда, без zip."""
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, "w") as z:
+        z.writestr("one.csv", "m,v\nA,1\n")
+        z.writestr("sub/two.json", '{"k":"B"}')
+    r = client.post(
+        "/api/convert/files",
+        files={"files": (
+            "bundle.zip", io.BytesIO(buf.getvalue()),
+            "application/zip",
+        )},
+        data={"out_dir": str(tmp_path)},
+    )
+    assert r.status_code == 200
+    made = sorted(
+        p.relative_to(tmp_path).as_posix()
+        for p in tmp_path.rglob("*.md")
+    )
+    assert made == ["one.md", "sub/two.md"]
+    # при заданной out_dir общий zip НЕ собирается
+    assert not _zip_id(r.text)
+
+
 def test_insecure_ssl_flag_reaches_download(client, monkeypatch):
     """insecure_ssl=true → verify_ssl=False доходит до _download_url."""
     cap = {}

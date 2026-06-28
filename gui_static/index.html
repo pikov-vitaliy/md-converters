@@ -82,22 +82,23 @@ border-bottom:1px solid #333;padding-bottom:4px}
 <body>
 <h1>md-converters <span id="ver" style="font-size:.8rem;color:#666"></span></h1>
 
-<div class="drop-zone" id="dropZone">
+<div class="drop-zone" id="dropZone" title="Перетащите или выберите файлы — каждый станет .md. Можно бросить и .zip-архив: он распакуется на сервере, всё внутри сконвертируется, на выходе — .zip только с .md (или копия в «Папку вывода», если она задана). Файлы видны по одному, каждый можно скачать отдельно.">
   <p><strong>Перетащите файлы сюда</strong></p>
   <p>или нажмите «Выбрать»</p>
-  <p style="font-size:.8rem;color:#666">PDF, HTML, DOCX, XLSX, PPTX, CSV, JSON</p>
+  <p style="font-size:.8rem;color:#666">PDF, HTML, DOCX, XLSX, PPTX, CSV, JSON, EPUB, MSG, IPYNB, XML, RSS</p>
+  <p style="font-size:.8rem;color:#7f7fff">…или <strong>.zip-архив</strong> → получите .zip с .md (каждый файл внутри сконвертируется)</p>
   <input type="file" id="fileInput" multiple
   style="display:none">
 </div>
 
 <div class="settings">
-  <label><input type="checkbox" id="force" onchange="save()"> Перезаписать (force)</label>
-  <label><input type="checkbox" id="frontmatter" checked onchange="save()"> YAML front-matter</label>
-  <label><input type="checkbox" id="keepImages" onchange="save()"> Сохранить картинки</label>
-  <label><input type="checkbox" id="pdfTables" checked onchange="save()"> PDF-таблицы</label>
+  <label title="Перезаписать существующий .md. Без галочки — если .md уже лежит рядом, файл пропускается (skip)."><input type="checkbox" id="force" onchange="save()"> Перезаписать (force)</label>
+  <label title="Добавлять в начало .md служебную YAML-шапку: источник, дата, чем сконвертировано, число PDF-таблиц. Выкл — чистый .md без шапки."><input type="checkbox" id="frontmatter" checked onchange="save()"> YAML front-matter</label>
+  <label title="Встраивать картинки в .md как base64 — файл самодостаточный (картинки видно), но размер сильно растёт. Выкл (по умолчанию) — картинки заменяются плейсхолдером ![...]()."><input type="checkbox" id="keepImages" onchange="save()"> Сохранить картинки</label>
+  <label title="Извлекать таблицы из PDF по геометрии (pdfplumber) — аккуратные таблицы. Выкл — обычный текстовый путь MarkItDown, таблицы могут разъезжаться."><input type="checkbox" id="pdfTables" checked onchange="save()"> PDF-таблицы</label>
   <label title="Снимает проверку HTTPS-сертификата для URL. Включайте только для доверенных внутренних хостов — без защиты от MITM."><input type="checkbox" id="insecureSsl" onchange="save()"> URL: не проверять SSL</label>
   <br>
-  <label style="display:inline-block;margin-top:8px">Форматы:
+  <label style="display:inline-block;margin-top:8px" title="Какие типы файлов конвертировать при выборе ПАПКИ. Для одиночных файлов не влияет.">Форматы:
     <select id="only" onchange="save()">
       <option value="">все</option>
       <option value="pdf">только PDF</option>
@@ -107,12 +108,12 @@ border-bottom:1px solid #333;padding-bottom:4px}
     </select>
   </label>
   <br>
-  <label style="display:block;margin-top:8px">Папка вывода:
+  <label style="display:block;margin-top:8px" title="Куда класть .md. Пусто = рядом с источником. При загрузке файлов через браузер: укажите путь — .md запишется туда; иначе результат только скачивается кнопкой.">Папка вывода:
     <input type="text" id="outDir" placeholder="(рядом с источником)" onchange="save()">
   </label>
 </div>
 
-<div class="url-section">
+<div class="url-section" title="Сконвертировать веб-страницу по ссылке в .md. Приватные/локальные адреса блокируются (защита от SSRF). Для сайтов с самоподписанным HTTPS-сертом включите «URL: не проверять SSL».">
   <input type="text" id="urlInput" placeholder="https://example.com/report"
   onkeydown="if(event.key==='Enter')convertURL()">
   <button class="btn" onclick="convertURL()">Конвертировать URL</button>
@@ -123,9 +124,9 @@ border-bottom:1px solid #333;padding-bottom:4px}
 flex-wrap:wrap">
   <span style="color:#aaa;font-size:.9rem">С диска (на месте,
   .md рядом с файлом):</span>
-  <button class="btn" onclick="convertPicked('files')">Выбрать
+  <button class="btn" onclick="convertPicked('files')" title="Родной диалог ОС: выбрать файлы на диске → .md пишется РЯДОМ с каждым исходником (на месте, путь вводить не нужно).">Выбрать
   файлы…</button>
-  <button class="btn" onclick="convertPicked('folder')">Выбрать
+  <button class="btn" onclick="convertPicked('folder')" title="Родной диалог ОС: выбрать папку → все файлы внутри (рекурсивно) → .md рядом с каждым (на месте).">Выбрать
   папку…</button>
 </div>
 
@@ -137,7 +138,7 @@ flex-wrap:wrap">
   <input type="file" id="dirInput" webkitdirectory directory multiple
   style="display:none">
   <button class="btn"
-  onclick="document.getElementById('dirInput').click()">Папка →
+  onclick="document.getElementById('dirInput').click()" title="Выбрать ПАПКУ целиком в браузере → все файлы внутри сконвертируются → скачать один .zip со всеми .md (структура подпапок сохраняется). Обратная операция: бросьте .zip в зону вверху, чтобы из архива получить .md.">Папка →
   ZIP</button>
 </div>
 
