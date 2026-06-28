@@ -27,6 +27,7 @@ from fastapi.responses import (
     JSONResponse,
     StreamingResponse,
 )
+from fastapi.staticfiles import StaticFiles
 
 import convert_to_md as core
 
@@ -76,6 +77,7 @@ async def _lifespan(app: FastAPI):
 
 
 app = FastAPI(lifespan=_lifespan)
+app.mount("/static", StaticFiles(directory=_STATIC), name="static")
 
 
 # --- Browser open after port ready (BLK-2) ---
@@ -291,9 +293,17 @@ async def convert_files(
                 yield _sse("start", {"file": name})
 
                 # BLK-1: конвертация в threadpool
-                result = await asyncio.to_thread(
-                    _convert_with_capture, src, opts
-                )
+                try:
+                    result = await asyncio.to_thread(
+                        _convert_with_capture, src, opts
+                    )
+                except Exception as exc:
+                    yield _sse("error", {
+                        "file": name,
+                        "error": f"{type(exc).__name__}: {exc}",
+                    })
+                    continue
+
                 md_path = _find_output(src, opts)
                 preview = ""
                 if md_path and md_path.exists():

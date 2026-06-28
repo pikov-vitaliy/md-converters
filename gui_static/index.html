@@ -73,8 +73,7 @@ border-bottom:1px solid #333;padding-bottom:4px}
   <p>или нажмите «Выбрать»</p>
   <p style="font-size:.8rem;color:#666">PDF, HTML, DOCX, XLSX, PPTX, CSV, JSON</p>
   <input type="file" id="fileInput" multiple
-  style="display:none"
-  accept=".pdf,.html,.htm,.docx,.xlsx,.pptx,.csv,.json,.xml,.epub,.msg,.ipynb,.rss">
+  style="display:none">
 </div>
 
 <div class="settings">
@@ -108,12 +107,12 @@ border-bottom:1px solid #333;padding-bottom:4px}
 <div class="results" id="results"></div>
 
 <div class="preview-section" id="previewSection" style="display:none">
-  <div class="section-title">Превью</div>
+  <div class="section-title">Превью: <span id="previewTitle">—</span></div>
   <div id="preview"></div>
 </div>
 
-<script src="marked.min.js"></script>
-<script src="purify.min.js"></script>
+<script src="/static/marked.min.js"></script>
+<script src="/static/purify.min.js"></script>
 <script>
 let currentPreview = "";
 
@@ -195,11 +194,13 @@ dropZone.addEventListener("drop", (e) => {
 });
 
 function addResult(name, status, extra) {
-  const div = document.createElement("div");
+  var div = document.createElement("div");
   div.className = "result-item";
-  const icons = {ok:"\u2705", skip:"\u23ed\ufe0f",
+  div.setAttribute("data-file", name);
+  div.setAttribute("data-status", status);
+  var icons = {ok:"\u2705", skip:"\u23ed\ufe0f",
     fail:"\u274c", pending:"\u23f3"};
-  const icon = icons[status] || "\u23f3";
+  var icon = icons[status] || "\u23f3";
   div.innerHTML = '<span class="status">' + icon +
     '</span><span class="name">' + name +
     '</span><span class="actions">' + (extra||"") + '</span>';
@@ -275,32 +276,107 @@ function handleSSE(data) {
   if (data.event === "start") {
     addResult(data.file, "pending");
   } else if (data.event === "done") {
-    const results = document.getElementById("results");
-    const first = results.querySelector(".result-item");
-    if (first) first.remove();
-    const dl = data.output
-      ? '<button class="btn btn-sm" onclick="download(\'' +
-        data.output + '\')">\u2B07</button>' : '';
-    const pv = data.preview
-      ? '<button class="btn btn-sm" onclick="showPreview(' +
-        data.preview.length + ')">Превью</button>' : '';
-    addResult(data.file, data.status, dl + pv);
+    // Удаляем «pending» карточку для этого файла
+    var items = document.querySelectorAll(".result-item");
+    items.forEach(function(el) {
+      if (el.getAttribute("data-file") === data.file
+          && el.getAttribute("data-status") === "pending")
+        el.remove();
+    });
+
+    var icons = {ok:"\u2705", skip:"\u23ed\ufe0f",
+      fail:"\u274c", pending:"\u23f3"};
+    var div = document.createElement("div");
+    div.className = "result-item";
+    div.setAttribute("data-file", data.file);
+    div.setAttribute("data-status", data.status);
+
+    var html = '<span class="status">' + (icons[data.status]||"\u23f3") +
+      '</span><span class="name">' + data.file + '</span>' +
+      '<span class="actions"></span>';
+    div.innerHTML = html;
+
+    var actions = div.querySelector(".actions");
+
+    // Кнопка «Превью» — показывает превью этого файла
     if (data.preview) {
-      currentPreview = data.preview;
-      if (data.status === "ok")
-        showPreview(data.preview.length);
+      var btnPv = document.createElement("button");
+      btnPv.className = "btn btn-sm";
+      btnPv.textContent = "Превью";
+      btnPv.addEventListener("click", function() {
+        showPreview(data.preview);
+      });
+      actions.appendChild(btnPv);
+    }
+
+    // Кнопка «Скачать» — скачивает .md
+    if (data.output) {
+      var btnDl = document.createElement("button");
+      btnDl.className = "btn btn-sm";
+      btnDl.innerHTML = "\u2B07";
+      btnDl.addEventListener("click", function() {
+        download(data.output);
+      });
+      actions.appendChild(btnDl);
+    }
+
+    document.getElementById("results").prepend(div);
+
+    // Автопревью первого успешного результата
+    if (data.preview && data.status === "ok") {
+      showPreview(data.preview);
+    }
+
+    // Показать ошибку
+    if (data.status === "fail" && data.log) {
+      var errDiv = document.createElement("div");
+      errDiv.style.cssText = "color:#ff6666;font-size:.8rem;"
+        + "padding:4px 14px;margin-left:24px";
+      errDiv.textContent = data.log.substring(0, 200);
+      div.appendChild(errDiv);
     }
   } else if (data.event === "error") {
     addResult(data.file, "fail");
+    if (data.error) {
+      var items2 = document.querySelectorAll(".result-item");
+      items2.forEach(function(el) {
+        if (el.getAttribute("data-file") === data.file
+            && el.getAttribute("data-status") === "fail") {
+          var e = document.createElement("div");
+          e.style.cssText = "color:#ff6666;font-size:.8rem;"
+            + "padding:4px 14px;margin-left:24px";
+          e.textContent = data.error;
+          el.appendChild(e);
+        }
+      });
+    }
   }
 }
 
-function showPreview() {
+function showPreview(text) {
+  if (text) currentPreview = text;
+  if (!currentPreview) return;
   document.getElementById("previewSection").style.display = "block";
+  var el = document.getElementById("preview");
   // BLK-7: marked.js рендерит, DOMPurify чистит от XSS
-  const raw = marked.parse(currentPreview);
-  const clean = DOMPurify.sanitize(raw);
-  document.getElementById("preview").innerHTML = clean;
+  if (typeof marked !== "undefined" && typeof DOMPurify !== "undefined") {
+    try {
+      var raw = marked.parse(currentPreview);
+      var clean = DOMPurify.sanitize(raw);
+      el.innerHTML = clean;
+    } catch(e) {
+      el.innerHTML = "<pre>" + currentPreview
+        .replace(/&/g,"&amp;").replace(/</g,"&lt;")
+        .replace(/>/g,"&gt;") + "</pre>";
+    }
+  } else {
+    el.innerHTML = "<pre>" + currentPreview
+      .replace(/&/g,"&amp;").replace(/</g,"&lt;")
+      .replace(/>/g,"&gt;") + "</pre>";
+  }
+  // Прокрутка к превью
+  document.getElementById("previewSection")
+    .scrollIntoView({behavior:"smooth", block:"nearest"});
 }
 
 function download(path) {
