@@ -227,3 +227,52 @@ def test_same_stem_batch_no_cross_assignment(client):
         )
         # И превью того же файла — его собственное
         assert want in d.get("preview", "")
+
+
+def test_picked_folder_converts_in_place(
+    client, tmp_path, monkeypatch
+):
+    """②: папка из родного диалога → .md рядом с исходниками."""
+    (tmp_path / "alpha.csv").write_text(
+        "m,v\nA,1\n", encoding="utf-8"
+    )
+    (tmp_path / "beta.html").write_text(
+        "<p>B</p>", encoding="utf-8"
+    )
+    monkeypatch.setattr(gui_server, "_has_tkinter", lambda: True)
+    monkeypatch.setattr(
+        gui_server, "_native_pick", lambda kind: [str(tmp_path)]
+    )
+    r = client.post(
+        "/api/convert/picked", data={"kind": "folder"}
+    )
+    assert r.status_code == 200
+    made = sorted(p.name for p in tmp_path.glob("*.md"))
+    assert made == ["alpha.md", "beta.md"]
+    assert '"output"' in r.text
+
+
+def test_picked_cancelled(client, monkeypatch):
+    """②: отмена диалога → событие cancelled, без падений."""
+    monkeypatch.setattr(gui_server, "_has_tkinter", lambda: True)
+    monkeypatch.setattr(
+        gui_server, "_native_pick", lambda kind: []
+    )
+    r = client.post(
+        "/api/convert/picked", data={"kind": "files"}
+    )
+    assert r.status_code == 200
+    assert "cancelled" in r.text
+
+
+def test_url_endpoint_reads_form_not_query(client):
+    """URL и флаги читаются из тела (Form), а не из query → не 422.
+
+    Приватный адрес отвергается SSRF-контролем, но это SSE-error
+    (200), а не 422 — значит Form-параметр url принят из тела.
+    """
+    r = client.post(
+        "/api/convert/url", data={"url": "http://127.0.0.1:9/x"}
+    )
+    assert r.status_code == 200
+    assert '"event"' in r.text

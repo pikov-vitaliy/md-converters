@@ -103,6 +103,17 @@ border-bottom:1px solid #333;padding-bottom:4px}
   <button class="btn" onclick="convertURL()">Конвертировать URL</button>
 </div>
 
+<!-- ② Выбор с диска: конвертация НА МЕСТЕ (.md рядом с источником) -->
+<div style="display:flex;gap:8px;align-items:center;margin:16px 0;
+flex-wrap:wrap">
+  <span style="color:#aaa;font-size:.9rem">С диска (на месте,
+  .md рядом с файлом):</span>
+  <button class="btn" onclick="convertPicked('files')">Выбрать
+  файлы…</button>
+  <button class="btn" onclick="convertPicked('folder')">Выбрать
+  папку…</button>
+</div>
+
 <div class="section-title">Результаты</div>
 <div class="results" id="results"></div>
 
@@ -210,25 +221,11 @@ function addResult(name, status, extra) {
   return div;
 }
 
-async function convertFiles(fileList) {
-  const files = Array.from(fileList).filter(checkSize);
-  if (files.length === 0) return;
-  const flags = getFlags();
-  const fd = new FormData();
-  files.forEach(f => fd.append("files", f));
-  Object.keys(flags).forEach(k => {
-    if (flags[k] !== null && flags[k] !== false)
-      fd.append(k, flags[k]);
-  });
-
-  const resp = await fetch("/api/convert/files", {
-    method: "POST", body: fd,
-  });
-
+// Общий читатель SSE-потока (text/event-stream через fetch)
+async function readStream(resp) {
   const reader = resp.body.getReader();
   const dec = new TextDecoder();
   let buf = "";
-
   while (true) {
     const {done, value} = await reader.read();
     if (done) break;
@@ -237,44 +234,61 @@ async function convertFiles(fileList) {
     buf = parts.pop();
     for (const part of parts) {
       if (!part.trim()) continue;
-      const data = JSON.parse(part.replace(/^data: /, ""));
-      handleSSE(data);
+      handleSSE(JSON.parse(part.replace(/^data: /, "")));
     }
   }
+}
+
+function flagsToForm(fd, skipOutDir) {
+  const flags = getFlags();
+  Object.keys(flags).forEach(k => {
+    if (skipOutDir && k === "out_dir") return;
+    if (flags[k] !== null && flags[k] !== false)
+      fd.append(k, flags[k]);
+  });
+  return fd;
+}
+
+async function convertFiles(fileList) {
+  const files = Array.from(fileList).filter(checkSize);
+  if (files.length === 0) return;
+  const fd = new FormData();
+  files.forEach(f => fd.append("files", f));
+  flagsToForm(fd, false);
+  const resp = await fetch("/api/convert/files", {
+    method: "POST", body: fd,
+  });
+  await readStream(resp);
 }
 
 async function convertURL() {
   const url = document.getElementById("urlInput").value.trim();
   if (!url) return;
-  const flags = getFlags();
-  const params = new URLSearchParams({url});
-  Object.keys(flags).forEach(k => {
-    if (flags[k] !== null && flags[k] !== false)
-      params.append(k, flags[k]);
+  // url + флаги идут в ТЕЛЕ (бэкенд читает их через Form), не в query
+  const fd = new FormData();
+  fd.append("url", url);
+  flagsToForm(fd, false);
+  const resp = await fetch("/api/convert/url", {
+    method: "POST", body: fd,
   });
+  await readStream(resp);
+}
 
-  const resp = await fetch("/api/convert/url?" + params, {
-    method: "POST",
+// ② Конвертация по выбору из родного диалога ОС (на месте)
+async function convertPicked(kind) {
+  const fd = new FormData();
+  fd.append("kind", kind);
+  flagsToForm(fd, true);   // out_dir не нужен — пишем рядом с источником
+  const resp = await fetch("/api/convert/picked", {
+    method: "POST", body: fd,
   });
-
-  const reader = resp.body.getReader();
-  const dec = new TextDecoder();
-  let buf = "";
-  while (true) {
-    const {done, value} = await reader.read();
-    if (done) break;
-    buf += dec.decode(value, {stream: true});
-    const parts = buf.split("\n\n");
-    buf = parts.pop();
-    for (const part of parts) {
-      if (!part.trim()) continue;
-      const data = JSON.parse(part.replace(/^data: /, ""));
-      handleSSE(data);
-    }
-  }
+  await readStream(resp);
 }
 
 function handleSSE(data) {
+  if (data.event === "cancelled") {
+    return;  // выбор в диалоге отменён — ничего не делаем
+  }
   if (data.event === "start") {
     addResult(data.file, "pending");
   } else if (data.event === "done") {
@@ -322,6 +336,15 @@ function handleSSE(data) {
         download(data.download_id);
       });
       actions.appendChild(btnDl);
+    }
+
+    // Путь сохранённого .md (для «на месте» / out_dir)
+    if (data.output) {
+      var outDiv = document.createElement("div");
+      outDiv.style.cssText = "color:#888;font-size:.75rem;"
+        + "padding:2px 14px;margin-left:24px;word-break:break-all";
+      outDiv.textContent = "→ " + data.output;
+      div.appendChild(outDiv);
     }
 
     document.getElementById("results").prepend(div);

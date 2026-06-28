@@ -7,10 +7,13 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import importlib.util
 import io
 import json
+import os
 import shutil
 import socket
+import subprocess
 import sys
 import tempfile
 import time
@@ -366,6 +369,68 @@ def _read_output(md_path: Path | None) -> tuple[str, str]:
     return "", ""
 
 
+# --- ② Нативный выбор файла/папки с диска (конвертация на месте) ---
+
+# Запускается отдельным процессом: tkinter + uvicorn в одном loop
+# конфликтуют, а подпроцесс изолирует диалог. Путь возвращается
+# через файл в UTF-8 (среда кириллическая — не через stdout).
+_PICKER_CODE = '''\
+import sys, json
+import tkinter as tk
+from tkinter import filedialog
+kind, outfile = sys.argv[1], sys.argv[2]
+root = tk.Tk()
+root.withdraw()
+try:
+    root.attributes("-topmost", True)
+except tk.TclError:
+    pass
+root.update()
+if kind == "folder":
+    p = filedialog.askdirectory(
+        title="Папка для конвертации в Markdown")
+    res = [p] if p else []
+else:
+    res = list(filedialog.askopenfilenames(
+        title="Файлы для конвертации в Markdown"))
+root.destroy()
+with open(outfile, "w", encoding="utf-8") as f:
+    json.dump(res, f)
+'''
+
+
+def _has_tkinter() -> bool:
+    """tkinter доступен? (на голом Linux-CI его может не быть)."""
+    return importlib.util.find_spec("tkinter") is not None
+
+
+def _native_pick(kind: str) -> list[str]:
+    """Открывает родной диалог ОС и возвращает выбранные пути.
+
+    Путь приходит ТОЛЬКО из диалога, никогда из HTTP-запроса —
+    поэтому endpoint не даёт сторонней странице подсунуть путь
+    (важно вместе с S1/CSRF). Пусто = отмена/ошибка.
+    """
+    fd, outfile = tempfile.mkstemp(suffix=".json", prefix="md_pick_")
+    os.close(fd)
+    sd, script = tempfile.mkstemp(suffix=".py", prefix="md_pick_")
+    os.close(sd)
+    try:
+        Path(script).write_text(_PICKER_CODE, encoding="utf-8")
+        subprocess.run(
+            [sys.executable, script, kind, outfile],
+            timeout=300, capture_output=True,
+        )
+        data = Path(outfile).read_text(encoding="utf-8")
+        return json.loads(data) if data.strip() else []
+    except (OSError, ValueError, subprocess.SubprocessError):
+        return []
+    finally:
+        for p in (outfile, script):
+            with contextlib.suppress(OSError):
+                os.unlink(p)
+
+
 # B1: Form(...) — параметры читаются из multipart body
 @app.post("/api/convert/files")
 async def convert_files(
@@ -498,6 +563,87 @@ async def convert_url_endpoint(
                 if has_out_dir and md_path else None
             ),
         })
+        yield _sse("complete", {})
+
+    return StreamingResponse(
+        generate(), media_type="text/event-stream",
+    )
+
+
+@app.post("/api/convert/picked")
+async def convert_picked(
+    kind: str = Form("files"),
+    force: bool = Form(False),
+    frontmatter: bool = Form(True),
+    keep_images: bool = Form(False),
+    pdf_tables: str = Form("auto"),
+    only: str | None = Form(None),
+) -> StreamingResponse:
+    """② Выбор файла/папки родным диалогом → конвертация НА МЕСТЕ.
+
+    .md пишется рядом с исходником (out_dir не задаётся). Путь
+    берётся только из диалога ОС, не из HTTP-запроса.
+    """
+    want = "folder" if kind == "folder" else "files"
+    opts = _gui_opts(
+        force, frontmatter, keep_images, pdf_tables, only, None,
+    )
+
+    async def generate() -> AsyncGenerator[str, None]:
+        if not _has_tkinter():
+            yield _sse("error", {
+                "file": "—",
+                "error": (
+                    "tkinter недоступен — выбор с диска невозможен"
+                ),
+            })
+            yield _sse("complete", {})
+            return
+        picked = await asyncio.to_thread(_native_pick, want)
+        if not picked:
+            yield _sse("cancelled", {})
+            yield _sse("complete", {})
+            return
+        if want == "folder":
+            files = await asyncio.to_thread(
+                core.collect, picked[0], True, opts["scan"]
+            )
+        else:
+            files = [Path(p) for p in picked]
+        if not files:
+            yield _sse("error", {
+                "file": picked[0],
+                "error": "Подходящих файлов не найдено",
+            })
+            yield _sse("complete", {})
+            return
+        for src in files:
+            yield _sse("start", {"file": src.name})
+            try:
+                res = await _run_conversion(
+                    _convert_with_capture, src, opts
+                )
+            except Exception as exc:
+                yield _sse("error", {
+                    "file": src.name,
+                    "error": f"{type(exc).__name__}: {exc}",
+                })
+                continue
+            md_path = res["md_path"]
+            full_content, preview = _read_output(md_path)
+            dl_id = ""
+            if full_content:
+                dl_id = uuid.uuid4().hex[:12]
+                _add_download(dl_id, md_path.name, full_content)
+            yield _sse("done", {
+                "file": src.name,
+                "status": res["status"],
+                "log": res["log"],
+                "warnings": res["warnings"],
+                "preview": preview,
+                "download_id": dl_id,
+                "output": str(md_path) if md_path else None,
+            })
         yield _sse("complete", {})
 
     return StreamingResponse(
