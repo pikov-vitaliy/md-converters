@@ -72,6 +72,9 @@ gui = [
     "fastapi>=0.115,<1.0",
     "uvicorn[standard]>=0.32,<1.0",
     "python-multipart>=0.0.12,<1.0",
+    # py7zr — распаковка .7z в GUI (чистый Python, LGPL, без внешних
+    # бинарников). .zip/.tar — стандартная библиотека. RAR не берём.
+    "py7zr>=0.20,<1.0",
 ]
 
 [tool.setuptools]

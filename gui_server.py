@@ -16,6 +16,7 @@ import shutil
 import socket
 import subprocess
 import sys
+import tarfile
 import tempfile
 import time
 import uuid
@@ -41,7 +42,7 @@ _STATIC = Path(__file__).parent / "gui_static"
 _PORT_DEFAULT = 8765
 _PORT_TRIES = 5
 _MAX_UPLOAD_BYTES = 100 * 1024 * 1024
-_ALLOWED_HOSTS = {"127.0.0.1", "localhost"}
+_ALLOWED_HOSTS = {"127.0.0.1", "localhost", "::1"}
 _PREVIEW_CHARS = 5000
 # Запретные корни для out_dir (защита от записи в системные папки)
 _FORBIDDEN_OUT_DIRS = {
@@ -59,19 +60,17 @@ def _validate_out_dir(raw: str | None) -> Path | None:
     p = Path(raw.strip())
     if str(p).startswith("\\\\"):
         raise ValueError("UNC-пути не разрешены для папки вывода")
-    resolved = p.resolve()
+    try:
+        resolved = p.resolve()
+    except OSError as exc:
+        raise ValueError(f"Некорректный путь вывода: {exc}") from exc
+    # S1: raise ДОЛЖЕН быть вне try — иначе except его же глушит и
+    # запретные папки (C:\Windows и т.п.) молча проходят.
     for forbidden in _FORBIDDEN_OUT_DIRS:
-        try:
-            if resolved == forbidden or forbidden in (
-                resolved.parents
-            ):
-                msg = (
-                    f"Папка вывода не может быть внутри"
-                    f" {forbidden}"
-                )
-                raise ValueError(msg)
-        except (OSError, ValueError):
-            pass
+        if resolved == forbidden or forbidden in resolved.parents:
+            raise ValueError(
+                f"Папка вывода не может быть внутри {forbidden}"
+            )
     return p
 
 _port: int = _PORT_DEFAULT
@@ -205,6 +204,16 @@ async def _open_browser_when_ready(port: int) -> None:
 
 # --- DNS rebinding / CSRF protection (BLK-6, S1) ---
 
+def _host_label(value: str) -> str:
+    """Имя хоста из Host/Origin: без порта, lower-case, без скобок
+    IPv6 ([::1]:8765 → ::1). Раньше split(':')[0] ломался на IPv6 и
+    был регистрозависимым (Localhost → 403)."""
+    v = value.strip().lower()
+    if v.startswith("["):
+        return v[1:].split("]")[0]
+    return v.split(":")[0]
+
+
 @app.middleware("http")
 async def _check_origin(request: Request, call_next):
     """BLK-6+S1: отвергаем запросы не с localhost.
@@ -213,15 +222,15 @@ async def _check_origin(request: Request, call_next):
     автоматически, но Origin защищает от CSRF с
     соседнего сайта.
     """
-    host = request.headers.get("host", "").split(":")[0]
+    host = _host_label(request.headers.get("host", ""))
     if host not in _ALLOWED_HOSTS:
         return JSONResponse(
             {"error": "forbidden"}, status_code=403
         )
     origin = request.headers.get("origin", "")
     if origin:
-        origin_host = (
-            origin.split("//")[-1].split("/")[0].split(":")[0]
+        origin_host = _host_label(
+            origin.split("//")[-1].split("/")[0]
         )
         if origin_host not in _ALLOWED_HOSTS:
             return JSONResponse(
@@ -245,8 +254,11 @@ def _safe_filename(name: str) -> str:
     """H1: только basename — защита от traversal. И / и \\ как
     разделители: загрузка может прийти с Windows-клиента на
     Linux-сервер, где Path(...).name не срежет обратные слэши."""
-    base = name.replace("\\", "/").split("/")[-1]
-    return Path(base).name or "unknown"
+    base = Path(name.replace("\\", "/").split("/")[-1]).name
+    # S6: '.'/'..' как имя указывают на каталог/выше — отбрасываем
+    if base in ("", ".", ".."):
+        return "unknown"
+    return base
 
 
 # --- Streaming upload (BLK-5) ---
@@ -413,11 +425,79 @@ def _read_output(md_path: Path | None) -> tuple[str, str]:
 
 
 # --- Архивы: распаковать и конвертировать каждый файл → .zip с .md ---
-_ARCHIVE_EXTS = {".zip"}
+# Поддержка: .zip, .7z, .tar(.gz/.bz2/.xz). RAR не поддерживаем —
+# нужен внешний проприетарный бинарник unrar.
+_TAR_SUFFIXES = (
+    ".tar", ".tar.gz", ".tgz", ".tar.bz2", ".tbz2",
+    ".tar.xz", ".txz",
+)
+
+
+def _archive_kind(path: Path) -> str | None:
+    name = path.name.lower()
+    if name.endswith(".zip"):
+        return "zip"
+    if name.endswith(".7z"):
+        return "7z"
+    if any(name.endswith(s) for s in _TAR_SUFFIXES):
+        return "tar"
+    return None
+
+
+def _is_archive(path: Path) -> bool:
+    return _archive_kind(path) is not None
+
+
+def _extract_archive(src: Path, inner: Path) -> None:
+    """Распаковывает архив в inner. zip-slip-safe (_safe_rel): имя
+    каждого файла санитизируется, запись только внутрь inner. Бросает
+    исключение на битом/неподдерживаемом архиве."""
+    kind = _archive_kind(src)
+
+    def _write(name: str, reader) -> None:
+        dest = inner / _safe_rel(name, "file")
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        with dest.open("wb") as df:
+            shutil.copyfileobj(reader, df)
+
+    if kind == "zip":
+        with zipfile.ZipFile(src) as zf:
+            for n in zf.namelist():
+                if n.endswith("/"):
+                    continue
+                with zf.open(n) as sf:
+                    _write(n, sf)
+    elif kind == "tar":
+        with tarfile.open(src) as tf:
+            for m in tf.getmembers():
+                if not m.isfile():
+                    continue
+                sf = tf.extractfile(m)
+                if sf is None:
+                    continue
+                with sf:
+                    _write(m.name, sf)
+    elif kind == "7z":
+        import py7zr
+        with py7zr.SevenZipFile(src, "r") as zf:
+            for name, bio in zf.readall().items():
+                if bio is None:
+                    continue
+                _write(name, bio)
+    else:
+        raise ValueError("неподдерживаемый формат архива")
+
+
+# A-6.3: общий .zip собирается в ОЗУ — ограничиваем, чтобы гигантский
+# архив не вызвал OOM. Сверх лимита файлы всё равно конвертируются и
+# качаются по одному, но в общий .zip не попадают (с предупреждением).
+_MAX_ARCHIVE_FILES = 2000
+_MAX_ARCHIVE_BYTES = 300 * 1024 * 1024
 
 
 async def _convert_archive(src: Path, opts: dict, label: str):
-    """Распаковывает .zip, конвертирует каждый файл внутри в .md.
+    """Распаковывает архив (.zip/.7z/.tar*), конвертирует каждый файл
+    внутри в .md.
 
     Async-gen: per-member SSE (статус + превью + скачивание по одному),
     затем финальный 'zip'. Если задана out_dir — .md копируются туда;
@@ -430,29 +510,23 @@ async def _convert_archive(src: Path, opts: dict, label: str):
     member_opts["planned"] = set()
     out_dir = opts.get("out_dir")
     collected: list[tuple[str, str]] = []
+    total_bytes = 0
+    truncated = False
     try:
         try:
-            with zipfile.ZipFile(src) as zf:
-                for n in zf.namelist():
-                    if n.endswith("/"):
-                        continue
-                    dest = inner / _safe_rel(n, "file")
-                    dest.parent.mkdir(parents=True, exist_ok=True)
-                    with zf.open(n) as sf, dest.open("wb") as df:
-                        shutil.copyfileobj(sf, df)
-        except zipfile.BadZipFile:
+            await asyncio.to_thread(_extract_archive, src, inner)
+        except Exception as exc:
             yield _sse("error", {
-                "file": label, "error": "Битый или не-ZIP архив",
+                "file": label,
+                "error": f"Не удалось распаковать архив: {exc}",
             })
             yield _sse("zip", {"zip_id": "", "count": 0})
             return
+        scan = opts.get("scan") or core.SUPPORTED_SUFFIXES
         files = await asyncio.to_thread(
-            core.collect, str(inner), True, opts["scan"]
+            core.collect, str(inner), True, scan
         )
-        files = [
-            f for f in files
-            if f.suffix.lower() not in _ARCHIVE_EXTS
-        ]
+        files = [f for f in files if not _is_archive(f)]
         for member in files:
             yield _sse("start", {"file": member.name})
             try:
@@ -471,7 +545,6 @@ async def _convert_archive(src: Path, opts: dict, label: str):
             out_path = None
             if full and md_path:
                 rel = md_path.relative_to(inner)
-                collected.append((rel.as_posix(), full))
                 dl_id = uuid.uuid4().hex[:12]
                 _add_download(dl_id, md_path.name, full)
                 if out_dir is not None:
@@ -482,6 +555,13 @@ async def _convert_archive(src: Path, opts: dict, label: str):
                         out_path = str(dest)
                     except OSError:
                         out_path = None
+                elif (len(collected) < _MAX_ARCHIVE_FILES
+                      and total_bytes + len(full)
+                      <= _MAX_ARCHIVE_BYTES):
+                    collected.append((rel.as_posix(), full))
+                    total_bytes += len(full)
+                else:
+                    truncated = True
             yield _sse("done", {
                 "file": member.name,
                 "status": res["status"],
@@ -502,8 +582,18 @@ async def _convert_archive(src: Path, opts: dict, label: str):
                     zf.writestr(entry, content)
             zip_id = uuid.uuid4().hex[:12]
             _add_zip(zip_id, src.stem + "_md.zip", buf.getvalue())
+        if truncated:
+            yield _sse("error", {
+                "file": label,
+                "error": (
+                    "Архив слишком большой — в общий .zip вошла "
+                    "только часть. Остальные файлы доступны по одному "
+                    "или задайте «Папку вывода»."
+                ),
+            })
         yield _sse("zip", {
             "zip_id": zip_id, "count": len(collected),
+            "truncated": truncated,
         })
     finally:
         shutil.rmtree(inner, ignore_errors=True)
@@ -611,8 +701,8 @@ async def convert_files(
 
             # 2. Конвертация по одному файлу за раз
             for src, name in jobs:
-                # .zip → распаковать и конвертировать каждый файл
-                if src.suffix.lower() in _ARCHIVE_EXTS:
+                # архив (.zip/.7z/.tar*) → распаковать и конвертировать
+                if _is_archive(src):
                     async for ev in _convert_archive(
                         src, opts, name
                     ):
@@ -767,8 +857,8 @@ async def convert_picked(
             yield _sse("complete", {})
             return
         for src in files:
-            # .zip → распаковать и конвертировать каждый файл
-            if src.suffix.lower() in _ARCHIVE_EXTS:
+            # архив (.zip/.7z/.tar*) → распаковать и конвертировать
+            if _is_archive(src):
                 async for ev in _convert_archive(
                     src, opts, src.name
                 ):
@@ -909,12 +999,14 @@ async def download_zip(zip_id: str):
             {"error": "not found"}, status_code=404
         )
     filename, data = entry
+    encoded = quote(filename, safe="")
     return StreamingResponse(
         iter([data]),
         media_type="application/zip",
         headers={
             "Content-Disposition": (
-                f'attachment; filename="{filename}"'
+                f"attachment; filename=\"{encoded}\"; "
+                f"filename*=UTF-8''{encoded}"
             )
         },
     )

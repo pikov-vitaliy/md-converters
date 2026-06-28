@@ -5,6 +5,7 @@
 """
 import io
 import json
+import tarfile
 import zipfile
 
 import pytest
@@ -449,6 +450,98 @@ def test_testclient_does_not_open_browser(monkeypatch):
         pass
     assert called["b"] is False
     assert called["s"] is False
+
+
+def test_targz_upload_expands(client):
+    """.tar.gz распаковывается и конвертируется в .md (stdlib)."""
+    buf = io.BytesIO()
+    with tarfile.open(fileobj=buf, mode="w:gz") as tf:
+        for nm, data in [("a.csv", b"m,v\nA,1\n"),
+                         ("sub/b.html", b"<p>B</p>")]:
+            info = tarfile.TarInfo(nm)
+            info.size = len(data)
+            tf.addfile(info, io.BytesIO(data))
+    r = client.post(
+        "/api/convert/files",
+        files={"files": (
+            "bundle.tar.gz", io.BytesIO(buf.getvalue()),
+            "application/gzip",
+        )},
+    )
+    assert r.status_code == 200
+    zid = _zip_id(r.text)
+    assert zid, "tar.gz не дал zip_id"
+    z = zipfile.ZipFile(io.BytesIO(
+        client.get(
+            "/api/download_zip", params={"zip_id": zid}
+        ).content
+    ))
+    assert sorted(z.namelist()) == ["a.md", "sub/b.md"]
+
+
+def test_7z_upload_expands(client, tmp_path):
+    """.7z распаковывается и конвертируется в .md (py7zr)."""
+    py7zr = pytest.importorskip("py7zr")
+    arc = tmp_path / "bundle.7z"
+    with py7zr.SevenZipFile(arc, "w") as z:
+        z.writef(io.BytesIO(b"m,v\nC,1\n"), "c.csv")
+        z.writef(io.BytesIO(b"<p>D</p>"), "d.html")
+    r = client.post(
+        "/api/convert/files",
+        files={"files": (
+            "bundle.7z", arc.read_bytes(),
+            "application/x-7z-compressed",
+        )},
+    )
+    assert r.status_code == 200
+    zid = _zip_id(r.text)
+    assert zid, "7z не дал zip_id"
+    z = zipfile.ZipFile(io.BytesIO(
+        client.get(
+            "/api/download_zip", params={"zip_id": zid}
+        ).content
+    ))
+    assert sorted(z.namelist()) == ["c.md", "d.md"]
+
+
+def test_validate_out_dir_rejects_forbidden(tmp_path, monkeypatch):
+    """S1 (BLOCKER): _validate_out_dir реально отклоняет запретную
+    папку. Раньше raise был внутри try с except ValueError: pass —
+    проверка молча проходила. (_FORBIDDEN — Windows-пути, поэтому
+    подменяем на tmp_path для кроссплатформенного теста.)"""
+    monkeypatch.setattr(
+        gui_server, "_FORBIDDEN_OUT_DIRS", {tmp_path}
+    )
+    with pytest.raises(ValueError):
+        gui_server._validate_out_dir(str(tmp_path))
+    with pytest.raises(ValueError):
+        gui_server._validate_out_dir(str(tmp_path / "sub" / "x"))
+    assert gui_server._validate_out_dir("") is None
+
+
+def test_safe_filename_rejects_dotdot():
+    """S6: '.'/'..' как имя → unknown; путь сводится к basename."""
+    assert gui_server._safe_filename("..") == "unknown"
+    assert gui_server._safe_filename(".") == "unknown"
+    assert gui_server._safe_filename("../../x.csv") == "x.csv"
+    assert gui_server._safe_filename("a\\b\\c.pdf") == "c.pdf"
+
+
+def test_origin_check_ipv6_and_case():
+    """S2/S3: [::1] и Localhost (любой регистр) — 200, чужой — 403."""
+    with TestClient(gui_server.app) as c:
+        assert c.get(
+            "/", headers={"host": "Localhost:8765"}
+        ).status_code == 200
+        assert c.get(
+            "/", headers={"host": "LOCALHOST"}
+        ).status_code == 200
+        assert c.get(
+            "/", headers={"host": "[::1]:8765"}
+        ).status_code == 200
+        assert c.get(
+            "/", headers={"host": "evil.com"}
+        ).status_code == 403
 
 
 def test_insecure_ssl_flag_reaches_download(client, monkeypatch):
