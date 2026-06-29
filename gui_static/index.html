@@ -259,11 +259,11 @@
   <div class="card">
     <div class="card-head"><span class="dot"></span><h2>Параметры конвертации</h2></div>
     <div class="opts">
-      <label class="opt" title="Перезаписать уже существующие .md файлы"><input type="checkbox" id="force" onchange="save()">Перезаписать существующие</label>
-      <label class="opt" title="Добавить YAML-блок с метаданными в начало файла"><input type="checkbox" id="frontmatter" onchange="save()" checked>Front-matter (метаданные)</label>
-      <label class="opt" title="Сохранять изображения из документа рядом с .md"><input type="checkbox" id="keepImages" onchange="save()" checked>Сохранять изображения</label>
-      <label class="opt" title="Распознавать таблицы внутри PDF"><input type="checkbox" id="pdfTables" onchange="save()">Таблицы в PDF</label>
-      <label class="opt" title="Игнорировать ошибки TLS-сертификата при загрузке по URL"><input type="checkbox" id="insecureSsl" onchange="save()">Без проверки SSL</label>
+      <label class="opt" title="Перезаписать существующий .md. Без галочки — если .md уже лежит рядом, файл пропускается (skip)."><input type="checkbox" id="force" onchange="save()">Перезаписать существующие</label>
+      <label class="opt" title="Добавлять в начало .md служебную YAML-шапку: источник, дата, чем сконвертировано, число PDF-таблиц. Выкл — чистый .md без шапки."><input type="checkbox" id="frontmatter" onchange="save()" checked>Front-matter (метаданные)</label>
+      <label class="opt" title="Встраивать картинки в .md как base64. Для PDF — извлекает встроенные растровые картинки (по страницам) и встраивает их; для HTML/DOCX — сохраняет уже встроенные. Файл самодостаточный, но размер сильно растёт. Выкл (по умолчанию) — без картинок (плейсхолдер ![...]())."><input type="checkbox" id="keepImages" onchange="save()">Сохранять изображения</label>
+      <label class="opt" title="Извлекать таблицы из PDF по геометрии (pdfplumber) — аккуратные таблицы. Выкл — обычный текстовый путь MarkItDown, таблицы могут разъезжаться."><input type="checkbox" id="pdfTables" onchange="save()" checked>Таблицы в PDF</label>
+      <label class="opt" title="Снимает проверку HTTPS-сертификата для URL. Включайте только для доверенных внутренних хостов — без защиты от MITM."><input type="checkbox" id="insecureSsl" onchange="save()">Без проверки SSL</label>
     </div>
     <div class="row">
       <div class="field">
