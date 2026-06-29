@@ -62,9 +62,9 @@
   #dropZone::before{content:""; position:absolute; inset:0; border-radius:var(--r); padding:2px;
     background:var(--grad); -webkit-mask:linear-gradient(#000 0 0) content-box, linear-gradient(#000 0 0);
     -webkit-mask-composite:xor; mask-composite:exclude; opacity:.6; transition:.18s; pointer-events:none}
-  #dropZone:hover, #dropZone.drag{transform:translateY(-1px)}
-  #dropZone:hover::before, #dropZone.drag::before{opacity:1}
-  #dropZone.drag{background:linear-gradient(135deg,rgba(70,224,160,.26),rgba(124,92,245,.3))}
+  #dropZone:hover, #dropZone.drag-over{transform:translateY(-1px)}
+  #dropZone:hover::before, #dropZone.drag-over::before{opacity:1}
+  #dropZone.drag-over{background:linear-gradient(135deg,rgba(70,224,160,.26),rgba(124,92,245,.3))}
   #dropZone:focus-visible{box-shadow:var(--ring)}
   .empty-art{width:96px; height:96px; margin:0 auto 14px; filter:drop-shadow(0 8px 18px rgba(70,224,160,.35))}
   .empty-art svg{width:100%; height:100%}
