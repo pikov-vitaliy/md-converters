@@ -555,6 +555,26 @@ def test_extract_archive_7z_forged_zero_header(tmp_path, monkeypatch):
         gui_server._extract_archive(arc, inner)
 
 
+def test_zip_over_cap_emits_error_event(client, monkeypatch):
+    """M-1 end-to-end: zip-бомба сверх лимита → чистое error-событие
+    (status 200, без 500/обрыва стрима). _convert_archive ловит
+    ValueError из _extract_archive и отдаёт его как ошибку SSE."""
+    monkeypatch.setattr(gui_server, "_MAX_UNCOMPRESSED", 100 * 1024)
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, "w") as zf:
+        zf.writestr("big.txt", "x" * (200 * 1024))
+    r = client.post(
+        "/api/convert/files",
+        files={"files": (
+            "bomb.zip", io.BytesIO(buf.getvalue()),
+            "application/zip",
+        )},
+    )
+    assert r.status_code == 200
+    assert '"error"' in r.text
+    assert "распаковать архив" in r.text
+
+
 def test_validate_out_dir_rejects_forbidden(tmp_path, monkeypatch):
     """S1 (BLOCKER): _validate_out_dir реально отклоняет запретную
     папку. Раньше raise был внутри try с except ValueError: pass —
