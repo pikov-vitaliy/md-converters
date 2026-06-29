@@ -76,6 +76,22 @@ def test_origin_check_rejects_cross_site():
         assert r.status_code == 403
 
 
+def test_origin_check_rejects_null_origin():
+    """S1: Origin: null (sandbox-iframe / file://) → 403."""
+    with TestClient(
+        gui_server.app,
+        base_url="http://127.0.0.1:8765",
+    ) as c:
+        r = c.get(
+            "/",
+            headers={
+                "host": "127.0.0.1:8765",
+                "origin": "null",
+            },
+        )
+        assert r.status_code == 403
+
+
 def test_convert_csv_file(client):
     """Конвертация CSV через upload → SSE с done."""
     csv_data = b"a,b\n1,2\n"
@@ -502,6 +518,41 @@ def test_7z_upload_expands(client, tmp_path):
         ).content
     ))
     assert sorted(z.namelist()) == ["c.md", "d.md"]
+
+
+def test_extract_archive_caps_uncompressed_zip(tmp_path, monkeypatch):
+    """M-1: zip сверх лимита распаковки обрывается потоково в _write
+    (у zip/tar заголовочной проверки нет вовсе — спасает счётчик)."""
+    z = tmp_path / "big.zip"
+    with zipfile.ZipFile(z, "w") as zf:
+        zf.writestr("a.txt", "x" * (200 * 1024))
+    monkeypatch.setattr(gui_server, "_MAX_UNCOMPRESSED", 100 * 1024)
+    inner = tmp_path / "inner"
+    inner.mkdir()
+    with pytest.raises(ValueError):
+        gui_server._extract_archive(z, inner)
+
+
+def test_extract_archive_7z_forged_zero_header(tmp_path, monkeypatch):
+    """M-1: подделанный заголовок 7z (uncompressed=0) НЕ обходит лимит —
+    заголовочная проверка пропускается, но потоковый счётчик в _write
+    всё равно отвергает бомбу."""
+    py7zr = pytest.importorskip("py7zr")
+    arc = tmp_path / "bomb.7z"
+    with py7zr.SevenZipFile(arc, "w") as z:
+        z.writef(io.BytesIO(b"x" * (300 * 1024)), "big.bin")
+
+    class _Info:
+        uncompressed = 0
+
+    monkeypatch.setattr(
+        py7zr.SevenZipFile, "archiveinfo", lambda self: _Info()
+    )
+    monkeypatch.setattr(gui_server, "_MAX_UNCOMPRESSED", 100 * 1024)
+    inner = tmp_path / "inner"
+    inner.mkdir()
+    with pytest.raises(ValueError):
+        gui_server._extract_archive(arc, inner)
 
 
 def test_validate_out_dir_rejects_forbidden(tmp_path, monkeypatch):

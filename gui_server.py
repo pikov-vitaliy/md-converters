@@ -457,12 +457,29 @@ def _extract_archive(src: Path, inner: Path) -> None:
     каждого файла санитизируется, запись только внутрь inner. Бросает
     исключение на битом/неподдерживаемом архиве."""
     kind = _archive_kind(src)
+    # M-1: суммарный РАСПАКОВАННЫЙ размер ограничиваем потоково, прямо
+    # при записи. Для zip/tar это и есть распаковка, поэтому бомба
+    # обрывается на лету; для 7z так же ограничивается перекладка из
+    # temp. Это единственный надёжный предел: заголовок архива можно
+    # подделать (uncompressed=0), а здесь считаются фактические байты.
+    written = 0
 
     def _write(name: str, reader) -> None:
+        nonlocal written
         dest = inner / _safe_rel(name, "file")
         dest.parent.mkdir(parents=True, exist_ok=True)
         with dest.open("wb") as df:
-            shutil.copyfileobj(reader, df)
+            while True:
+                chunk = reader.read(1024 * 1024)
+                if not chunk:
+                    break
+                written += len(chunk)
+                if written > _MAX_UNCOMPRESSED:
+                    raise ValueError(
+                        "архив слишком большой в распакованном "
+                        f"виде (> {_MAX_UNCOMPRESSED // 1048576} МБ)"
+                    )
+                df.write(chunk)
 
     if kind == "zip":
         with zipfile.ZipFile(src) as zf:
@@ -483,11 +500,12 @@ def _extract_archive(src: Path, inner: Path) -> None:
                     _write(m.name, sf)
     elif kind == "7z":
         import py7zr
-        # M-1/OOM: сначала проверяем РАСПАКОВАННЫЙ размер по заголовку
-        # (без чтения данных) и отвергаем сверх лимита. py7zr 1.x убрал
-        # readall(): извлекаем на диск (extractall, без RAM-словаря) в
-        # отдельный temp, затем перекладываем в inner через _safe_rel
-        # (zip-slip-защита поверх собственной защиты py7zr).
+        # Быстрый отказ на честных больших .7z по заголовку (до записи
+        # на диск). Подделанный заголовок (uncompressed=0) этот слой
+        # обходит — окончательный предел даёт потоковый счётчик в _write
+        # при перекладке из temp. py7zr 1.x убрал readall(): extractall
+        # на диск (без RAM-словаря) в отдельный temp, затем перекладка в
+        # inner через _safe_rel (zip-slip-защита поверх защиты py7zr).
         with py7zr.SevenZipFile(src, "r") as zf:
             total = getattr(zf.archiveinfo(), "uncompressed", 0)
         if total and total > _MAX_UNCOMPRESSED:
