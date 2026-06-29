@@ -49,3 +49,5 @@ desktop.ini
 /supply-chain-dev-licenses.json
 /pip-audit*.txt
 /pip-audit*.json
+# Короткое имя для разовых экспортов requirements (из промта аудитора)
+/rt.txt
