@@ -648,3 +648,54 @@ def test_ssl_verified_by_default(client, monkeypatch):
         "/api/convert/url", data={"url": "https://example.com/x"}
     )
     assert cap.get("v") is True
+
+
+# --- A1 (workplan): ValueError из _gui_opts → 400, не голый 500 ---
+
+def test_bad_out_dir_returns_400_files(client):
+    """Запретная папка вывода в /files → 400 с текстом причины."""
+    files = {
+        "files": ("a.html", io.BytesIO(b"<p>x</p>"), "text/html"),
+    }
+    r = client.post(
+        "/api/convert/files",
+        data={"out_dir": "C:\\Windows"},
+        files=files,
+    )
+    assert r.status_code == 400
+    assert "Папка вывода" in r.json()["error"]
+
+
+def test_bad_out_dir_returns_400_url(client):
+    """Запретная папка вывода в /url → 400 ещё до сети."""
+    r = client.post(
+        "/api/convert/url",
+        data={"url": "https://example.com/",
+              "out_dir": "C:\\Windows"},
+    )
+    assert r.status_code == 400
+    assert "Папка вывода" in r.json()["error"]
+
+
+def test_bad_only_returns_400_picked(client):
+    """Кривой only (-pdf) в /picked → 400 до открытия диалога."""
+    r = client.post(
+        "/api/convert/picked",
+        data={"kind": "files", "only": "-pdf"},
+    )
+    assert r.status_code == 400
+    assert "-pdf" in r.json()["error"]
+
+
+def test_bad_only_returns_400_zip(client):
+    """Кривой only в /zip → 400 с текстом причины."""
+    files = {
+        "files": ("a.csv", io.BytesIO(b"a,b\n1,2\n"), "text/csv"),
+    }
+    r = client.post(
+        "/api/convert/zip",
+        data={"only": "-pdf"},
+        files=files,
+    )
+    assert r.status_code == 400
+    assert "-pdf" in r.json()["error"]

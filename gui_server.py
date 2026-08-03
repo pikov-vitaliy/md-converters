@@ -28,7 +28,7 @@ from typing import AsyncGenerator
 from urllib.parse import quote
 
 import uvicorn
-from fastapi import FastAPI, Form, Request, UploadFile
+from fastapi import FastAPI, Form, Request, Response, UploadFile
 from fastapi.responses import (
     HTMLResponse,
     JSONResponse,
@@ -355,6 +355,16 @@ def _gui_opts(
         "errors": [],
     }
     return core._build_opts(parsed, default_only=None)
+
+
+def _bad_request(exc: Exception) -> JSONResponse:
+    """Валидация флагов (out_dir/only) не прошла → 400 с текстом.
+
+    Голый ValueError из _gui_opts вылетал бы вне SSE-генератора и
+    долетал до ServerErrorMiddleware — фронтенд получал бы
+    непонятный 500 вместо причины.
+    """
+    return JSONResponse({"error": str(exc)}, status_code=400)
 
 
 # --- Routes ---
@@ -710,12 +720,15 @@ async def convert_files(
     pdf_tables: str = Form("auto"),
     only: str | None = Form(None),
     out_dir: str | None = Form(None),
-) -> StreamingResponse:
+) -> Response:
     """Конвертация файлов с SSE-прогрессом (последовательно)."""
-    opts = _gui_opts(
-        force, frontmatter, keep_images,
-        pdf_tables, only, out_dir,
-    )
+    try:
+        opts = _gui_opts(
+            force, frontmatter, keep_images,
+            pdf_tables, only, out_dir,
+        )
+    except ValueError as exc:
+        return _bad_request(exc)
     has_out_dir = opts.get("out_dir") is not None
 
     async def generate() -> AsyncGenerator[str, None]:
@@ -798,13 +811,16 @@ async def convert_url_endpoint(
     only: str | None = Form(None),
     out_dir: str | None = Form(None),
     insecure_ssl: bool = Form(False),
-) -> StreamingResponse:
+) -> Response:
     """Конвертация URL с SSE-прогрессом."""
-    opts = _gui_opts(
-        force, frontmatter, keep_images,
-        pdf_tables, only, out_dir,
-        verify_ssl=not insecure_ssl,
-    )
+    try:
+        opts = _gui_opts(
+            force, frontmatter, keep_images,
+            pdf_tables, only, out_dir,
+            verify_ssl=not insecure_ssl,
+        )
+    except ValueError as exc:
+        return _bad_request(exc)
 
     has_out_dir = opts.get("out_dir") is not None
 
@@ -856,16 +872,20 @@ async def convert_picked(
     keep_images: bool = Form(False),
     pdf_tables: str = Form("auto"),
     only: str | None = Form(None),
-) -> StreamingResponse:
+) -> Response:
     """② Выбор файла/папки родным диалогом → конвертация НА МЕСТЕ.
 
     .md пишется рядом с исходником (out_dir не задаётся). Путь
     берётся только из диалога ОС, не из HTTP-запроса.
     """
     want = "folder" if kind == "folder" else "files"
-    opts = _gui_opts(
-        force, frontmatter, keep_images, pdf_tables, only, None,
-    )
+    try:
+        opts = _gui_opts(
+            force, frontmatter, keep_images, pdf_tables, only,
+            None,
+        )
+    except ValueError as exc:
+        return _bad_request(exc)
 
     async def generate() -> AsyncGenerator[str, None]:
         if not _has_tkinter():
@@ -945,7 +965,7 @@ async def convert_zip(
     keep_images: bool = Form(False),
     pdf_tables: str = Form("auto"),
     only: str | None = Form(None),
-) -> StreamingResponse:
+) -> Response:
     """③ Папка из браузера → один .zip с .md (структура сохранена).
 
     Относительные пути приходят отдельным JSON-полем paths
@@ -953,9 +973,13 @@ async def convert_zip(
     basename. Дерево зеркалится в tmpdir, .md пишется на месте,
     имя записи zip = md_path относительно tmpdir.
     """
-    opts = _gui_opts(
-        force, frontmatter, keep_images, pdf_tables, only, None,
-    )
+    try:
+        opts = _gui_opts(
+            force, frontmatter, keep_images, pdf_tables, only,
+            None,
+        )
+    except ValueError as exc:
+        return _bad_request(exc)
     try:
         rel_paths = json.loads(paths)
         if not isinstance(rel_paths, list):

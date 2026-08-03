@@ -522,6 +522,16 @@ function addResult(name, status) {
 
 // Общий читатель SSE-потока (text/event-stream через fetch)
 async function readStream(resp) {
+  if (!resp.ok) {
+    // 400 от валидации флагов (out_dir/only) — показываем текст
+    let msg = "HTTP " + resp.status;
+    try {
+      const j = await resp.json();
+      if (j && j.error) msg = j.error;
+    } catch (e) { /* тело не JSON — оставляем код статуса */ }
+    handleSSE({event: "error", file: "—", error: msg});
+    return;
+  }
   const reader = resp.body.getReader();
   const dec = new TextDecoder();
   let buf = "";
