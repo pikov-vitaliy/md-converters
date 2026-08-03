@@ -775,6 +775,60 @@ def test_zip_folder_byte_limit_counts_utf8(client, monkeypatch):
     assert zip2["zip_id"] == ""
 
 
+def test_zip_folder_skips_archives(client):
+    """Архив внутри выбранной папки пропускается ЗАМЕТНО.
+
+    Раньше он уходил в MarkItDown и давал пустую заглушку .md с
+    временным путём сервера внутри — содержимое терялось молча.
+    """
+    inner = io.BytesIO()
+    with zipfile.ZipFile(inner, "w") as z:
+        z.writestr("secret.csv", "col\nВНУТРИ_АРХИВА\n")
+    files = [
+        ("files", ("inner.zip", io.BytesIO(inner.getvalue()),
+                   "application/zip")),
+        ("files", ("doc.csv", io.BytesIO(b"col\nDOCOK\n"),
+                   "text/csv")),
+    ]
+    r = client.post(
+        "/api/convert/zip", files=files,
+        data={"paths": json.dumps(["f/inner.zip", "f/doc.csv"])},
+    )
+    assert r.status_code == 200
+    events = _events(r.text)
+    errs = [e for e in events if e.get("event") == "error"]
+    assert any("inner.zip" in e.get("file", "") for e in errs)
+    zip_ev = [e for e in events if e.get("event") == "zip"][0]
+    got = client.get(f"/api/download_zip?zip_id={zip_ev['zip_id']}")
+    names = zipfile.ZipFile(io.BytesIO(got.content)).namelist()
+    assert names == ["f/doc.md"]
+
+
+def test_archive_outdir_mkdir_conflict_is_not_skip(client, tmp_path):
+    """Занятый файлом путь — это ошибка записи, а не «уже есть».
+
+    mkdir тоже кидает FileExistsError; в общем try он выдавался бы
+    за «.md не перезаписан» — даже с включённым force.
+    """
+    (tmp_path / "sub").write_text("я файл, а не папка", encoding="utf-8")
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, "w") as z:
+        z.writestr("sub/one.csv", "m,v\nFRESH,1\n")
+    r = client.post(
+        "/api/convert/files",
+        files={"files": (
+            "bundle.zip", io.BytesIO(buf.getvalue()),
+            "application/zip",
+        )},
+        data={"out_dir": str(tmp_path), "force": "true"},
+    )
+    assert r.status_code == 200
+    done = _done_events(r.text)[0]
+    assert done["status"] != "skip"
+    assert not done.get("note")
+    assert done["output"] is None
+
+
 def test_zip_folder_keeps_subfolder_structure(client):
     """A3: одинаковые имена в РАЗНЫХ подпапках не переименовываются."""
     files = [

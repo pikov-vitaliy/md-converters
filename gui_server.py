@@ -667,7 +667,16 @@ async def _convert_archive(src: Path, opts: dict, label: str):
                 if out_dir is not None:
                     dest = out_dir / rel
                     try:
+                        # mkdir — ОТДЕЛЬНО от записи: если компонент
+                        # пути занят файлом, он тоже кидает
+                        # FileExistsError, и в общем try это выдавалось
+                        # бы за «.md уже есть» (даже при force). При
+                        # неудаче запись ниже упадёт в except OSError —
+                        # итог тот же, но без ложного «skip».
                         dest.parent.mkdir(parents=True, exist_ok=True)
+                    except OSError:
+                        out_path = None
+                    try:
                         # Ядро без --force существующий .md не трогает;
                         # копия из архива затирала его молча. Режим "x"
                         # (эксклюзивное создание) вместо проверки
@@ -1098,6 +1107,20 @@ async def convert_zip(
                     tmpdir / _safe_rel(rel, base), used
                 )
                 used.add(src)
+                if _is_archive(src):
+                    # Архив внутри выбранной папки не разворачиваем
+                    # (как и при обходе папки в ② и в CLI). Раньше он
+                    # уходил в MarkItDown и давал ПУСТУЮ заглушку с
+                    # временным путём внутри — содержимое терялось
+                    # молча. Теперь пропуск виден пользователю.
+                    yield _sse("error", {
+                        "file": rel,
+                        "error": (
+                            "архив внутри папки не разворачивается — "
+                            "подайте его отдельно, перетаскиванием"
+                        ),
+                    })
+                    continue
                 try:
                     await _save_upload_streaming(upload, src)
                 except (ValueError, OSError) as exc:

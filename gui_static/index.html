@@ -144,7 +144,8 @@
   .cell-path{font-size:12px; color:var(--mute); font-family:ui-monospace,Menlo,monospace; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; cursor:pointer; transition:.12s}
   .cell-path:hover{color:var(--mint-bright)}
   .cell-path:focus-visible{box-shadow:var(--ring); border-radius:4px}
-  .result-note{grid-area:note; font-size:12.5px; color:var(--err); white-space:nowrap; overflow:hidden; text-overflow:ellipsis}
+  /* перенос, а не ellipsis: в примечании перечисляются имена файлов, не вошедших в .zip — обрезанный список бесполезен */
+  .result-note{grid-area:note; font-size:12.5px; color:var(--err); overflow-wrap:anywhere}
   @keyframes pulse{50%{opacity:.45}}
 
   /* ---------- preview (#preview — marked рендерит сюда Markdown) ---------- */
