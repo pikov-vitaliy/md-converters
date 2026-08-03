@@ -644,6 +644,9 @@ async def _convert_archive(src: Path, opts: dict, label: str):
             full, preview = _read_output(md_path)
             dl_id = ""
             out_path = None
+            status = res["status"]
+            log = res["log"]
+            note = ""
             if full and md_path:
                 rel = md_path.relative_to(inner)
                 dl_id = uuid.uuid4().hex[:12]
@@ -652,8 +655,29 @@ async def _convert_archive(src: Path, opts: dict, label: str):
                     dest = out_dir / rel
                     try:
                         dest.parent.mkdir(parents=True, exist_ok=True)
-                        dest.write_text(full, encoding="utf-8")
+                        # Ядро без --force существующий .md не трогает;
+                        # копия из архива затирала его молча. Режим "x"
+                        # (эксклюзивное создание) вместо проверки
+                        # exists(): она и запись — разные шаги, между
+                        # ними два запроса успевали затереть чужой
+                        # результат (конвертацию сериализует
+                        # _CONVERT_LOCK, а копирование — уже нет).
+                        mode = "w" if opts.get("force") else "x"
+                        with dest.open(mode, encoding="utf-8") as fh:
+                            fh.write(full)
                         out_path = str(dest)
+                    except FileExistsError:
+                        # Сам файл остаётся доступен кнопкой скачивания
+                        status = "skip"
+                        note = (
+                            f"{dest.name} уже есть в папке вывода — "
+                            "не перезаписан. Включите «Перезаписать "
+                            "существующие» или скачайте файл кнопкой."
+                        )
+                        log += (
+                            f"[skip] {dest.name} already exists "
+                            "(use -f / --force to overwrite)\n"
+                        )
                     except OSError:
                         out_path = None
                 elif (len(collected) < _MAX_ARCHIVE_FILES
@@ -665,8 +689,9 @@ async def _convert_archive(src: Path, opts: dict, label: str):
                     truncated = True
             yield _sse("done", {
                 "file": member.name,
-                "status": res["status"],
-                "log": res["log"],
+                "status": status,
+                "log": log,
+                "note": note,
                 "warnings": res["warnings"],
                 "preview": preview,
                 "download_id": dl_id,

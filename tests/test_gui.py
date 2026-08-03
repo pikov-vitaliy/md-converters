@@ -769,6 +769,52 @@ def test_zip_folder_same_name_without_paths(client):
     assert "NOPATHB" in bodies
 
 
+def _archive_to_outdir(client, out_dir, force=False):
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, "w") as z:
+        z.writestr("one.csv", "m,v\nFRESH,1\n")
+    data = {"out_dir": str(out_dir)}
+    if force:
+        data["force"] = "true"
+    return client.post(
+        "/api/convert/files",
+        files={"files": (
+            "bundle.zip", io.BytesIO(buf.getvalue()),
+            "application/zip",
+        )},
+        data=data,
+    )
+
+
+def test_archive_outdir_copy_respects_force(client, tmp_path):
+    """A5: копия .md из архива уважает «Перезаписывать существующие».
+
+    Раньше dest.write_text затирал существующий файл безусловно —
+    вразрез с [skip]-семантикой ядра.
+    """
+    dest = tmp_path / "one.md"
+    dest.write_text("РУЧНАЯ ПРАВКА", encoding="utf-8")
+
+    r = _archive_to_outdir(client, tmp_path)
+    assert r.status_code == 200
+    assert dest.read_text(encoding="utf-8") == "РУЧНАЯ ПРАВКА"
+    done = _done_events(r.text)[0]
+    assert done["status"] == "skip"
+    assert "already exists" in done["log"]
+    # причина уходит в UI отдельным полем (без временных путей лога)
+    assert "не перезаписан" in done["note"]
+    # сам результат всё равно доступен по кнопке скачивания
+    assert done["download_id"]
+    got = client.get(f"/api/download?dl_id={done['download_id']}")
+    assert "FRESH" in got.text
+
+    # с force — перезаписываем
+    r2 = _archive_to_outdir(client, tmp_path, force=True)
+    assert r2.status_code == 200
+    assert "FRESH" in dest.read_text(encoding="utf-8")
+    assert _done_events(r2.text)[0]["status"] == "ok"
+
+
 def test_zip_store_evicts_by_total_bytes(monkeypatch):
     """A4: у _ZIP_STORE есть потолок в байтах, не только по числу.
 

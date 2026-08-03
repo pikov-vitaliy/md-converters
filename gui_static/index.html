@@ -128,7 +128,7 @@
   #results{display:flex; flex-direction:column; gap:10px}
   #results:empty::before{content:"Здесь появятся сконвертированные файлы — перетащите документы выше, чтобы начать";
     display:block; text-align:center; color:var(--mute); font-size:13.5px; padding:14px 8px}
-  .result-item{display:grid; grid-template-columns:1fr auto; grid-template-areas:"name actions" "path actions";
+  .result-item{display:grid; grid-template-columns:1fr auto; grid-template-areas:"name actions" "path actions" "note note";
     gap:4px 14px; align-items:center; background:var(--surface-2); border:1px solid var(--line); border-radius:var(--r-sm);
     padding:13px 15px; transition:.14s}
   .result-item:hover{border-color:var(--line-2); background:var(--surface-3)}
@@ -144,7 +144,7 @@
   .cell-path{font-size:12px; color:var(--mute); font-family:ui-monospace,Menlo,monospace; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; cursor:pointer; transition:.12s}
   .cell-path:hover{color:var(--mint-bright)}
   .cell-path:focus-visible{box-shadow:var(--ring); border-radius:4px}
-  .result-note{grid-area:path; font-size:12.5px; color:var(--err); white-space:nowrap; overflow:hidden; text-overflow:ellipsis}
+  .result-note{grid-area:note; font-size:12.5px; color:var(--err); white-space:nowrap; overflow:hidden; text-overflow:ellipsis}
   @keyframes pulse{50%{opacity:.45}}
 
   /* ---------- preview (#preview — marked рендерит сюда Markdown) ---------- */
@@ -178,7 +178,7 @@
     body{padding:18px 12px 48px}
     .card{padding:16px}
     #dropZone{padding:30px 16px}
-    .result-item{grid-template-columns:1fr; grid-template-areas:"name" "actions" "path"}
+    .result-item{grid-template-columns:1fr; grid-template-areas:"name" "actions" "path" "note"}
     .cell-actions{justify-self:start}
   }
 </style>
@@ -500,14 +500,17 @@ function renderRow(data) {
     div.appendChild(meta);
   }
 
+  // У skip показываем короткое пояснение (data.note): иначе
+  // «пропущено» выглядит молчаливым отказом. Технический лог с
+  // временными путями в карточку не тащим.
   var note = (data.status === "fail")
     ? (data.error
         || (data.log ? data.log.substring(0, 200) : ""))
-    : "";
+    : (data.note || "");
   if (note) {
     var n = document.createElement("div");
     n.className = "result-note";
-    n.style.color = "#ff6666";
+    n.style.color = (data.status === "fail") ? "#ff6666" : "#c9c9d6";
     n.textContent = note;
     div.appendChild(n);
   }
