@@ -80,7 +80,20 @@ HTML (cp1251 и др.) через перекодировку во временн
 - Python, на который указывают команды:
   `C:\Users\user\AppData\Local\Programs\Python\Python314\python.exe`.
   На машине есть и второй Python (`...\Local\Python\pythoncore-3.14-64\`) —
-  install.ps1 выбрал первый (он на PATH). Зависимость:
+  install.ps1 выбрал первый (он на PATH).
+  **ВАЖНО (проверено 2026-08-04 по хэшам файлов).** Живой код
+  (`V:\md-converters\*.py` + `gui_static/`) исполняют только два пути:
+  функции профиля `tomd`/`pdf2md`/`html2md` (они зовут скрипт по
+  ПОЛНОМУ пути) и `.venv` проекта (редактируемая установка). А
+  `tomd.exe`/`tomd-gui.exe`, которые резолвятся из PATH (они из
+  `pythoncore-3.14-64\Scripts`), запускают СТАРЫЕ КОПИИ из
+  site-packages — у обоих системных Python свои копии, обе отстают от
+  репозитория. Отсюда следствия: `tomd-gui` (профильной функции для
+  него нет) поднимает устаревший GUI; в cmd.exe, где функции профиля
+  не работают, устаревшим оказывается и `tomd`. Актуальный GUI —
+  `V:\md-converters\.venv\Scripts\tomd-gui.exe`. Чтобы PATH-команды
+  перестали расходиться, нужна редактируемая установка:
+  `<python> -m pip install -e "V:\md-converters[gui]"`. Зависимость:
   `markitdown[pdf,docx,pptx,xlsx,xls,outlook]` ≥ 0.1, < 1.0 (потолок —
   чтобы мажорный релиз не прилетел молча). НЕ `[all]`: его
   `youtube-transcript-api` требует Python < 3.14, и pip на 3.14 молча
