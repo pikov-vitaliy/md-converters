@@ -7,6 +7,7 @@ import io
 import json
 import tarfile
 import zipfile
+from collections import OrderedDict
 
 import pytest
 
@@ -651,6 +652,26 @@ def test_ssl_verified_by_default(client, monkeypatch):
 
 
 # --- A1 (workplan): ValueError из _gui_opts → 400, не голый 500 ---
+
+def test_downloads_evict_by_total_bytes(monkeypatch):
+    """A8: вытеснение по суммарному размеру не падает с ValueError.
+
+    _downloads.popitem() отдаёт ПАРУ (ключ, значение); прежняя
+    распаковка в три цели роняла ValueError, как только сумма
+    контента переваливала _MAX_DL_BYTES — прямо в SSE-генераторе.
+    """
+    monkeypatch.setattr(gui_server, "_downloads", OrderedDict())
+    monkeypatch.setattr(gui_server, "_MAX_DL_BYTES", 100)
+    for i in range(4):
+        gui_server._add_download(f"id{i}", f"f{i}.md", "x" * 60)
+    # старые вытеснены, последний на месте, лимит соблюдён
+    assert "id3" in gui_server._downloads
+    assert "id0" not in gui_server._downloads
+    total = sum(
+        len(v[1]) for v in gui_server._downloads.values()
+    )
+    assert total <= 100
+
 
 def test_same_filename_batch_keeps_both(client):
     """A2: два файла с ОДИНАКОВЫМ именем не затирают друг друга.

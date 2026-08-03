@@ -94,7 +94,9 @@ def _add_download(dl_id: str, filename: str, content: str):
         _downloads.popitem(last=False)
     total = sum(len(v[1]) for v in _downloads.values())
     while total > _MAX_DL_BYTES and len(_downloads) > 1:
-        _, _, _ = _downloads.popitem(last=False)
+        # popitem отдаёт ПАРУ (ключ, значение) — распаковка в три
+        # цели роняла ValueError прямо в SSE-генераторе.
+        _downloads.popitem(last=False)
         total = sum(len(v[1]) for v in _downloads.values())
 
 
