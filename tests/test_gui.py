@@ -653,6 +653,122 @@ def test_ssl_verified_by_default(client, monkeypatch):
 
 # --- A1 (workplan): ValueError из _gui_opts → 400, не голый 500 ---
 
+def _events(body):
+    return [
+        json.loads(p.strip()[6:])
+        for p in body.split("\n\n")
+        if p.strip().startswith("data: ")
+    ]
+
+
+def test_zip_folder_truncates_and_warns(client, monkeypatch):
+    """A3: общий .zip не растёт без предела, отсечённое названо.
+
+    В ③ отсечённый файл недостижим (download_id пустой, out_dir нет),
+    поэтому предупреждение обязано перечислить потерянные имена.
+    """
+    monkeypatch.setattr(gui_server, "_MAX_ARCHIVE_FILES", 1)
+    files = [
+        ("files", ("a.csv", io.BytesIO(b"col\nAAA\n"), "text/csv")),
+        ("files", ("b.csv", io.BytesIO(b"col\nBBB\n"), "text/csv")),
+    ]
+    r = client.post(
+        "/api/convert/zip", files=files,
+        data={"paths": json.dumps(["a.csv", "b.csv"])},
+    )
+    assert r.status_code == 200
+    events = _events(r.text)
+    zip_ev = [e for e in events if e.get("event") == "zip"][0]
+    assert zip_ev["count"] == 1
+    assert zip_ev["truncated"] is True
+    errs = [e for e in events if e.get("event") == "error"]
+    assert any("b.csv" in e.get("error", "") for e in errs)
+
+
+def test_zip_folder_byte_limit_counts_utf8(client, monkeypatch):
+    """A3: лимит .zip считает БАЙТЫ utf-8, а не символы.
+
+    На кириллице байт вдвое больше, чем символов, — посимвольный
+    счёт пропускал бы в ОЗУ примерно вдвое больше лимита. Порог
+    подбираем строго между длиной в символах и в байтах.
+    """
+    payload = ("col\n" + "Я" * 200 + "\n").encode("utf-8")
+
+    def run():
+        return client.post(
+            "/api/convert/zip",
+            files=[("files", ("cyr.csv", io.BytesIO(payload),
+                              "text/csv"))],
+            data={"paths": json.dumps(["cyr.csv"]),
+                  "frontmatter": "false"},
+        )
+
+    zip_ev = [
+        e for e in _events(run().text) if e.get("event") == "zip"
+    ][0]
+    got = client.get(f"/api/download_zip?zip_id={zip_ev['zip_id']}")
+    zf = zipfile.ZipFile(io.BytesIO(got.content))
+    md = zf.read(zf.namelist()[0]).decode("utf-8")
+    chars, byts = len(md), len(md.encode("utf-8"))
+    assert byts > chars
+    monkeypatch.setattr(
+        gui_server, "_MAX_ARCHIVE_BYTES", (chars + byts) // 2
+    )
+    zip2 = [
+        e for e in _events(run().text) if e.get("event") == "zip"
+    ][0]
+    # по символам файл бы прошёл, по байтам — отсекается
+    assert zip2["count"] == 0
+    assert zip2["truncated"] is True
+    assert zip2["zip_id"] == ""
+
+
+def test_zip_folder_keeps_subfolder_structure(client):
+    """A3: одинаковые имена в РАЗНЫХ подпапках не переименовываются."""
+    files = [
+        ("files", ("dup.csv",
+                   io.BytesIO(b"col\nSUBAAA\n"), "text/csv")),
+        ("files", ("dup.csv",
+                   io.BytesIO(b"col\nSUBBBB\n"), "text/csv")),
+    ]
+    r = client.post(
+        "/api/convert/zip", files=files,
+        data={"paths": json.dumps(["top/a/dup.csv", "top/b/dup.csv"])},
+    )
+    assert r.status_code == 200
+    zip_ev = [
+        e for e in _events(r.text) if e.get("event") == "zip"
+    ][0]
+    got = client.get(f"/api/download_zip?zip_id={zip_ev['zip_id']}")
+    names = zipfile.ZipFile(io.BytesIO(got.content)).namelist()
+    assert sorted(names) == ["top/a/dup.md", "top/b/dup.md"]
+
+
+def test_zip_folder_same_name_without_paths(client):
+    """A3: без валидного paths одноимённые файлы не затирают друг друга."""
+    files = [
+        ("files", ("dup.csv",
+                   io.BytesIO(b"col\nNOPATHA\n"), "text/csv")),
+        ("files", ("dup.csv",
+                   io.BytesIO(b"col\nNOPATHB\n"), "text/csv")),
+    ]
+    r = client.post(
+        "/api/convert/zip", files=files, data={"paths": "не-json"},
+    )
+    assert r.status_code == 200
+    zip_ev = [
+        e for e in _events(r.text) if e.get("event") == "zip"
+    ][0]
+    assert zip_ev["count"] == 2
+    got = client.get(f"/api/download_zip?zip_id={zip_ev['zip_id']}")
+    zf = zipfile.ZipFile(io.BytesIO(got.content))
+    bodies = " ".join(
+        zf.read(n).decode("utf-8") for n in zf.namelist()
+    )
+    assert "NOPATHA" in bodies
+    assert "NOPATHB" in bodies
+
+
 def test_downloads_evict_by_total_bytes(monkeypatch):
     """A8: вытеснение по суммарному размеру не падает с ValueError.
 

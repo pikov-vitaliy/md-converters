@@ -123,6 +123,25 @@ def _add_zip(zip_id: str, filename: str, data: bytes):
         _ZIP_STORE.popitem(last=False)
 
 
+def _unique_path(path: Path, used: set[Path]) -> Path:
+    """Разводит СОВПАВШИЕ пути суффиксом ' (2)', ' (3)'...
+
+    В ③ структура папок — сам результат (имена записей .zip), поэтому
+    безусловный префикс индексом её сломал бы; трогаем только реальные
+    коллизии. Они возникают, когда webkitRelativePath не приехал и все
+    файлы падают в fallback-basename: без развода одноимённые затирали
+    бы друг друга ещё до конвертации.
+    """
+    if path not in used:
+        return path
+    n = 2
+    while True:
+        cand = path.with_name(f"{path.stem} ({n}){path.suffix}")
+        if cand not in used:
+            return cand
+        n += 1
+
+
 def _safe_rel(rel_path: str, fallback: str) -> Path:
     """Безопасный ОТНОСИТЕЛЬНЫЙ путь из webkitRelativePath.
 
@@ -996,14 +1015,20 @@ async def convert_zip(
     async def generate() -> AsyncGenerator[str, None]:
         tmpdir = Path(tempfile.mkdtemp(prefix="md_zip_"))
         collected: list[tuple[str, str]] = []
+        total_bytes = 0
+        dropped: list[str] = []
         try:
             jobs = []
+            used: set[Path] = set()
             for i, upload in enumerate(files):
                 base = _safe_filename(
                     upload.filename or f"file{i}"
                 )
                 rel = rel_paths[i] if i < len(rel_paths) else base
-                src = tmpdir / _safe_rel(rel, base)
+                src = _unique_path(
+                    tmpdir / _safe_rel(rel, base), used
+                )
+                used.add(src)
                 try:
                     await _save_upload_streaming(upload, src)
                 except (ValueError, OSError) as exc:
@@ -1028,7 +1053,21 @@ async def convert_zip(
                 full_content, preview = _read_output(md_path)
                 if full_content and md_path:
                     entry = md_path.relative_to(tmpdir).as_posix()
-                    collected.append((entry, full_content))
+                    # Считаем БАЙТЫ utf-8: в .zip уходят именно они,
+                    # а на кириллице байт вдвое больше, чем символов —
+                    # посимвольный счёт пропустил бы ~2x лимита в ОЗУ.
+                    size = len(full_content.encode("utf-8"))
+                    if (len(collected) < _MAX_ARCHIVE_FILES
+                            and total_bytes + size
+                            <= _MAX_ARCHIVE_BYTES):
+                        collected.append((entry, full_content))
+                        total_bytes += size
+                    else:
+                        # Здесь, в отличие от _convert_archive, файл
+                        # НИКАК больше не достать: download_id пустой,
+                        # out_dir у ③ всегда None. Значит, список
+                        # потерянных обязан попасть к пользователю.
+                        dropped.append(rel)
                 yield _sse("done", {
                     "file": rel,
                     "status": res["status"],
@@ -1047,8 +1086,23 @@ async def convert_zip(
                         zf.writestr(entry, content)
                 zip_id = uuid.uuid4().hex[:12]
                 _add_zip(zip_id, "markdown.zip", buf.getvalue())
+            if dropped:
+                shown = ", ".join(dropped[:5])
+                if len(dropped) > 5:
+                    shown += f" и ещё {len(dropped) - 5}"
+                yield _sse("error", {
+                    "file": "—",
+                    "error": (
+                        f"Папка слишком большая: {len(dropped)} "
+                        f"файл(ов) НЕ вошли в .zip и недоступны для "
+                        f"скачивания — конвертируйте их отдельно "
+                        f"(перетаскиванием или через tomd). "
+                        f"Не вошли: {shown}"
+                    ),
+                })
             yield _sse("zip", {
                 "zip_id": zip_id, "count": len(collected),
+                "truncated": bool(dropped),
             })
             yield _sse("complete", {})
         finally:
