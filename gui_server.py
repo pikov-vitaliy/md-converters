@@ -736,11 +736,15 @@ async def convert_files(
         try:
             # 1. Загрузка (последовательно — это поток upload)
             jobs = []
-            for upload in files:
+            for idx, upload in enumerate(files):
                 name = _safe_filename(
                     upload.filename or "unknown"
                 )
-                src = tmpdir / name
+                # Своя подпапка на каждую загрузку: одноимённые
+                # файлы (drag&drop из разных папок) иначе затирали
+                # бы друг друга ещё ДО конвертации — в выдачу
+                # уходил контент последнего, дважды.
+                src = tmpdir / str(idx) / name
                 try:
                     await _save_upload_streaming(upload, src)
                 except (ValueError, OSError) as exc:

@@ -652,6 +652,38 @@ def test_ssl_verified_by_default(client, monkeypatch):
 
 # --- A1 (workplan): ValueError из _gui_opts → 400, не голый 500 ---
 
+def test_same_filename_batch_keeps_both(client):
+    """A2: два файла с ОДИНАКОВЫМ именем не затирают друг друга.
+
+    Раньше оба upload'а писались в tmpdir/<имя> — второй перезаписывал
+    первый ещё до конвертации, и оба результата содержали контент
+    второго файла (тихая потеря данных).
+    """
+    files = [
+        ("files", ("dup.csv",
+                   io.BytesIO(b"col\nFIRSTUNIQUE\n"), "text/csv")),
+        ("files", ("dup.csv",
+                   io.BytesIO(b"col\nSECONDUNIQUE\n"), "text/csv")),
+    ]
+    r = client.post("/api/convert/files", files=files)
+    assert r.status_code == 200
+    dones = _done_events(r.text)
+    assert len(dones) == 2
+    previews = " ".join(d.get("preview", "") for d in dones)
+    assert "FIRSTUNIQUE" in previews
+    assert "SECONDUNIQUE" in previews
+    # и скачивание каждого отдаёт СВОЙ контент
+    bodies = []
+    for d in dones:
+        dl_id = d.get("download_id", "")
+        assert dl_id
+        got = client.get(f"/api/download?dl_id={dl_id}")
+        assert got.status_code == 200
+        bodies.append(got.text)
+    assert any("FIRSTUNIQUE" in b for b in bodies)
+    assert any("SECONDUNIQUE" in b for b in bodies)
+
+
 def test_bad_out_dir_returns_400_files(client):
     """Запретная папка вывода в /files → 400 с текстом причины."""
     files = {
