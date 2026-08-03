@@ -224,11 +224,24 @@ _uvicorn_server: uvicorn.Server | None = None
 _SERVE_MODE = False
 
 
+# Ссылки на фоновые задачи держим сами: event loop хранит на них
+# только слабую ссылку, и без этого сборщик мусора вправе убить
+# задачу на середине — авто-выключение просто перестало бы работать.
+_background_tasks: set[asyncio.Task] = set()
+
+
+def _spawn_background(coro) -> asyncio.Task:
+    task = asyncio.create_task(coro)
+    _background_tasks.add(task)
+    task.add_done_callback(_background_tasks.discard)
+    return task
+
+
 @contextlib.asynccontextmanager
 async def _lifespan(app: FastAPI):
     if _SERVE_MODE:
-        asyncio.create_task(_open_browser_when_ready(_port))
-        asyncio.create_task(_auto_shutdown_check())
+        _spawn_background(_open_browser_when_ready(_port))
+        _spawn_background(_auto_shutdown_check())
     yield
 
 

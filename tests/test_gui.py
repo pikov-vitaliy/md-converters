@@ -469,6 +469,57 @@ def test_testclient_does_not_open_browser(monkeypatch):
     assert called["s"] is False
 
 
+def test_background_task_is_referenced():
+    """A6: фоновая задача держится ссылкой, пока не завершится.
+
+    event loop хранит на задачи только слабую ссылку — без своего
+    множества сборщик мусора вправе убить задачу на середине, и
+    авто-выключение молча перестало бы работать.
+    """
+    import asyncio as aio
+
+    async def scenario():
+        started = aio.Event()
+        release = aio.Event()
+
+        async def work():
+            started.set()
+            await release.wait()
+
+        task = gui_server._spawn_background(work())
+        await started.wait()
+        # пока задача жива — ссылка на неё у модуля
+        assert task in gui_server._background_tasks
+        release.set()
+        await task
+        # завершилась — ссылка снята, утечки нет
+        assert task not in gui_server._background_tasks
+
+    aio.run(scenario())
+
+
+def test_lifespan_spawns_through_tracker(monkeypatch):
+    """A6: lifespan заводит задачи через отслеживаемый спавнер.
+
+    Прямой asyncio.create_task оставлял бы задачи без ссылок — тест
+    ловит именно проводку, а не только сам хелпер.
+    """
+    spawned = []
+
+    def fake_spawn(coro):
+        coro.close()  # не запускаем, только фиксируем вызов
+        spawned.append(coro)
+        return None
+
+    monkeypatch.setattr(gui_server, "_SERVE_MODE", True)
+    monkeypatch.setattr(gui_server, "_spawn_background", fake_spawn)
+    with TestClient(
+        gui_server.app, base_url="http://127.0.0.1:8765"
+    ):
+        pass
+    assert len(spawned) == 2
+
+
 def test_targz_upload_expands(client):
     """.tar.gz распаковывается и конвертируется в .md (stdlib)."""
     buf = io.BytesIO()
