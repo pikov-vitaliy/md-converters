@@ -86,18 +86,25 @@ _downloads: OrderedDict[
 ] = OrderedDict()
 
 
+def _utf8_len(text: str) -> int:
+    """Длина в байтах utf-8 — в них хранится и отдаётся markdown."""
+    return len(text.encode("utf-8"))
+
+
 def _add_download(dl_id: str, filename: str, content: str):
     """Добавляет результат с LRU-очисткой по счётчику и размеру."""
     _downloads[dl_id] = (filename, content, time.time())
     _downloads.move_to_end(dl_id)
     while len(_downloads) > _MAX_DL_ENTRIES:
         _downloads.popitem(last=False)
-    total = sum(len(v[1]) for v in _downloads.values())
+    # Размер считаем в БАЙТАХ utf-8 (в них же отдаём файл): на
+    # кириллице байт вдвое больше, чем символов.
+    total = sum(_utf8_len(v[1]) for v in _downloads.values())
     while total > _MAX_DL_BYTES and len(_downloads) > 1:
         # popitem отдаёт ПАРУ (ключ, значение) — распаковка в три
         # цели роняла ValueError прямо в SSE-генераторе.
         _downloads.popitem(last=False)
-        total = sum(len(v[1]) for v in _downloads.values())
+        total = sum(_utf8_len(v[1]) for v in _downloads.values())
 
 
 def _purge_expired_downloads():
@@ -112,15 +119,39 @@ def _purge_expired_downloads():
 
 
 # --- ③ ZIP-хранилище (папка из браузера → один .zip) ---
+# Как и _downloads: счётчик + суммарный размер + TTL. Одного лимита
+# по числу записей мало — пять больших архивов держали бы сотни МБ в
+# ОЗУ до самого выключения сервера.
 _MAX_ZIP_ENTRIES = 5
-_ZIP_STORE: OrderedDict[str, tuple[str, bytes]] = OrderedDict()
+_MAX_ZIP_BYTES = 200 * 1024 * 1024
+_ZIP_TTL = 30 * 60
+_ZIP_STORE: OrderedDict[
+    str, tuple[str, bytes, float]
+] = OrderedDict()
 
 
 def _add_zip(zip_id: str, filename: str, data: bytes):
-    _ZIP_STORE[zip_id] = (filename, data)
+    """Добавляет архив с LRU-очисткой по счётчику и размеру."""
+    _ZIP_STORE[zip_id] = (filename, data, time.time())
     _ZIP_STORE.move_to_end(zip_id)
     while len(_ZIP_STORE) > _MAX_ZIP_ENTRIES:
         _ZIP_STORE.popitem(last=False)
+    total = sum(len(v[1]) for v in _ZIP_STORE.values())
+    while total > _MAX_ZIP_BYTES and len(_ZIP_STORE) > 1:
+        # последний архив не вытесняем: он и есть результат запроса
+        _ZIP_STORE.popitem(last=False)
+        total = sum(len(v[1]) for v in _ZIP_STORE.values())
+
+
+def _purge_expired_zips():
+    """Удаляет архивы старше _ZIP_TTL."""
+    now = time.time()
+    expired = [
+        k for k, v in _ZIP_STORE.items()
+        if now - v[2] > _ZIP_TTL
+    ]
+    for k in expired:
+        _ZIP_STORE.pop(k, None)
 
 
 def _unique_path(path: Path, used: set[Path]) -> Path:
@@ -626,10 +657,10 @@ async def _convert_archive(src: Path, opts: dict, label: str):
                     except OSError:
                         out_path = None
                 elif (len(collected) < _MAX_ARCHIVE_FILES
-                      and total_bytes + len(full)
+                      and total_bytes + _utf8_len(full)
                       <= _MAX_ARCHIVE_BYTES):
                     collected.append((rel.as_posix(), full))
-                    total_bytes += len(full)
+                    total_bytes += _utf8_len(full)
                 else:
                     truncated = True
             yield _sse("done", {
@@ -1056,7 +1087,7 @@ async def convert_zip(
                     # Считаем БАЙТЫ utf-8: в .zip уходят именно они,
                     # а на кириллице байт вдвое больше, чем символов —
                     # посимвольный счёт пропустил бы ~2x лимита в ОЗУ.
-                    size = len(full_content.encode("utf-8"))
+                    size = _utf8_len(full_content)
                     if (len(collected) < _MAX_ARCHIVE_FILES
                             and total_bytes + size
                             <= _MAX_ARCHIVE_BYTES):
@@ -1116,12 +1147,13 @@ async def convert_zip(
 @app.get("/api/download_zip")
 async def download_zip(zip_id: str):
     """③ Скачивание собранного .zip из памяти."""
+    _purge_expired_zips()
     entry = _ZIP_STORE.get(zip_id)
     if not entry:
         return JSONResponse(
             {"error": "not found"}, status_code=404
         )
-    filename, data = entry
+    filename, data, _ts = entry
     encoded = quote(filename, safe="")
     return StreamingResponse(
         iter([data]),

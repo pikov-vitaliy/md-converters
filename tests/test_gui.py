@@ -769,6 +769,45 @@ def test_zip_folder_same_name_without_paths(client):
     assert "NOPATHB" in bodies
 
 
+def test_zip_store_evicts_by_total_bytes(monkeypatch):
+    """A4: у _ZIP_STORE есть потолок в байтах, не только по числу.
+
+    Пять больших архивов иначе держали бы сотни МБ в ОЗУ до
+    выключения сервера (лимит был только на 5 записей).
+    """
+    monkeypatch.setattr(gui_server, "_ZIP_STORE", OrderedDict())
+    monkeypatch.setattr(gui_server, "_MAX_ZIP_BYTES", 100)
+    for i in range(4):
+        gui_server._add_zip(f"z{i}", f"a{i}.zip", b"x" * 60)
+    assert "z3" in gui_server._ZIP_STORE
+    assert "z0" not in gui_server._ZIP_STORE
+    total = sum(len(v[1]) for v in gui_server._ZIP_STORE.values())
+    assert total <= 100
+
+
+def test_zip_store_purges_expired(client, monkeypatch):
+    """A4: архив старше TTL не отдаётся и освобождает память."""
+    monkeypatch.setattr(gui_server, "_ZIP_STORE", OrderedDict())
+    monkeypatch.setattr(gui_server, "_ZIP_TTL", 0)
+    gui_server._add_zip("old", "old.zip", b"PK-stub")
+    r = client.get("/api/download_zip?zip_id=old")
+    assert r.status_code == 404
+    assert gui_server._ZIP_STORE == {}
+
+
+def test_download_bytes_limit_counts_utf8(monkeypatch):
+    """A4: лимит _downloads тоже в байтах utf-8, а не в символах."""
+    monkeypatch.setattr(gui_server, "_downloads", OrderedDict())
+    monkeypatch.setattr(gui_server, "_MAX_DL_BYTES", 100)
+    # Две записи по 30 символов кириллицы: 60 символов (лимит НЕ
+    # превышен) против 120 байт (превышен вдвое). Посимвольный счёт
+    # оставил бы обе, побайтовый вытесняет старую.
+    gui_server._add_download("a", "a.md", "Я" * 30)
+    gui_server._add_download("b", "b.md", "Я" * 30)
+    assert "a" not in gui_server._downloads
+    assert "b" in gui_server._downloads
+
+
 def test_downloads_evict_by_total_bytes(monkeypatch):
     """A8: вытеснение по суммарному размеру не падает с ValueError.
 
