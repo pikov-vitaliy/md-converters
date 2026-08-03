@@ -5,6 +5,7 @@
 """
 import io
 import json
+import os
 import tarfile
 import zipfile
 from collections import OrderedDict
@@ -957,8 +958,42 @@ def test_same_filename_batch_keeps_both(client):
     assert any("SECONDUNIQUE" in b for b in bodies)
 
 
+# UNC-путь отвергается на любой ОС, а список запретных корней
+# (_FORBIDDEN_OUT_DIRS) — чисто windows-овый: на ubuntu-раннере
+# "C:\Windows" — обычное относительное имя, и проверка не срабатывает.
+_BAD_OUT_DIR = "\\\\server\\share"
+
+
 def test_bad_out_dir_returns_400_files(client):
-    """Запретная папка вывода в /files → 400 с текстом причины."""
+    """Недопустимая папка вывода в /files → 400 с текстом причины."""
+    files = {
+        "files": ("a.html", io.BytesIO(b"<p>x</p>"), "text/html"),
+    }
+    r = client.post(
+        "/api/convert/files",
+        data={"out_dir": _BAD_OUT_DIR},
+        files=files,
+    )
+    assert r.status_code == 400
+    assert "UNC" in r.json()["error"]
+
+
+def test_bad_out_dir_returns_400_url(client):
+    """Недопустимая папка вывода в /url → 400 ещё до сети."""
+    r = client.post(
+        "/api/convert/url",
+        data={"url": "https://example.com/",
+              "out_dir": _BAD_OUT_DIR},
+    )
+    assert r.status_code == 400
+    assert "UNC" in r.json()["error"]
+
+
+@pytest.mark.skipif(
+    os.name != "nt", reason="запретные корни заданы путями Windows"
+)
+def test_forbidden_out_dir_returns_400(client):
+    """Системная папка вывода (C:\\Windows) → 400, не запись в систему."""
     files = {
         "files": ("a.html", io.BytesIO(b"<p>x</p>"), "text/html"),
     }
@@ -966,17 +1001,6 @@ def test_bad_out_dir_returns_400_files(client):
         "/api/convert/files",
         data={"out_dir": "C:\\Windows"},
         files=files,
-    )
-    assert r.status_code == 400
-    assert "Папка вывода" in r.json()["error"]
-
-
-def test_bad_out_dir_returns_400_url(client):
-    """Запретная папка вывода в /url → 400 ещё до сети."""
-    r = client.post(
-        "/api/convert/url",
-        data={"url": "https://example.com/",
-              "out_dir": "C:\\Windows"},
     )
     assert r.status_code == 400
     assert "Папка вывода" in r.json()["error"]
