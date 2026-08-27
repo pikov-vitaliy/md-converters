@@ -70,9 +70,9 @@ from datetime import date
 from pathlib import Path
 from urllib.parse import unquote, urljoin, urlparse
 
-# pypdfium2 используется только для подсчёта страниц в PDF-диагностике
-# (image-only detection). Импортируем лениво внутри функции — при отсутствии
-# библиотеки остальная функциональность продолжает работать.
+# pypdfium2 используется для PDF-диагностики (число страниц и независимая
+# проверка текстового слоя). При отсутствии библиотеки остальная
+# функциональность продолжает работать.
 try:
     import pypdfium2  # noqa: F401  (used in _pdf_page_count)
 except ImportError:  # pragma: no cover — pypdfium2 is a runtime dep
@@ -446,6 +446,24 @@ def front_matter(source: str, title: str | None, tool: str,
 # эмпирически: типичный «пустой» PDF (скан без OCR) даёт 0-5 символов
 # на страницу (пробелы и NUL); нормальный текстовый PDF — сотни.
 _PDF_MIN_CHARS_PER_PAGE = 20
+_BROKEN_CYRILLIC_ASCII = frozenset(
+    "0123456789:;<=>?@ABCDEFGHIJKLMNO"
+)
+_BROKEN_CYRILLIC_SPAN = re.compile(
+    r"[А-Яа-яЁё0-9:;<=>?@A-O]+"
+)
+_BROKEN_CYRILLIC_LOWER = str.maketrans(
+    {
+        chr(code): bytes([code + 0xB0]).decode("cp1251")
+        for code in range(0x30, 0x50)
+    }
+)
+_BROKEN_CYRILLIC_UPPER_CTRL = str.maketrans(
+    {
+        chr(code): bytes([code + 0xAC]).decode("cp1251")
+        for code in range(0x14, 0x20)
+    }
+)
 
 
 def _pdf_page_count(path: Path) -> int | None:
@@ -458,6 +476,83 @@ def _pdf_page_count(path: Path) -> int | None:
             return len(doc)
     except Exception:
         return None
+
+
+def _close_pdfium(obj) -> None:
+    close = getattr(obj, "close", None)
+    if close is not None:
+        close()
+
+
+def _pdf_text_layer_probe(path: Path) -> tuple[str, int] | None:
+    """Текст PDF и число страниц через pypdfium2, независимо от MarkItDown.
+
+    Диагностика текстового слоя не должна зависеть от качества Markdown-
+    извлечения: на кириллических PDF pdfminer/MarkItDown иногда возвращает
+    короткий мусор, хотя в самом PDF есть нормальный Unicode-текст.
+    """
+    if pypdfium2 is None:
+        return None
+    try:
+        doc = pypdfium2.PdfDocument(str(path))
+        try:
+            page_count = len(doc)
+            parts = []
+            for index in range(page_count):
+                page = doc[index]
+                try:
+                    textpage = page.get_textpage()
+                    try:
+                        parts.append(textpage.get_text_range() or "")
+                    finally:
+                        _close_pdfium(textpage)
+                finally:
+                    _close_pdfium(page)
+            return "\n".join(parts), page_count
+        finally:
+            _close_pdfium(doc)
+    except Exception:
+        return None
+
+
+def _repair_broken_cyrillic_pdf_text(text: str) -> str:
+    """Восстанавливает систематически сломанную карту кириллицы в PDF.
+
+    В некоторых ведомственных PDF строчные русские буквы извлекаются
+    как ASCII `0`..`O`: байт символа равен cp1251-коду буквы минус B0.
+    Ремонт включается только при множестве смешанных слов и заметной
+    доле таких символов, поэтому версии, ГОСТы и обычный латинский текст
+    не затрагиваются.
+    """
+    spans = []
+    bad_chars = 0
+    cyrillic_chars = sum(
+        ("А" <= ch <= "я") or ch in "Ёё" for ch in text
+    )
+    for match in _BROKEN_CYRILLIC_SPAN.finditer(text):
+        word = match.group()
+        if not any("а" <= ch <= "я" or ch == "ё" for ch in word):
+            continue
+        bad = sum(ch in _BROKEN_CYRILLIC_ASCII for ch in word)
+        if bad:
+            spans.append(match.span())
+            bad_chars += bad
+    if len(spans) < 10:
+        return text
+    if bad_chars * 100 < max(cyrillic_chars, 1):
+        return text
+
+    parts = []
+    start = 0
+    for left, right in spans:
+        parts.append(text[start:left])
+        parts.append(text[left:right].translate(_BROKEN_CYRILLIC_LOWER))
+        start = right
+    parts.append(text[start:])
+    repaired = "".join(parts).translate(_BROKEN_CYRILLIC_UPPER_CTRL)
+    repaired = re.sub(r"(?<=[А-ЯЁ])\+(?=[А-ЯЁ])", "Ч", repaired)
+    repaired = re.sub(r"(?<=[А-ЯЁ])/(?=\s|$)", "Я", repaired)
+    return repaired
 
 
 def _pdf_text_layer_diagnose(
@@ -936,9 +1031,8 @@ def _pdf_tables_result(path: Path):
 _MAX_PDF_IMG_B64 = 60 * 1024 * 1024  # потолок суммарного base64
 
 
-class _ImgResult:
-    """Прокси результата: text_content переопределён (добавлены
-    картинки PDF), остальное делегируется исходному результату."""
+class _TextResult:
+    """Прокси результата с заменённым text_content."""
 
     def __init__(self, base, text_content: str) -> None:
         object.__setattr__(self, "_base", base)
@@ -1681,15 +1775,47 @@ def _convert_file_to_target(path: Path, target: Path, opts: dict,
             print(f"[error] Failed to convert {path.name}: {exc}")
             return "fail"
 
+    if suffix == ".pdf":
+        repaired = _repair_broken_cyrillic_pdf_text(result.text_content)
+        if repaired != result.text_content:
+            result = _TextResult(result, repaired)
+            repair_note = "repaired broken Cyrillic PDF font mapping"
+            note = f"{note}; {repair_note}" if note else repair_note
+
     # PDF-специфичная диагностика: image-only / scan-only PDF.
     # Если у PDF нет текстового слоя — MarkItDown вернёт пустой/мусорный
     # Markdown, и пользователь должен знать, почему.
     pdf_text_layer = None
     if suffix == ".pdf":
-        page_count = _pdf_page_count(path)
+        probe = _pdf_text_layer_probe(path)
+        if probe is None:
+            text_for_diagnose = result.text_content
+            page_count = _pdf_page_count(path)
+        else:
+            pdfium_text, page_count = probe
+            text_for_diagnose = pdfium_text
+            markdown_layer = _pdf_text_layer_diagnose(
+                result.text_content, page_count
+            )
+            pdfium_layer = _pdf_text_layer_diagnose(
+                pdfium_text, page_count
+            )
+            if markdown_layer == "absent" and pdfium_layer == "present":
+                clean = pdfium_text.replace("\r\n", "\n").replace(
+                    "\r", "\n"
+                )
+                clean = _repair_broken_cyrillic_pdf_text(clean)
+                clean = _clean_pdf_text(clean, page_count).strip()
+                if clean:
+                    result = _TextResult(result, clean + "\n")
+                    fallback_note = "text via pypdfium2"
+                    note = (
+                        f"{note}; {fallback_note}"
+                        if note else fallback_note
+                    )
         if page_count is not None:
             pdf_text_layer = _pdf_text_layer_diagnose(
-                result.text_content, page_count
+                text_for_diagnose, page_count
             )
             if pdf_text_layer == "absent":
                 print(
@@ -1711,7 +1837,7 @@ def _convert_file_to_target(path: Path, target: Path, opts: dict,
             try:
                 result.text_content = combined
             except (AttributeError, TypeError):
-                result = _ImgResult(result, combined)
+                result = _TextResult(result, combined)
 
     try:
         _emit(target, result, path.name, opts["frontmatter"],
