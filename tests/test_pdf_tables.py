@@ -336,6 +336,18 @@ def test_convert_file_real_ruled_pdf_end_to_end(tmp_path):
     assert "| alpha | 1 |" in body
 
 
+def test_pdf_text_layer_probe_reads_real_pdf(tmp_path):
+    pytest.importorskip("pypdfium2")
+    src = tmp_path / "text-layer.pdf"
+    src.write_bytes(_ruled_table_pdf_bytes())
+
+    text, page_count = c._pdf_text_layer_probe(src)
+
+    assert page_count == 1
+    assert "Name" in text
+    assert "alpha" in text
+
+
 def test_pdf_tables_result_none_for_image_only_pdf(tmp_path):
     pytest.importorskip("pdfplumber")
     from tools.make_image_only_pdf import make_image_only_pdf

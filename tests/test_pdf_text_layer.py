@@ -38,6 +38,31 @@ def test_text_layer_diagnose_returns_none_for_empty_pdf():
     assert convert_to_md._pdf_text_layer_diagnose("", 0) is None
 
 
+def test_repair_broken_cyrillic_pdf_font_mapping():
+    broken = (
+        "НастояIая Методика выявления уя7вимосте9 и "
+        "недекларированных во7можносте9 в программном "
+        "о1еспеGении. "
+    ) * 4
+
+    repaired = convert_to_md._repair_broken_cyrillic_pdf_text(broken)
+
+    assert "Настоящая Методика выявления уязвимостей" in repaired
+    assert "недекларированных возможностей" in repaired
+    assert "программном обеспечении" in repaired
+
+
+def test_repair_broken_cyrillic_ignores_normal_mixed_text():
+    normal = (
+        "ГОСТ Р 56939-2024. Версия Python 3.14. "
+        "Контроль SHA256 и раздел 4.2."
+    )
+
+    assert (
+        convert_to_md._repair_broken_cyrillic_pdf_text(normal) == normal
+    )
+
+
 def test_front_matter_includes_pdf_text_layer_when_provided():
     text = convert_to_md.front_matter(
         "report.pdf",
@@ -150,6 +175,54 @@ def test_convert_file_no_warning_for_text_rich_pdf(tmp_path, monkeypatch):
     assert target.exists()
     body = target.read_text(encoding="utf-8")
     assert "pdf_text_layer: present" in body
+
+
+def test_convert_file_uses_pdfium_text_for_russian_text_layer(
+    tmp_path, monkeypatch
+):
+    """Русский текстовый слой диагностируется по PDF, а не по markdown.
+
+    На некоторых PDF MarkItDown/pdfminer может вернуть короткий мусор для
+    кириллицы. Если pypdfium2 видит нормальный текстовый слой, файл нельзя
+    помечать как scan/image-only.
+    """
+    src = tmp_path / "russian.pdf"
+    src.write_bytes(b"%PDF-1.4 fake")
+    out = tmp_path / "out"
+    out.mkdir()
+    target = out / "russian.md"
+
+    fake_result = SimpleNamespace(text_content="??", title=None)
+    monkeypatch.setattr(
+        convert_to_md, "_convert_file_data", lambda p: (fake_result, None)
+    )
+    monkeypatch.setattr(convert_to_md, "_pdf_page_count", lambda p: 3)
+    monkeypatch.setattr(
+        convert_to_md,
+        "_pdf_text_layer_probe",
+        lambda p: ("Привет мир. " * 80, 3),
+        raising=False,
+    )
+
+    opts = {
+        "force": True,
+        "frontmatter": True,
+        "keep_images": False,
+        "unsafe_raw_markdown": False,
+        "out_dir": out,
+        "scan": {".pdf"},
+        "tool": "tomd",
+        "planned": set(),
+    }
+
+    status = convert_to_md.convert_file(src, opts)
+
+    assert status == "ok"
+    assert target.exists()
+    body = target.read_text(encoding="utf-8")
+    assert "pdf_text_layer: present" in body
+    assert "Привет мир." in body
+    assert "\n??\n" not in body
 
 
 def test_convert_file_no_pdf_field_for_html(tmp_path, monkeypatch):
