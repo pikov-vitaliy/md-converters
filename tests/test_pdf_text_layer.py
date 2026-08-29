@@ -468,3 +468,102 @@ def test_pdf_page_count_handles_missing_pypdfium2(tmp_path, monkeypatch):
     # Принудительно «отключаем» pypdfium2.
     monkeypatch.setattr(convert_to_md, "pypdfium2", None)
     assert convert_to_md._pdf_page_count(src) is None
+
+
+def test_repair_ignores_ocr_scan_with_sparse_noise():
+    """OCR-скан с редким шумом не принимается за сломанный шрифт.
+
+    На скане ГОСТ Р 34.11-2012 гейт проходил впритык (1.01% при
+    прежнем пороге 1%), и ремонт молча портил криптографические
+    константы: «345» внутри хэша декодировалось в частое слово «где»,
+    которое словарь документа ложно подтверждал. У настоящего
+    сломанного шрифта плотность дефектных символов ≥7% даже на
+    коротких фрагментах (буквы а-п уходят в ASCII массово), у
+    OCR-шума скана — около 1%. Синтетика ниже собрана в зазор
+    1-3%: старый гейт на ней срабатывал и портил текст.
+    """
+    prose = (
+        "Настоящий стандарт устанавливает функцию хэширования, где "
+        "значение вычисляется по алгоритму подстановки и перестановки "
+        "для обеспечения целостности сообщений и защиты информации. "
+    ) * 14
+    noise = " ".join(
+        f"шум{n}величина512и256равна задаётся efed29dc345e53d"
+        for n in range(10)
+    )
+    text = prose + noise
+
+    assert convert_to_md._repair_broken_cyrillic_pdf_text(text) == text
+
+
+def test_repair_keeps_pure_digit_runs_in_broken_document():
+    """Чисто цифровой прогон не переводится и в сломанном документе.
+
+    «345» декодируется в «где», «157» — в «без»: словарь подтверждает
+    частые слова, и настоящие числа (значения подстановок, hex)
+    молча превращались бы в прозу. Видимо сломанное «345» честнее
+    невидимой порчи числа.
+    """
+    broken = (
+        "НастояIая Методика выявления уя7вимосте9, где числа "
+        "о1еспеGения це;остности и values 345 и 157, 158 остаются. "
+    ) * 4
+
+    repaired = convert_to_md._repair_broken_cyrillic_pdf_text(broken)
+
+    assert "Настоящая Методика выявления уязвимостей" in repaired
+    assert "345" in repaired
+    assert "157, 158" in repaired
+    assert "где" not in repaired.replace("где числа", "")
+
+
+def test_markitdown_fallback_strips_page_furniture(tmp_path, monkeypatch):
+    """Фолбэк MarkItDown тоже чистит колонтитулы и номера страниц.
+
+    PDF без геометрических таблиц уходит мимо _pdf_tables_result, и
+    _clean_pdf_text на него не действовал: в Р 71207-2024 в .md
+    оставались 19 колонтитулов «ГОСТ Р 71207—2024» и голые номера
+    страниц — тогда как соседний Р 71206-2024 (pdfplumber-путь) те же
+    колонтитулы срезал. Чистка колонтитулов обязана работать и на
+    фолбэке; фенсинг и экранирование — нет (настроены на
+    pdfplumber-текст).
+    """
+    src = tmp_path / "plain.pdf"
+    src.write_bytes(b"%PDF-1.4 fake")
+    out = tmp_path / "out"
+    out.mkdir()
+
+    pages = "\n".join(
+        f"ПНСТ 123—2024\n"
+        f"Содержательный текст страницы {i} о требованиях "
+        f"безопасности разработки программного обеспечения.\n{i}"
+        for i in range(1, 13)
+    )
+    fake_result = SimpleNamespace(text_content=pages, title=None)
+    monkeypatch.setattr(
+        convert_to_md, "_pdf_tables_result", lambda p: None
+    )
+    monkeypatch.setattr(
+        convert_to_md, "_convert_file_data", lambda p: (fake_result, None)
+    )
+    monkeypatch.setattr(
+        convert_to_md, "_pdf_text_layer_probe", lambda p: (pages, 12)
+    )
+
+    opts = {
+        "force": True,
+        "frontmatter": False,
+        "keep_images": False,
+        "unsafe_raw_markdown": False,
+        "out_dir": out,
+        "scan": {".pdf"},
+        "tool": "tomd",
+        "planned": set(),
+    }
+
+    status = convert_to_md.convert_file(src, opts)
+
+    assert status == "ok"
+    body = (out / "plain.md").read_text(encoding="utf-8")
+    assert "ПНСТ 123—2024" not in body
+    assert "Содержательный текст страницы 3" in body

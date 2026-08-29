@@ -700,8 +700,13 @@ def _repair_main_font_line(line: str, vocab: set[str]) -> str:
             continue
         if not any("а" <= ch <= "я" or ch == "ё" for ch in word):
             # Ни одной уцелевшей строчной буквы: обычно это версия,
-            # дата или аббревиатура. Переводим, только если результат
-            # встречается в документе целым словом.
+            # дата или аббревиатура. Чисто цифровой прогон не
+            # переводим вовсе: «345» декодируется в частое «где», и
+            # словарь ложно подтверждает порчу настоящих чисел
+            # (значений подстановок, hex-констант). Прочее переводим,
+            # только если результат встречается в документе целым.
+            if word.isdigit():
+                continue
             decoded = word.translate(_BROKEN_CYRILLIC_LOWER)
             if decoded.lower() not in vocab:
                 continue
@@ -803,7 +808,11 @@ def _repair_broken_cyrillic_pdf_text(text: str) -> str:
             bad_chars += bad
     if spans < 10:
         return text
-    if bad_chars * 100 < max(cyrillic_chars, 1):
+    # Порог плотности 3%: настоящий сломанный шрифт даёт >=7% даже на
+    # коротких фрагментах (буквы а-п уходят в ASCII массово; реальный
+    # документ — 11.5%), а OCR-шум скана — около 1% (ГОСТ Р 34.11-2012
+    # проходил прежний порог 1% впритык, и ремонт портил hex-константы).
+    if bad_chars * 100 < max(cyrillic_chars, 1) * 3:
         return text
 
     lines = text.split("\n")
@@ -973,9 +982,18 @@ def _crop_text(page, top0: float, top1: float) -> str:
     содержимое таблицы не дублируется прозой."""
     if top1 - top0 < 2:
         return ""
+    # Координаты клампятся к РЕАЛЬНОМУ bbox страницы: у сканов он
+    # бывает смещён ((-0.05, -0.2, 594.95, 841.8) у ГОСТ Р 34.11), и
+    # crop от (0, ..., page.width) вылетал за край на сотые пункта —
+    # pdfplumber поднимал ValueError, except глотал его, и весь текст
+    # вне принятых таблиц молча пропадал.
+    px0, ptop, px1, pbottom = page.bbox
+    top0 = max(ptop, top0)
+    top1 = min(pbottom, top1)
+    if top1 - top0 < 2:
+        return ""
     try:
-        crop = page.crop((0, max(0, top0), page.width,
-                          min(page.height, top1)))
+        crop = page.crop((px0, top0, px1, top1))
         return (crop.extract_text() or "").strip()
     except Exception:
         return ""
@@ -1277,8 +1295,13 @@ def _strip_pdf_furniture(lines: list, page_count: int) -> list:
         if s and not ln.lstrip().startswith("|"):
             counts[s] = counts.get(s, 0) + 1
     threshold = max(5, page_count // 2)
+    # Строка из одной пунктуации («}» из примеров кода) — не колонтитул:
+    # настоящий колонтитул (номер документа, версия) всегда содержит
+    # буквы или цифры. Без этой проверки повторяющиеся скобки кода
+    # вырезались бы молча (Р 71207-2024, 5 строк «}»).
     repeated = {s for s, n in counts.items()
-                if n >= threshold and len(s) <= 60}
+                if n >= threshold and len(s) <= 60
+                and re.search(r"\w", s)}
     # Страничные номера чистим только если колонтитул реально найден
     # (иначе можно срезать легитимное одиночное число).
     drop_page_numbers = bool(repeated)
@@ -2130,6 +2153,7 @@ def _convert_file_to_target(path: Path, target: Path, opts: dict,
     print(f"Converting {path.name} ...")
     result = None
     note = None
+    furniture_done = False
     # PDF: сначала пытаемся извлечь таблицы по геометрии (pdfplumber).
     # Если документ без таблиц или pdfplumber недоступен — откат на
     # штатный путь MarkItDown ниже (поведение не меняется).
@@ -2141,6 +2165,7 @@ def _convert_file_to_target(path: Path, target: Path, opts: dict,
         if pdf_result is not None:
             result = pdf_result
             note = f"{pdf_result.pdf_tables} table(s) via pdfplumber"
+            furniture_done = True  # _clean_pdf_text внутри
     if result is None:
         try:
             result, note = _convert_file_data(path)
@@ -2181,6 +2206,7 @@ def _convert_file_to_target(path: Path, target: Path, opts: dict,
                 clean = _clean_pdf_text(clean, page_count).strip()
                 if clean:
                     result = _TextResult(result, clean + "\n")
+                    furniture_done = True  # _clean_pdf_text выше
                     fallback_note = "text via pypdfium2"
                     note = (
                         f"{note}; {fallback_note}"
@@ -2199,6 +2225,17 @@ def _convert_file_to_target(path: Path, target: Path, opts: dict,
                     f"(requires Tesseract).",
                     file=sys.stderr,
                 )
+        if not furniture_done and page_count and page_count >= 3:
+            # Фолбэк MarkItDown идёт мимо _clean_pdf_text:
+            # колонтитулы и номера страниц оставались в .md
+            # (Р 71207-2024, 19 шт.), тогда как pdfplumber-путь их
+            # срезает. Применяем ТОЛЬКО чистку колонтитулов:
+            # фенсинг и экранирование настроены на pdfplumber-текст
+            # и на фолбэк не переносятся.
+            lines = result.text_content.split("\n")
+            kept = _strip_pdf_furniture(lines, page_count)
+            if kept != lines:
+                result = _TextResult(result, "\n".join(kept))
 
     # PDF: «Сохранить картинки» извлекает встроенные растровые
     # изображения из PDF и дописывает их (base64) в .md по страницам.

@@ -717,3 +717,64 @@ def test_pdf_images_extracted(tmp_path):
 def test_pdf_images_empty_on_missing(tmp_path):
     """Битый/несуществующий путь → пусто, без исключения."""
     assert c._pdf_images_markdown(tmp_path / "nope.pdf") == ""
+
+
+class _FakeCropPage:
+    """Страница с bbox, не начинающимся в (0,0) — как у сканов ГОСТ.
+
+    pdfplumber поднимает ValueError, если crop-box выходит за bbox
+    страницы хоть на сотую пункта.
+    """
+
+    bbox = (-0.05, -0.2, 594.95, 841.8)
+    width = 595.0
+    height = 842.0
+
+    def crop(self, box):
+        x0, top, x1, bottom = box
+        px0, ptop, px1, pbottom = self.bbox
+        if x0 < px0 or top < ptop or x1 > px1 or bottom > pbottom:
+            raise ValueError("Bounding box is not fully within parent")
+        return SimpleNamespace(
+            extract_text=lambda: "текст полосы вне таблицы"
+        )
+
+
+def test_crop_text_survives_offset_page_bbox():
+    """Полоса текста не теряется на странице со смещённым bbox.
+
+    На скане ГОСТ Р 34.11-2012 bbox страниц был (-0.05, -0.2, 594.95,
+    841.8): crop((0, top, width, bottom)) вылетал за правый край на
+    0.05 пункта, ValueError глотался — и ВЕСЬ текст вне принятых
+    таблиц молча пропадал (массивы подстановок, формулы, вводные
+    предложения). Координаты обязаны клампиться к реальному bbox.
+    """
+    page = _FakeCropPage()
+
+    got = c._crop_text(page, 0.0, 296.0)
+
+    assert got == "текст полосы вне таблицы"
+
+
+def test_strip_pdf_furniture_keeps_pure_punctuation_lines():
+    """Повторяющаяся строка из одной пунктуации — не колонтитул.
+
+    В Р 71207-2024 строки «}» из примеров кода повторялись чаще
+    порога и вырезались как колонтитул — молчаливая потеря кода.
+    Настоящий колонтитул (номер документа, версия) всегда содержит
+    буквы или цифры.
+    """
+    pages = []
+    for i in range(1, 13):
+        pages += [
+            "ГОСТ Р 00000—2024",
+            f"int f{i}(void) {{",
+            "return 0;",
+            "}",
+            f"проза страницы {i} о безопасной разработке",
+        ]
+
+    kept = c._strip_pdf_furniture(pages, 12)
+
+    assert kept.count("}") == 12          # код цел
+    assert "ГОСТ Р 00000—2024" not in kept  # колонтитул срезан
