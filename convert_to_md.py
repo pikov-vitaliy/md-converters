@@ -1217,6 +1217,37 @@ def _fence_code_blocks(text: str) -> str:
     return "\n".join(out)
 
 
+def _paginated_number_indices(lines: list, page_count: int) -> set:
+    """Индексы строк-номеров страниц, опознанных по СОГЛАСОВАННОЙ
+    сквозной нумерации.
+
+    Одиночное число неотличимо от легитимного (ссылка на пункт,
+    результат измерения), поэтому режется только длинная цепочка:
+    значения строго возрастают по ходу документа, не превышают числа
+    страниц, и таких строк набирается не меньше половины объёма.
+    Число, выпадающее из цепочки, остаётся — именно так уцелевают
+    ссылки вида «3» посреди текста.
+
+    Нумерация, не совпадающая с номерами страниц (выдержка из
+    документа, где печатные номера начинаются с 40 на шести
+    страницах), под правило НЕ подпадает: там работает старый путь по
+    найденному колонтитулу."""
+    chain: list[int] = []
+    last = 0
+    for i, ln in enumerate(lines):
+        if ln.lstrip().startswith("|"):
+            continue
+        if not _PDF_PAGE_NUM_RE.match(ln):
+            continue
+        val = int(ln.strip())
+        if last < val <= page_count:
+            chain.append(i)
+            last = val
+    if len(chain) < max(5, page_count // 2):
+        return set()
+    return set(chain)
+
+
 def _strip_pdf_furniture(lines: list, page_count: int) -> list:
     """Убирает сквозные колонтитулы (повторяющиеся короткие строки — номер
     документа, версия) и страничные номера, текущие в тело на стыках стр.
@@ -1236,8 +1267,9 @@ def _strip_pdf_furniture(lines: list, page_count: int) -> list:
     # Страничные номера чистим только если колонтитул реально найден
     # (иначе можно срезать легитимное одиночное число).
     drop_page_numbers = bool(repeated)
+    paginated = _paginated_number_indices(lines, page_count)
     kept: list[str] = []
-    for ln in lines:
+    for i, ln in enumerate(lines):
         s = ln.strip()
         if not s or ln.lstrip().startswith("|"):
             kept.append(ln)
@@ -1245,6 +1277,8 @@ def _strip_pdf_furniture(lines: list, page_count: int) -> list:
         if s in repeated:
             continue
         if drop_page_numbers and _PDF_PAGE_NUM_RE.match(ln):
+            continue
+        if i in paginated:
             continue
         kept.append(ln)
     return kept

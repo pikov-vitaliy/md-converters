@@ -546,6 +546,28 @@ def test_clean_pdf_text_keeps_unique_doc_and_standalone_number():
     assert "Параграф один" in out and "Параграф три" in out
 
 
+def test_clean_pdf_text_strips_page_numbers_without_footer():
+    """Сквозной нумерации без колонтитула раньше хватало, чтобы
+    засорить весь вывод: на реальном 60-страничном документе в `.md`
+    оставалось 66 голых чисел. Номера убираются, только если образуют
+    согласованную возрастающую последовательность, поэтому число,
+    выпадающее из неё (ссылка на пункт), сохраняется."""
+    lines = []
+    for p in range(1, 13):
+        lines.append(f"Содержательный абзац номер {p}")
+        if p == 5:
+            lines.append("3")  # ссылка на пункт, назад по счётчику
+        lines.append(str(p))
+    out = c._clean_pdf_text("\n".join(lines), page_count=12)
+    body = "\n" + out + "\n"
+
+    assert "\n7\n" not in body
+    assert "\n12\n" not in body
+    assert "\n3\n" in body
+    assert "Содержательный абзац номер 7" in out
+    assert "Содержательный абзац номер 12" in out
+
+
 def test_clean_pdf_text_protects_table_rows():
     text = "FOOT\nFOOT\nFOOT\nFOOT\nFOOT\n| FOOT | x |\n| --- | --- |"
     out = c._clean_pdf_text(text, page_count=10)
