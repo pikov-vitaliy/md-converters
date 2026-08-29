@@ -63,6 +63,136 @@ def test_repair_broken_cyrillic_ignores_normal_mixed_text():
     )
 
 
+# Сноски в ведомственных PDF набраны вторым шрифтом с другой (сдвинутой
+# на четыре буквы) сломанной картой. Основная карта их не расшифровывает,
+# а её слепое применение превращает текст в другую бессмыслицу.
+_ALT_FONT_BODY = (
+    "НастояIая Методика выявления уя7вимосте9 и "
+    "недекларированных во7можносте9 в программном "
+    "о1еспеGении.\n"
+) * 4
+
+
+def test_repair_alternate_font_footnote_lines():
+    text = _ALT_FONT_BODY + (
+        "11 \x1fD< BJ9A>9 <ECB?P;B64A<я CD<@9A<@OI BCJ<= "
+        "<ECOF4F9?PAB= ?45BD4FBD<< E?98G9F GK<FO64FP\n"
+        "CB CB6OL9A<N 59;BC4EABEF< CDB7D4@@AOI >B@CBA9AFB6.\n"
+    )
+
+    repaired = convert_to_md._repair_broken_cyrillic_pdf_text(text)
+
+    assert "При оценке использования применимых опций" in repaired
+    assert "испытательной лаборатории следует учитывать" in repaired
+    assert "по повышению безопасности программных" in repaired
+    # Основная карта не должна оставлять на этих строках свой мусор.
+    assert "лтждсмя" not in repaired
+    assert "утпткйсмя" not in repaired
+
+
+def test_repair_alternate_font_keeps_digits_and_urls():
+    text = _ALT_FONT_BODY + (
+        "20!C9J<H<>4J<я HBD@4F4 "
+        "https://github.com/package-url/purl-spec\n"
+        "!\" 71206-2024 « 4;D45BF>4 59;BC4EAB7B CDB7D4@@AB7B "
+        "B59EC9K9A<я.\n"
+    )
+
+    repaired = convert_to_md._repair_broken_cyrillic_pdf_text(text)
+
+    assert "спецификация формата".casefold()[1:] in repaired.casefold()
+    assert "https://github.com/package-url/purl-spec" in repaired
+    assert "71206-2024" in repaired
+    assert "разработка безопасного программного".casefold()[1:] in (
+        repaired.casefold()
+    )
+
+
+def test_repair_alternate_font_leaves_normal_lines_alone():
+    text = _ALT_FONT_BODY + (
+        "(ИСО 8601:2004).\n"
+        "Например, «2022-04-25T09:30:00Z»\n"
+        "GOST:security_function, то поле value должно\n"
+        "Модуль Nginx: САО.1, ДАО.1, ДАО.2 (поверхность атаки);\n"
+    )
+
+    repaired = convert_to_md._repair_broken_cyrillic_pdf_text(text)
+
+    assert "(ИСО 8601:2004)." in repaired
+    assert "«2022-04-25T09:30:00Z»" in repaired
+    assert "GOST:security_function, то поле value должно" in repaired
+    assert "Модуль Nginx: САО.1, ДАО.1, ДАО.2" in repaired
+
+
+def test_repair_keeps_trailing_enumeration_punctuation():
+    # Двоеточие и точка с запятой в конце слова — настоящая пунктуация,
+    # а не буквы `к`/`л`: перечислений в таких документах сотни.
+    text = _ALT_FONT_BODY + (
+        "ПримеGание: анали7ируNтся:\n"
+        "требования доверия; о1раIение к кода;\n"
+    )
+
+    repaired = convert_to_md._repair_broken_cyrillic_pdf_text(text)
+
+    assert "Примечание: анализируются:" in repaired
+    assert "доверия;" in repaired
+    assert "кода;" in repaired
+    assert "довериял" not in repaired
+    assert "анализируютсяк" not in repaired
+
+
+def test_repair_decodes_trailing_letter_lookalikes():
+    # `<`, `=`, `>`, `@` в конце слова — буквы (`м`,`н`,`о`,`р`),
+    # пунктуацией в русском тексте они слово не завершают.
+    text = _ALT_FONT_BODY + (
+        "исс;54>2а=иO< и исс;54>2аB5;Lск>3> подхода\n"
+    )
+
+    repaired = convert_to_md._repair_broken_cyrillic_pdf_text(text)
+
+    assert "исследованиям" in repaired
+    assert "исследовательского" in repaired
+
+
+def test_repair_restores_letter_when_word_known_in_document():
+    # Если буква достраивает слово, встречающееся в документе целым,
+    # концевой `;` — всё-таки буква, а не пунктуация.
+    text = _ALT_FONT_BODY + (
+        "Настоящий материал содержит требования\n"
+        "иEC>;L7у5Bся <аB5@иа; в полном объеме\n"
+    )
+
+    repaired = convert_to_md._repair_broken_cyrillic_pdf_text(text)
+
+    assert "материал в полном объеме" in repaired
+    assert "материа;" not in repaired
+
+
+def test_repair_decodes_all_ascii_word_known_in_document():
+    # Прогон без единой уцелевшей буквы переводится, только если
+    # результат встречается в документе целым словом.
+    text = _ALT_FONT_BODY + (
+        "Модельный пример и его модельного анализа\n"
+        "Краткое описание <>45;L=>3> ОО версии 1.2\n"
+    )
+
+    repaired = convert_to_md._repair_broken_cyrillic_pdf_text(text)
+
+    assert "Краткое описание модельного ОО" in repaired
+    assert "версии 1.2" in repaired
+
+
+def test_repair_leaves_unknown_all_ascii_runs_alone():
+    # Даты и стандарты словарём не подтверждаются — остаются как есть.
+    text = _ALT_FONT_BODY + (
+        "Формат даты по стандарту 8601:2004 указан в приложении\n"
+    )
+
+    repaired = convert_to_md._repair_broken_cyrillic_pdf_text(text)
+
+    assert "по стандарту 8601:2004 указан" in repaired
+
+
 def test_front_matter_includes_pdf_text_layer_when_provided():
     text = convert_to_md.front_matter(
         "report.pdf",
