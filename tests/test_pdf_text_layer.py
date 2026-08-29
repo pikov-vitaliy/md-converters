@@ -198,6 +198,24 @@ def test_repair_uses_words_recovered_in_first_pass():
     assert "Количество модулей в составе" in repaired
 
 
+def test_repair_keeps_technical_designations_intact():
+    # Словарь второго прохода вдвое больше словаря первого, поэтому
+    # важно, что обозначения (модели, версии, даты, аббревиатуры) под
+    # него не подпадают: их «перевод» дал бы не заметный глазом мусор
+    # («С2000» -> «Свааа»). Граница шлюза — здесь.
+    text = _ALT_FONT_BODY + (
+        "Контроллер С2000 и панель С2000М в составе ОО\n"
+        "Стандарт 8601:2004 и время 09:30:00 в отGете\n"
+        "Требования ОО; АРМ: НДВ; САО: перечислены выше\n"
+    )
+
+    repaired = convert_to_md._repair_broken_cyrillic_pdf_text(text)
+
+    assert "Контроллер С2000 и панель С2000М в составе ОО" in repaired
+    assert "Стандарт 8601:2004 и время 09:30:00 в отчете" in repaired
+    assert "Требования ОО; АРМ: НДВ; САО: перечислены выше" in repaired
+
+
 def test_repair_leaves_unknown_all_ascii_runs_alone():
     # Даты и стандарты словарём не подтверждаются — остаются как есть.
     text = _ALT_FONT_BODY + (
