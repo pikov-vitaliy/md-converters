@@ -37,11 +37,11 @@ Excel, PowerPoint, CSV, JSON, XML, EPUB, Outlook `.msg`, Jupyter,
   `uv lock --check && uv run --frozen --extra gui ruff check
   convert_to_md.py gui_server.py tests tools && uv run --frozen
   --extra gui pytest -q`.
-- Живой код исполняют функции профиля PowerShell (полный путь к
-  скрипту) и `.venv` проекта; актуальный GUI —
-  `V:\md-converters\.venv\Scripts\tomd-gui.exe`. А `tomd.exe`/
-  `tomd-gui.exe` из PATH — устаревшие копии site-packages
-  (подробности: docs/known-limitations.md, «Окружение»).
+- Команды `tomd`/`pdf2md`/`html2md`/`tomd-gui` (PATH), функции
+  профиля PowerShell и `.venv` — ВСЕ исполняют живой код репозитория
+  (2026-08-29 оба системных Python переведены на `pip install -e`).
+  На новом ПК редактируемую установку повторить: install.ps1 ставит
+  зависимости, но не пакет (docs/known-limitations.md, «Окружение»).
 - Коммиты на русском; последняя строка — соавтор с именем ТЕКУЩЕЙ
   модели: `Co-Authored-By: Claude <модель> <noreply@anthropic.com>`.
   Push в `main` разрешён; в конце правок `git status -sb` должен
