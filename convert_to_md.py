@@ -452,18 +452,44 @@ _BROKEN_CYRILLIC_ASCII = frozenset(
 _BROKEN_CYRILLIC_SPAN = re.compile(
     r"[А-Яа-яЁё0-9:;<=>?@A-O]+"
 )
-_BROKEN_CYRILLIC_LOWER = str.maketrans(
-    {
-        chr(code): bytes([code + 0xB0]).decode("cp1251")
-        for code in range(0x30, 0x50)
+
+
+def _cp1251_shift(offset: int, low: int, high: int) -> dict[str, str]:
+    """Карта «ASCII-код + смещение = cp1251-код буквы»."""
+    return {
+        chr(code): bytes([code + offset]).decode("cp1251")
+        for code in range(low, high + 1)
     }
-)
+
+
+_BROKEN_CYRILLIC_LOWER = str.maketrans(_cp1251_shift(0xB0, 0x30, 0x4F))
 _BROKEN_CYRILLIC_UPPER_CTRL = str.maketrans(
-    {
-        chr(code): bytes([code + 0xAC]).decode("cp1251")
-        for code in range(0x14, 0x20)
-    }
+    _cp1251_shift(0xAC, 0x14, 0x1F)
 )
+
+# Сноски тех же ведомственных PDF набраны ВТОРЫМ шрифтом, у которого
+# сломанная карта сдвинута на четыре буквы: строчные лежат в 0x34..0x53
+# (смещение AC), прописные — в управляющих 0x10..0x1F (смещение B0).
+# Основная карта такие строки не расшифровывает, а её слепое применение
+# превращает текст в другую бессмыслицу, поэтому карта выбирается
+# для каждой строки отдельно.
+_ALT_CYRILLIC_SRC = {
+    **_cp1251_shift(0xAC, 0x34, 0x53),
+    **_cp1251_shift(0xB0, 0x10, 0x1F),
+}
+_ALT_CYRILLIC_TABLE = str.maketrans(_ALT_CYRILLIC_SRC)
+_ALT_LATIN = frozenset(chr(code) for code in range(0x41, 0x54))
+_ALT_CTRL = frozenset(chr(code) for code in range(0x10, 0x20))
+_BROKEN_ANY_ASCII = _BROKEN_CYRILLIC_ASCII | frozenset("PQRS")
+_BROKEN_PUNCT = frozenset(":;<=>?@")
+_BROKEN_RUN = re.compile(r"[А-Яа-яЁё0-9:;<=>?@A-S\x10-\x1f]+")
+# В слоте, где по алфавиту стоял бы «ъ», этот шрифт отдаёт «ю».
+# Настоящий «ъ» в русском встречается только перед е/ё/ю/я, поэтому
+# «ъ» в любой другой позиции — заведомо буква «ю».
+_ALT_HARD_SIGN = re.compile(r"ъ(?![еёюя])")
+# Доля корректной кириллицы, ниже которой строка считается набранной
+# вторым шрифтом: у обычного текста она около 0.8, у таких сносок — 0.
+_ALT_MAX_CYRILLIC_SHARE = 0.15
 
 
 def _pdf_page_count(path: Path) -> int | None:
@@ -515,6 +541,162 @@ def _pdf_text_layer_probe(path: Path) -> tuple[str, int] | None:
         return None
 
 
+def _run_looks_broken(run: str) -> bool:
+    """Похож ли прогон символов на сломанное извлечение кириллицы."""
+    if any(ch in _BROKEN_PUNCT or ch in _ALT_CTRL for ch in run):
+        return True
+    has_digit = any(ch.isdigit() for ch in run)
+    if has_digit and any(ch in _ALT_LATIN for ch in run):
+        return True
+    has_lower = any("а" <= ch <= "я" or ch == "ё" for ch in run)
+    return has_lower and any(ch in _BROKEN_ANY_ASCII for ch in run)
+
+
+def _alt_font_evidence(line: str) -> tuple[int, float]:
+    """(число длинных сломанных прогонов, доля живой кириллицы)."""
+    runs = [
+        match.group()
+        for match in _BROKEN_RUN.finditer(line)
+        if _run_looks_broken(match.group())
+    ]
+    if not runs:
+        return 0, 1.0
+    cyrillic = broken = 0
+    for run in runs:
+        for ch in run:
+            if ch in _BROKEN_ANY_ASCII:
+                broken += 1
+            elif ch.isalpha():
+                cyrillic += 1
+    total = cyrillic + broken
+    long_runs = sum(1 for run in runs if len(run) >= 3)
+    share = cyrillic / total if total else 1.0
+    return long_runs, share
+
+
+def _alt_font_line_flags(lines: list[str]) -> list[bool]:
+    """Помечает строки, набранные вторым (сносочным) шрифтом.
+
+    Признак строгий: несколько длинных сломанных прогонов и почти
+    полное отсутствие уцелевшей кириллицы. Короткие хвосты абзаца
+    (одна-две буквы плюс мусор) добираются распространением на
+    соседей, иначе они остались бы недоремонтированными.
+    """
+    evidence = [_alt_font_evidence(line) for line in lines]
+    flags = [
+        runs >= 2 and share < _ALT_MAX_CYRILLIC_SHARE
+        for runs, share in evidence
+    ]
+    for _ in range(2):
+        for index, (runs, share) in enumerate(evidence):
+            if flags[index] or runs < 1:
+                continue
+            if share >= _ALT_MAX_CYRILLIC_SHARE:
+                continue
+            before = index > 0 and flags[index - 1]
+            after = index + 1 < len(flags) and flags[index + 1]
+            if before or after:
+                flags[index] = True
+    return flags
+
+
+def _repair_alt_font_line(line: str) -> str:
+    """Переводит строку второго шрифта, не трогая числа и ссылки."""
+    parts = []
+    last = 0
+    for match in _BROKEN_RUN.finditer(line):
+        run = match.group()
+        parts.append(line[last:match.start()])
+        last = match.end()
+        has_letter = any(
+            ch in _ALT_LATIN or ch in _ALT_CTRL for ch in run
+        )
+        covered = all(
+            ch in _ALT_CYRILLIC_SRC
+            for ch in run
+            if ch in _BROKEN_ANY_ASCII
+        )
+        if run.isdigit() or not has_letter or not covered:
+            parts.append(run)
+            continue
+        decoded = run.translate(_ALT_CYRILLIC_TABLE)
+        parts.append(_ALT_HARD_SIGN.sub("ю", decoded))
+    parts.append(line[last:])
+    return "".join(parts)
+
+
+# Пробел/конец строки после `:` или `;` означает настоящую пунктуацию, а
+# не букву `к`/`л`: в перечислениях таких концовок сотни, и слепой
+# перевод превращал «доверия;» в «доверял». Символы `<=>?@` наоборот —
+# почти всегда буквы (`м`,`н`,`о`,`п`,`р`), их переводим как раньше.
+_TRAIL_PUNCT = frozenset(":;")
+_CLEAN_WORD = re.compile(r"[А-Яа-яЁё]{3,}")
+
+
+def _clean_word_vocabulary(text: str) -> set[str]:
+    """Слова документа, извлечённые без повреждений.
+
+    Служит арбитром для концевых `:`/`;`: если буква-кандидат достраивает
+    слово, которое в документе встречается целым, значит это всё-таки
+    буква (например «материа;» -> «материал»), а не пунктуация.
+    """
+    vocab = set()
+    for match in _CLEAN_WORD.finditer(text):
+        start, end = match.span()
+        left = text[start - 1] if start else " "
+        right = text[end:end + 1] or " "
+        if left in _BROKEN_CYRILLIC_ASCII:
+            continue
+        if right in _BROKEN_CYRILLIC_ASCII:
+            continue
+        vocab.add(match.group().lower())
+    return vocab
+
+
+def _split_trailing_punct(
+    word: str, after: str, vocab: set[str]
+) -> tuple[str, str]:
+    """Отделяет концевой `:`/`;`, если это пунктуация, а не буква."""
+    if len(word) < 2 or word[-1] not in _TRAIL_PUNCT:
+        return word, ""
+    if after not in ("", " "):
+        return word, ""
+    body = word[:-1].translate(_BROKEN_CYRILLIC_LOWER).lower()
+    full = word.translate(_BROKEN_CYRILLIC_LOWER).lower()
+    if full in vocab and body not in vocab:
+        return word, ""
+    return word[:-1], word[-1]
+
+
+def _repair_main_font_line(line: str, vocab: set[str]) -> str:
+    """Переводит строку основного шрифта документа."""
+    parts = []
+    start = 0
+    for match in _BROKEN_CYRILLIC_SPAN.finditer(line):
+        word = match.group()
+        if not any(ch in _BROKEN_CYRILLIC_ASCII for ch in word):
+            continue
+        if not any("а" <= ch <= "я" or ch == "ё" for ch in word):
+            # Ни одной уцелевшей строчной буквы: обычно это версия,
+            # дата или аббревиатура. Переводим, только если результат
+            # встречается в документе целым словом.
+            decoded = word.translate(_BROKEN_CYRILLIC_LOWER)
+            if decoded.lower() not in vocab:
+                continue
+        left, right = match.span()
+        word, tail = _split_trailing_punct(
+            word, line[right:right + 1], vocab
+        )
+        parts.append(line[start:left])
+        parts.append(word.translate(_BROKEN_CYRILLIC_LOWER) + tail)
+        start = right
+    parts.append(line[start:])
+    repaired = "".join(parts).translate(_BROKEN_CYRILLIC_UPPER_CTRL)
+    repaired = re.sub(r"(?<=[А-ЯЁ])\+(?=[А-ЯЁ])", "Ч", repaired)
+    repaired = re.sub(r"(?<=[А-ЯЁ])/(?=\s|$)", "Я", repaired)
+    return repaired
+
+
 def _repair_broken_cyrillic_pdf_text(text: str) -> str:
     """Восстанавливает систематически сломанную карту кириллицы в PDF.
 
@@ -522,9 +704,11 @@ def _repair_broken_cyrillic_pdf_text(text: str) -> str:
     как ASCII `0`..`O`: байт символа равен cp1251-коду буквы минус B0.
     Ремонт включается только при множестве смешанных слов и заметной
     доле таких символов, поэтому версии, ГОСТы и обычный латинский текст
-    не затрагиваются.
+    не затрагиваются. Строки, набранные вторым шрифтом (сноски со
+    сдвигом на четыре буквы), переводятся своей картой и в основной
+    ремонт не попадают.
     """
-    spans = []
+    spans = 0
     bad_chars = 0
     cyrillic_chars = sum(
         ("А" <= ch <= "я") or ch in "Ёё" for ch in text
@@ -535,24 +719,22 @@ def _repair_broken_cyrillic_pdf_text(text: str) -> str:
             continue
         bad = sum(ch in _BROKEN_CYRILLIC_ASCII for ch in word)
         if bad:
-            spans.append(match.span())
+            spans += 1
             bad_chars += bad
-    if len(spans) < 10:
+    if spans < 10:
         return text
     if bad_chars * 100 < max(cyrillic_chars, 1):
         return text
 
-    parts = []
-    start = 0
-    for left, right in spans:
-        parts.append(text[start:left])
-        parts.append(text[left:right].translate(_BROKEN_CYRILLIC_LOWER))
-        start = right
-    parts.append(text[start:])
-    repaired = "".join(parts).translate(_BROKEN_CYRILLIC_UPPER_CTRL)
-    repaired = re.sub(r"(?<=[А-ЯЁ])\+(?=[А-ЯЁ])", "Ч", repaired)
-    repaired = re.sub(r"(?<=[А-ЯЁ])/(?=\s|$)", "Я", repaired)
-    return repaired
+    lines = text.split("\n")
+    alt_flags = _alt_font_line_flags(lines)
+    vocab = _clean_word_vocabulary(text)
+    return "\n".join(
+        _repair_alt_font_line(line)
+        if is_alt
+        else _repair_main_font_line(line, vocab)
+        for line, is_alt in zip(lines, alt_flags)
+    )
 
 
 def _pdf_text_layer_diagnose(
