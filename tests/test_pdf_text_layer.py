@@ -216,6 +216,41 @@ def test_repair_keeps_technical_designations_intact():
     assert "Требования ОО; АРМ: НДВ; САО: перечислены выше" in repaired
 
 
+def test_repair_restores_capitals_hidden_in_alt_font_punctuation():
+    # Во втором шрифте заглавные Р..Я лежат в печатных 0x20..0x2F:
+    # «Р» — это пробел, «С» — «!», «Т» — «"». Слепой перевод уничтожил
+    # бы настоящие пробелы, поэтому заглавная возвращается только по
+    # улике из самого документа.
+    text = _ALT_FONT_BODY + (
+        "Разработка безопасного ПО. Разработка идет по плану.\n"
+        "Требования ФСТЭК России учтены. Методики России тоже.\n"
+        'D9>B@9A84J<< Ф!"ЭК BEE<< « 4;D45BF>4 59;BC4EAB7B\n'
+    )
+
+    repaired = convert_to_md._repair_broken_cyrillic_pdf_text(text)
+
+    # Пробел перед «оссии» — разделитель слов И буква «Р» сразу.
+    assert "рекомендации ФСТЭК России" in repaired
+    # А после кавычки тот же пробел — только буква, без разделителя.
+    assert "«Разработка безопасного" in repaired
+
+
+def test_repair_keeps_real_punctuation_in_alt_font():
+    # Граница правила: «/» и «+» здесь настоящие, а не буквы «Я»/«Ы»,
+    # и подтверждения в документе у них нет.
+    text = _ALT_FONT_BODY + (
+        "Компилятор языков С/С++ описан в отдельном разделе.\n"
+        '>B@C<?яFBD я;O>B6 !/!++», 4 F4>:9 @9FB8<K9E><9\n'
+    )
+
+    repaired = convert_to_md._repair_broken_cyrillic_pdf_text(text)
+
+    assert "компилятор языков" in repaired
+    assert "также методические" in repaired
+    assert "СЯСЫЫ" not in repaired
+    assert "Ы" not in repaired.split("\n")[-2]
+
+
 def test_repair_leaves_unknown_all_ascii_runs_alone():
     # Даты и стандарты словарём не подтверждаются — остаются как есть.
     text = _ALT_FONT_BODY + (

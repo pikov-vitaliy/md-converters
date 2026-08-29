@@ -490,6 +490,28 @@ _ALT_HARD_SIGN = re.compile(r"ъ(?![еёюя])")
 # Доля корректной кириллицы, ниже которой строка считается набранной
 # вторым шрифтом: у обычного текста она около 0.8, у таких сносок — 0.
 _ALT_MAX_CYRILLIC_SHARE = 0.15
+# Во втором шрифте заглавные Р..Я лежат в печатных 0x20..0x2F: «Р» —
+# это пробел, «С» — «!», «Т» — «"». Слепо переводить их нельзя: погибли
+# бы настоящие пробелы, а «С/С++» превратилось бы в «СЯСЫЫ». Поэтому
+# заглавная возвращается только по улике из самого документа. С «ъ»,
+# «ы», «ь» русское слово не начинается — эти три из карты исключены,
+# заодно из набора уходят частые «*», «+» и «,».
+_ALT_UPPER_PUNCT = {
+    src: up
+    for src, up in _cp1251_shift(0xB0, 0x20, 0x2F).items()
+    if up not in "ЪЫЬ"
+}
+_ALT_UPPER_ABBR = {
+    src: up for src, up in _ALT_UPPER_PUNCT.items() if src != " "
+}
+_ALT_ABBR_TABLE = str.maketrans(_ALT_UPPER_ABBR)
+_ALT_CAP_WORD = re.compile(
+    "([" + re.escape("".join(_ALT_UPPER_PUNCT)) + r"])([а-яё]{2,})"
+)
+_ALT_CAP_ABBR = re.compile(
+    "[А-ЯЁ" + re.escape("".join(_ALT_UPPER_ABBR)) + "]{2,}"
+)
+_ANY_WORD = re.compile(r"[А-Яа-яЁё]{2,}")
 
 
 def _pdf_page_count(path: Path) -> int | None:
@@ -697,6 +719,50 @@ def _repair_main_font_line(line: str, vocab: set[str]) -> str:
     return repaired
 
 
+def _word_frequency(text: str) -> dict[str, int]:
+    """Сколько раз каждое слово встречается в документе."""
+    freq: dict[str, int] = {}
+    for word in _ANY_WORD.findall(text):
+        key = word.lower()
+        freq[key] = freq.get(key, 0) + 1
+    return freq
+
+
+def _restore_alt_capitals(line: str, freq: dict[str, int]) -> str:
+    """Возвращает заглавные второго шрифта, спрятанные в пунктуации.
+
+    Улика для слова — частота: «азработка» встречается в документе
+    реже, чем «Разработка», значит пробел перед ним был буквой, а не
+    разделителем. Для аббревиатуры улика — она же целиком где-то в
+    документе («Ф!"ЭК» -> «ФСТЭК»). Без улики символ остаётся
+    пунктуацией: правило не должно угадывать.
+    """
+
+    def word(match: re.Match[str]) -> str:
+        char, tail = match.group(1), match.group(2)
+        upper = _ALT_UPPER_PUNCT[char]
+        if freq.get((upper + tail).lower(), 0) <= freq.get(tail, 0):
+            return match.group()
+        # Пробел на месте буквы поглощает и разделитель слов, поэтому
+        # после буквы или цифры его возвращаем, а после кавычки — нет.
+        start = match.start()
+        glued = char == " " and start and line[start - 1].isalnum()
+        return (" " if glued else "") + upper + tail
+
+    def abbr(match: re.Match[str]) -> str:
+        token = match.group()
+        if not any(ch in _ALT_UPPER_ABBR for ch in token):
+            return token
+        if not any("А" <= ch <= "Я" or ch == "Ё" for ch in token):
+            return token
+        decoded = token.translate(_ALT_ABBR_TABLE)
+        if not freq.get(decoded.lower(), 0):
+            return token
+        return decoded
+
+    return _ALT_CAP_ABBR.sub(abbr, _ALT_CAP_WORD.sub(word, line))
+
+
 def _repair_pass(
     lines: list[str], alt_flags: list[bool], vocab: set[str]
 ) -> str:
@@ -755,6 +821,14 @@ def _repair_broken_cyrillic_pdf_text(text: str) -> str:
     grown = vocab | _clean_word_vocabulary(repaired)
     if grown != vocab:
         repaired = _repair_pass(lines, alt_flags, grown)
+    # Заглавные второго шрифта попадают в печатную пунктуацию, поэтому
+    # достаются отдельным шагом и только по уликам готового текста.
+    if any(alt_flags):
+        freq = _word_frequency(repaired)
+        repaired = "\n".join(
+            _restore_alt_capitals(line, freq) if is_alt else line
+            for line, is_alt in zip(repaired.split("\n"), alt_flags)
+        )
     return repaired
 
 
