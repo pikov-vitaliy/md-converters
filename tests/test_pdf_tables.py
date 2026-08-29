@@ -635,6 +635,29 @@ def test_clean_pdf_text_strips_page_numbers_without_footer():
     assert "Содержательный абзац номер 12" in out
 
 
+def test_clean_pdf_text_keeps_clustered_numbered_list():
+    """Сквозная нумерация идёт ЧЕРЕЗ ВЕСЬ документ, а нумерованный
+    перечень сидит в одном месте.
+
+    Без проверки охвата колонка «№» таблицы, разобранной как проза,
+    уезжала в мусор целиком: длины цепочки (40 номеров при пороге 30)
+    хватало, чтобы принять перечень за пагинацию, и на 60-страничном
+    документе молча исчезали все сорок номеров подряд."""
+    lines = []
+    for p in range(1, 61):
+        for k in range(30):
+            lines.append(f"Абзац {p}.{k} о требованиях к защите данных.")
+        if p == 11:
+            for n in range(1, 41):
+                lines.append(str(n))
+                lines.append(f"Требование номер {n} к средству защиты.")
+    out = c._clean_pdf_text("\n".join(lines), page_count=60)
+    body = "\n" + out + "\n"
+
+    missing = [n for n in range(1, 41) if f"\n{n}\n" not in body]
+    assert missing == []
+
+
 def test_clean_pdf_text_protects_table_rows():
     text = "FOOT\nFOOT\nFOOT\nFOOT\nFOOT\n| FOOT | x |\n| --- | --- |"
     out = c._clean_pdf_text(text, page_count=10)
