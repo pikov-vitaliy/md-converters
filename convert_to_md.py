@@ -1305,6 +1305,52 @@ def _clean_pdf_text(text: str, page_count: int) -> str:
     return "\n".join(out)
 
 
+_LIST_ITEM_RE = re.compile(
+    r"^\s*(?:[а-яёa-z]\)|\d+[.)]|[-–—•*])\s"
+)
+
+
+def _split_list_items(text: str) -> str:
+    """Ставит границу абзаца перед каждым пунктом перечисления."""
+    out: list[str] = []
+    for i, ln in enumerate(text.split("\n")):
+        if i and ln.strip() and _LIST_ITEM_RE.match(ln):
+            out.append("")
+        out.append(ln)
+    return "\n".join(out)
+
+
+def _merge_text_blocks(blocks: list) -> list:
+    """Склеивает соседние текстовые блоки в один абзац.
+
+    `_crop_text` отдаёт полосу между таблицами одним блоком (несколько
+    строк через `\\n` — это уже один абзац с мягкими переносами), но
+    проза из табличных регионов приходит ПОСТРОЧНО, блок на строку. А
+    `parts` склеиваются через `\\n\\n`, поэтому каждая такая строка
+    становилась отдельным абзацем Markdown, и связный текст рассыпался
+    на обрывки по 5 слов. Склейка приводит оба источника к одному
+    поведению; таблицы остаются границами абзацев.
+
+    Исключение — пункты перечислений («и) …», «1) …», «– …»). Мягкий
+    перенос Markdown схлопывается в пробел, поэтому склейка пунктов в
+    один абзац слила бы их в сплошную строку; такой пункт начинает
+    новый абзац. Перенос ВНУТРИ пункта остаётся мягким. Правило
+    применяется и к строкам внутри блока — иначе полоса `_crop_text`
+    вела бы себя иначе, чем построчные блоки."""
+    merged: list = []
+    for kind, content in blocks:
+        if kind == "text" and merged and merged[-1][0] == "text":
+            prev = merged[-1][1]
+            if prev and content:
+                merged[-1] = ("text", f"{prev}\n{content}")
+            elif content:
+                merged[-1] = ("text", content)
+            continue
+        merged.append((kind, content))
+    return [(kind, _split_list_items(content)) if kind == "text"
+            else (kind, content) for kind, content in merged]
+
+
 def _pdf_tables_result(path: Path):
     """PDF -> _PdfResult с Markdown-таблицами, либо None (pdfplumber нет,
     документ без таблиц, или ничего не извлеклось — тогда вызывающий код
@@ -1324,6 +1370,7 @@ def _pdf_tables_result(path: Path):
     if not any(kind == "table" for kind, _ in doc_blocks):
         return None  # таблиц нет — пусть отработает обычный путь
     doc_blocks = _join_continued_tables(doc_blocks)
+    doc_blocks = _merge_text_blocks(doc_blocks)
     parts = []
     table_count = 0
     for kind, content in doc_blocks:
