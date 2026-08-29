@@ -80,4 +80,4 @@ Excel, PowerPoint, CSV, JSON, XML, EPUB, Outlook `.msg`, Jupyter,
 - docs/gui-guide.md — руководство GUI; README.md — CLI-флаги.
 - `.claude/workplan.md` (локальный, в git не входит) — бэклог находок.
 
-Проект считается завершённым и рабочим. Текущая версия — 1.3.0.
+Проект считается завершённым и рабочим. Текущая версия — 1.4.0.
