@@ -5,6 +5,9 @@ convert_file. Большинство тестов — на списках стр
 чтобы покрыть саму pdfplumber-glue (find_tables/bbox/extract)."""
 from types import SimpleNamespace
 
+import random
+import re
+
 import pytest
 
 import convert_to_md as c
@@ -563,6 +566,42 @@ def test_merge_text_blocks_splits_list_items_inside_block():
         "к) утечки памяти,\n"
         "файловых дескрипторов;"
     )
+
+
+def test_merge_text_blocks_never_loses_content():
+    """Инвариант: склейка абзацев и разбивка пунктов только вставляют
+    переносы, но НИКОГДА не теряют текст и не переставляют таблицы.
+
+    Правка, которая ввела эти эвристики, была проверена на одном
+    документе, поэтому характер риска (молчаливая потеря содержимого)
+    закрывается не примером, а свойством на случайных входах."""
+    rnd = random.Random(7)
+    words = ["система", "защиты", "данных", "требование", "1.6»",
+             "тестирование", "модуль", "результат"]
+    markers = ["а)", "б)", "1)", "2.", "-", "–", "•", ""]
+    table = "| a | b |\n|---|---|\n| 1 | 2 |"
+
+    def squash(bs):
+        return re.sub(r"\s+", "", "".join(cnt for _, cnt in bs))
+
+    for _ in range(120):
+        blocks = []
+        for _ in range(rnd.randint(1, 10)):
+            if rnd.random() < 0.25:
+                blocks.append(("table", table))
+                continue
+            rows = []
+            for _ in range(rnd.randint(1, 4)):
+                body = " ".join(rnd.choice(words)
+                                for _ in range(rnd.randint(1, 6)))
+                rows.append((rnd.choice(markers) + " " + body).strip())
+            blocks.append(("text", "\n".join(rows)))
+
+        out = c._merge_text_blocks(blocks)
+
+        assert squash(out) == squash(blocks)
+        assert ([cnt for k, cnt in out if k == "table"]
+                == [cnt for k, cnt in blocks if k == "table"])
 
 
 def test_merge_text_blocks_keeps_list_items_separate():
