@@ -697,6 +697,18 @@ def _repair_main_font_line(line: str, vocab: set[str]) -> str:
     return repaired
 
 
+def _repair_pass(
+    lines: list[str], alt_flags: list[bool], vocab: set[str]
+) -> str:
+    """Один полный проход ремонта по строкам исходного текста."""
+    return "\n".join(
+        _repair_alt_font_line(line)
+        if is_alt
+        else _repair_main_font_line(line, vocab)
+        for line, is_alt in zip(lines, alt_flags)
+    )
+
+
 def _repair_broken_cyrillic_pdf_text(text: str) -> str:
     """Восстанавливает систематически сломанную карту кириллицы в PDF.
 
@@ -706,7 +718,9 @@ def _repair_broken_cyrillic_pdf_text(text: str) -> str:
     доле таких символов, поэтому версии, ГОСТы и обычный латинский текст
     не затрагиваются. Строки, набранные вторым шрифтом (сноски со
     сдвигом на четыре буквы), переводятся своей картой и в основной
-    ремонт не попадают.
+    ремонт не попадают. Проходов два: восстановленные первым проходом
+    слова расширяют словарь-арбитр, и прогоны без уцелевшей кириллицы
+    получают подтверждение, которого в сыром тексте не было.
     """
     spans = 0
     bad_chars = 0
@@ -729,12 +743,16 @@ def _repair_broken_cyrillic_pdf_text(text: str) -> str:
     lines = text.split("\n")
     alt_flags = _alt_font_line_flags(lines)
     vocab = _clean_word_vocabulary(text)
-    return "\n".join(
-        _repair_alt_font_line(line)
-        if is_alt
-        else _repair_main_font_line(line, vocab)
-        for line, is_alt in zip(lines, alt_flags)
-    )
+    repaired = _repair_pass(lines, alt_flags, vocab)
+    # Второй проход. Слова, восстановленные первым проходом, — тоже
+    # улики: прогон без единой уцелевшей буквы (`<>4C;59`) остаётся
+    # без подтверждения, пока то же слово где-то в документе не
+    # починится по уцелевшей букве (`м>4C;59`). Перевод делается
+    # заново из ОРИГИНАЛА, поэтому карта не применяется дважды.
+    grown = vocab | _clean_word_vocabulary(repaired)
+    if grown != vocab:
+        repaired = _repair_pass(lines, alt_flags, grown)
+    return repaired
 
 
 def _pdf_text_layer_diagnose(

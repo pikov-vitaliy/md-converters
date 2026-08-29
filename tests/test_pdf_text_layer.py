@@ -182,6 +182,22 @@ def test_repair_decodes_all_ascii_word_known_in_document():
     assert "версии 1.2" in repaired
 
 
+def test_repair_uses_words_recovered_in_first_pass():
+    # Слово встречается в документе только сломанным: один раз с
+    # уцелевшей буквой (чинится сразу), другой — сплошным ASCII.
+    # Второй проход достраивает словарь результатами первого и
+    # добирает прогон, на который в сыром тексте улик не было.
+    text = _ALT_FONT_BODY + (
+        "Перечень м>4C;59 приведен в таблице\n"
+        "Количество <>4C;59 в составе ОО\n"
+    )
+
+    repaired = convert_to_md._repair_broken_cyrillic_pdf_text(text)
+
+    assert "Перечень модулей приведен" in repaired
+    assert "Количество модулей в составе" in repaired
+
+
 def test_repair_leaves_unknown_all_ascii_runs_alone():
     # Даты и стандарты словарём не подтверждаются — остаются как есть.
     text = _ALT_FONT_BODY + (
