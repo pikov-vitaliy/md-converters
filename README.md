@@ -1,41 +1,35 @@
-# Конвертеры документов → Markdown
+# md-converters – документы в Markdown
 
+[![npm](https://img.shields.io/npm/v/md-converters.svg)](https://www.npmjs.com/package/md-converters)
 [![CI](https://github.com/pikov-vitaliy/md-converters/actions/workflows/ci.yml/badge.svg)](https://github.com/pikov-vitaliy/md-converters/actions/workflows/ci.yml)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 
-Версия: **2.0.0**. Нужен Python 3.14 (при установке через npm он ставится сам).
+Локальный конвертер документов в Markdown: PDF, Word, Excel, PowerPoint,
+HTML и веб-страницы, CSV, JSON, XML, EPUB, письма Outlook, Jupyter и архивы
+с ними. Конвертация идёт на вашем компьютере. Markdown удобно отдавать
+языковым моделям, складывать в базу знаний (Obsidian, LightRAG и другие
+RAG-системы) и хранить в git.
 
-Универсальный инструмент перевода документов в Markdown. Одна команда `tomd`
-понимает формат по расширению и конвертирует **что угодно**:
+Можно перетащить файлы в окно браузера, а можно работать командой в
+терминале.
 
-| Что | Форматы |
-|-----|---------|
-| Документы | PDF, **Word `.docx`**, **Excel `.xlsx`**, **PowerPoint `.pptx`** |
-| Веб/данные | HTML, URL веб-страницы, CSV, JSON, XML, RSS, EPUB |
-| Прочее | Outlook `.msg`, Jupyter `.ipynb`, изображения (EXIF/OCR) |
+![md-converters: окно в светлой теме](docs/screenshots/gui-light.png)
 
-Под капотом — [MarkItDown](https://github.com/microsoft/markitdown) от Microsoft.
-Результат по умолчанию кладётся **рядом с исходником**: то же имя, расширение
-`.md` (или в отдельную папку — флаг `-o`). При совпадении имён результата
-(например, `report.docx` и `report.pdf` рядом) добавляется суффикс `(2)`.
+## Установка за две команды
 
-Команды-синонимы для привычки: `pdf2md` (только PDF) и `html2md` (только HTML)
-— это тот же `tomd` с фильтром формата.
-
----
-
-## Установка через npm (проще всего)
-
-Нужен только [Node.js](https://nodejs.org/) 18 или новее. Python ставить
-не нужно: при первом запуске пакет сам подготовит Python 3.14 и библиотеки.
+Нужен только [Node.js](https://nodejs.org/) 18 или новее. Python ставить не
+нужно: при первом запуске пакет сам подготовит Python 3.14 и библиотеки.
 
 ```powershell
 npm install -g md-converters
 md-converters
 ```
 
-`md-converters` без аргументов открывает Web-GUI в браузере: перетащите
-файлы в окно и скачайте результат. С файлами работает как команда `tomd`:
+`md-converters` без аргументов открывает окно в браузере. Перетащите
+документы, посмотрите результат и скачайте `.md`. Без установки:
+`npx md-converters`.
+
+С файлами программа работает как команда `tomd`:
 
 ```powershell
 md-converters отчёт.pdf
@@ -43,19 +37,69 @@ md-converters документы\*.docx -o результат
 md-converters --help
 ```
 
-Без установки: `npx md-converters`.
+Результат показывается сразу, с таблицами и разметкой:
+
+![Превью результата конвертации](docs/screenshots/gui-result.png)
+
+Тёмная тема включается кнопкой ☾ в правом верхнем углу. По умолчанию
+вечером и ночью (с 20:00 до 07:00) окно тёмное, днём – светлое.
+
+![md-converters: окно в тёмной теме](docs/screenshots/gui-dark.png)
+
+## Что умеет
+
+| Что | Форматы |
+|-----|---------|
+| Документы | PDF, Word `.docx`, Excel `.xlsx`, PowerPoint `.pptx` |
+| Веб и данные | HTML, веб-страница по ссылке, CSV, JSON, XML, RSS, EPUB |
+| Прочее | Outlook `.msg`, Jupyter `.ipynb`, изображения (EXIF) |
+| Архивы | `.zip`, `.7z`, `.tar` – на выходе `.zip` со всеми `.md` |
+
+- **PDF.**
+  - Таблицы извлекаются по линиям разметки страницы.
+  - Колонтитулы и номера страниц убираются.
+  - Сломанная кириллица восстанавливается: и испорченная таблица шрифта
+    (по контурам букв встроенного шрифта, если такой шрифт установлен в
+    системе), и типовые сдвиги кодировки.
+  - Для сканов без текстового слоя программа говорит, что нужно
+    распознавание (OCR).
+- **Word, Excel, PowerPoint** – через
+  [MarkItDown](https://github.com/microsoft/markitdown) от Microsoft;
+  текстовые ячейки Excel («00123», «NA») остаются текстом.
+- **Безопасность.** Ссылки на внутренние адреса сети по умолчанию не
+  загружаются; опасный HTML в результате обезвреживается, примеры кода
+  сохраняются.
+- **Метаданные.** В начале каждого `.md` указаны источник, дата и
+  инструмент; при повторном запуске уже готовые файлы пропускаются.
+
+## Автор
+
+Виталий Пиков (Vitaly Pikov) – [pikov.expert](https://pikov.expert).
+Исходники – [github.com/pikov-vitaliy/md-converters](https://github.com/pikov-vitaliy/md-converters).
+
+© 2026 Vitaly Pikov. Released under the [MIT License](LICENSE).
+
+---
+
+## Подробно: установка через npm
 
 Первый запуск занимает несколько минут: пакет готовит своё окружение
-(около 400 МБ) в `%LOCALAPPDATA%\md-converters` (Linux и macOS:
+(около 300 МБ) в `%LOCALAPPDATA%\md-converters` (Linux и macOS:
 `~/.local/share/md-converters`). Если в системе есть
 [uv](https://docs.astral.sh/uv/) или Python 3.14, используются они; иначе
 пакет ставит uv официальным установщиком в ту же папку, PATH не меняет,
 а uv скачивает Python 3.14. Библиотеки ставятся строго по версиям и хешам
 из `uv.lock`. В корпоративной сети с прокси задайте `HTTPS_PROXY`.
 
-- `md-converters --where` — где лежит окружение;
-- `md-converters --reinstall` — пересобрать окружение;
+- `md-converters --where` – где лежит окружение;
+- `md-converters --reinstall` – пересобрать окружение;
 - удалить всё: `npm uninstall -g md-converters` и папку из `--where`.
+
+Команды для установки без npm (`tomd`, `pdf2md`, `html2md`, пункты меню
+Проводника) – ниже. `pdf2md` и `html2md` – тот же `tomd` с фильтром формата.
+Результат по умолчанию кладётся рядом с исходником: то же имя, расширение
+`.md` (или в отдельную папку – флаг `-o`). При совпадении имён
+(`report.docx` и `report.pdf` рядом) добавляется суффикс `(2)`.
 
 ---
 
@@ -244,7 +288,7 @@ source_name: "sample-report.html"
 source_path: "examples\\sample-report.html"
 source_id: "path:..."
 converted: 2026-06-10
-generator: tomd 2.0.0 (MarkItDown)
+generator: tomd 2.0.1 (MarkItDown)
 ---
 
 # Отчёт об уязвимостях — demo-project
@@ -343,7 +387,7 @@ source_name: "имя-исходного-файла.docx"
 source_path: "путь\\к\\имя-исходного-файла.docx"
 source_id: "path:короткий-хэш-источника"
 converted: 2026-06-10
-generator: tomd 2.0.0 (MarkItDown)
+generator: tomd 2.0.1 (MarkItDown)
 ---
 ```
 

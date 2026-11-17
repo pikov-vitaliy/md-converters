@@ -1,6 +1,6 @@
 {
   "name": "md-converters",
-  "version": "2.0.0",
+  "version": "2.0.1",
   "description": "Конвертация документов (PDF, Word, Excel, PowerPoint, HTML и др.) в Markdown: Web-GUI и команда md-converters",
   "bin": {
     "md-converters": "npm/cli.js"
@@ -12,6 +12,7 @@
     "npm/cli.js",
     "npm/requirements.txt",
     "npm/wheel/*.whl",
+    "docs/screenshots/*.png",
     "LICENSE"
   ],
   "engines": {

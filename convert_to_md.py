@@ -200,7 +200,7 @@ _HTML_HTTP_EQUIV_CHARSET = re.compile(
 _CYRILLIC_ENCODINGS = ("cp1251", "koi8-r", "cp866", "mac_cyrillic")
 
 _converter = None
-__version__ = "2.0.0"
+__version__ = "2.0.1"
 
 
 def _md() -> MarkItDown:
