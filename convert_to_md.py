@@ -1016,6 +1016,31 @@ def _table_to_gfm(rows: list) -> str:
     return "\n".join(out)
 
 
+# Литеральный текст, который Markdown прочёл бы как HTML: `<`/`>` и `&`
+# перед именем сущности (написанное в документе «&lt;» должно остаться
+# «&lt;», а не стать «<»). Просмотрщик покажет исходные символы.
+_ENTITY_LIKE = re.compile(r"&(?=#?[0-9A-Za-z]+;)")
+
+
+def _escape_html_text(value: str) -> str:
+    value = _ENTITY_LIKE.sub("&amp;", value)
+    return value.replace("<", "&lt;").replace(">", "&gt;")
+
+
+def _escape_table_rows(text: str) -> str:
+    """Экранирует HTML-символы в строках GFM-таблиц.
+
+    Ячейка PDF — литеральный текст: «<script>x</script>» санитизация
+    вырезала целиком, а «List<T>» просмотрщик рендерил как «List».
+    Вызывается ПОСЛЕ ремонта кириллицы: в сломанном шрифте «<» и «>» —
+    буквы «м» и «о», и раннее экранирование испортило бы их ремонт.
+    """
+    return "\n".join(
+        _escape_html_text(ln) if _GFM_ROW_RE.match(ln) else ln
+        for ln in text.split("\n")
+    )
+
+
 def _crop_text(page, top0: float, top1: float) -> str:
     """Текст полосы страницы [top0; top1) — то, что вне таблицы. Так
     содержимое таблицы не дублируется прозой."""
@@ -2275,6 +2300,9 @@ def _convert_file_to_target(path: Path, target: Path, opts: dict,
             kept = _strip_pdf_furniture(lines, page_count)
             if kept != lines:
                 result = _TextResult(result, "\n".join(kept))
+        escaped = _escape_table_rows(result.text_content)
+        if escaped != result.text_content:
+            result = _TextResult(result, escaped)
 
     # PDF: «Сохранить картинки» извлекает встроенные растровые
     # изображения из PDF и дописывает их (base64) в .md по страницам.
