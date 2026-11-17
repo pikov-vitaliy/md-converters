@@ -1390,3 +1390,80 @@ def test_upload_limit_stops_reading_body_early(monkeypatch, second_ctype):
     # шапка части + 4 куска до лимита + кусок, на котором он сработал
     assert state["read"] <= 6, f"прочитано {state['read']} из {len(chunks)}"
     assert saved == []
+
+
+def _asgi_post_chunks(boundary, body, size):
+    """POST /api/convert/files телом по `size` байт (как под uvicorn);
+    после тела receive ждёт конца ответа. → (status, текст ответа)."""
+    import asyncio
+
+    chunks = [body[i:i + size] for i in range(0, len(body), size)]
+    sent = []
+
+    async def scenario():
+        finished = asyncio.Event()
+        state = {"i": 0}
+
+        async def receive():
+            if state["i"] < len(chunks):
+                state["i"] += 1
+                return {"type": "http.request",
+                        "body": chunks[state["i"] - 1],
+                        "more_body": state["i"] < len(chunks)}
+            await finished.wait()
+            return {"type": "http.disconnect"}
+
+        async def send(message):
+            sent.append(message)
+            if message.get("type") == "http.response.body" \
+                    and not message.get("more_body"):
+                finished.set()
+
+        await gui_server.app(
+            _asgi_scope("/api/convert/files",
+                        f"multipart/form-data; boundary={boundary}"),
+            receive, send,
+        )
+
+    asyncio.run(scenario())
+    start = next(m for m in sent if m["type"] == "http.response.start")
+    text = b"".join(m.get("body", b"") for m in sent
+                    if m["type"] == "http.response.body").decode("utf-8")
+    return start["status"], text
+
+
+def _multipart_csv(boundary, data):
+    return (
+        f"--{boundary}\r\n"
+        'Content-Disposition: form-data; name="files"; '
+        'filename="x.csv"\r\n\r\n'
+    ).encode() + data + f"\r\n--{boundary}--\r\n".encode()
+
+
+def test_upload_limit_passes_chunked_legal_upload():
+    """c3: счётчик не мешает обычной загрузке, пришедшей кусками.
+
+    Под uvicorn тело всегда приходит частями; здесь куски по 7 байт,
+    так что и boundary, и шапка части разорваны между сообщениями.
+    """
+    boundary = "SPLITBOUNDARY"
+    status, text = _asgi_post_chunks(
+        boundary, _multipart_csv(boundary, b"col\nCHUNKOK\n"), 7
+    )
+    assert status == 200
+    done = _done_events(text)[0]
+    assert done["status"] == "ok"
+    assert "CHUNKOK" in done["preview"]
+
+
+def test_upload_limit_long_boundary_is_400_not_crash():
+    """c3: boundary длиннее предела python-multipart (256) — 400.
+
+    Счётчик создавал разборщик вне try, и его FormParserError вылетал
+    из приложения (500); раньше такой запрос отвергал Starlette (400).
+    """
+    boundary = "B" * 300
+    status, _ = _asgi_post_chunks(
+        boundary, _multipart_csv(boundary, b"a,b\n1,2\n"), 64
+    )
+    assert status == 400

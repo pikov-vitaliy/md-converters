@@ -47,11 +47,13 @@ from fastapi.staticfiles import StaticFiles
 # python-multipart — зависимость экстры [gui]; модуль python_multipart
 # появился в 0.0.13, нижняя граница в pyproject — 0.0.12.
 try:
+    from python_multipart.exceptions import FormParserError
     from python_multipart.multipart import (
         MultipartParser,
         parse_options_header,
     )
 except ImportError:  # pragma: no cover — python-multipart 0.0.12
+    from multipart.exceptions import FormParserError
     from multipart.multipart import MultipartParser, parse_options_header
 
 import convert_to_md as core
@@ -354,10 +356,15 @@ class _UploadLimit:
                     "загрузка прервана"
                 ))
 
-        parser = MultipartParser(boundary, {
-            "on_part_begin": on_part_begin,
-            "on_part_data": on_part_data,
-        })
+        try:
+            parser = MultipartParser(boundary, {
+                "on_part_begin": on_part_begin,
+                "on_part_data": on_part_data,
+            })
+        except FormParserError:
+            # boundary длиннее предела: такое тело отвергнет сам
+            # Starlette (400), а исключение отсюда стало бы 500
+            return await self.app(scope, receive, send)
 
         async def limited_receive():
             message = await receive()
