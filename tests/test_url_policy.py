@@ -101,6 +101,12 @@ def test_parse_rejects_invalid_url_policy_numbers():
     assert parsed["errors"]
 
 
+def _fake_request(method, url):
+    """requests.Request для фейковой сессии: prepare_request отдаёт его
+    как есть, у него есть .url — как у PreparedRequest."""
+    return SimpleNamespace(method=method, url=url)
+
+
 def test_download_url_follows_checked_redirect(monkeypatch):
     class Response:
         def __init__(self, status_code, headers, url, body=b""):
@@ -126,7 +132,11 @@ def test_download_url_follows_checked_redirect(monkeypatch):
             self.headers = {}
             self.urls = []
 
-        def get(self, url, **kwargs):
+        def prepare_request(self, request):
+            return request
+
+        def send(self, prepared, **kwargs):
+            url = prepared.url
             self.urls.append((url, kwargs))
             if len(self.urls) == 1:
                 return Response(
@@ -148,7 +158,7 @@ def test_download_url_follows_checked_redirect(monkeypatch):
     monkeypatch.setitem(
         sys.modules,
         "requests",
-        SimpleNamespace(Session=lambda: session),
+        SimpleNamespace(Session=lambda: session, Request=_fake_request),
     )
     monkeypatch.setattr(
         convert_to_md,
@@ -194,10 +204,14 @@ def test_download_url_rejects_redirect_to_private_ip(monkeypatch):
             self.headers = {}
             self.calls = 0
 
-        def get(self, url, **kwargs):
+        def prepare_request(self, request):
+            return request
+
+        def send(self, prepared, **kwargs):
             self.calls += 1
             return Response(
-                302, {"location": "http://127.0.0.1/secret"}, url
+                302, {"location": "http://127.0.0.1/secret"},
+                prepared.url,
             )
 
         def close(self):
@@ -207,7 +221,7 @@ def test_download_url_rejects_redirect_to_private_ip(monkeypatch):
     monkeypatch.setitem(
         sys.modules,
         "requests",
-        SimpleNamespace(Session=lambda: session),
+        SimpleNamespace(Session=lambda: session, Request=_fake_request),
     )
     # example.com — публичный; литеральный 127.0.0.1 резолвится в себя.
     monkeypatch.setattr(
@@ -224,3 +238,53 @@ def test_download_url_rejects_redirect_to_private_ip(monkeypatch):
             allow_private=False,
         )
     assert session.calls == 1  # дошли только до первого hop, дальше — отказ
+
+
+def test_download_url_backslash_userinfo_does_not_reach_localhost():
+    """b1: `\\@` не обходит SSRF-проверку.
+
+    Для urlparse в http://127.0.0.1:PORT\\@93.184.216.34/ хост —
+    публичный 93.184.216.34, а requests соединяется с 127.0.0.1:PORT.
+    Отказ ПОСЛЕ ответа не спасает: запрос к локальному сервису уже
+    ушёл. Локальный сервер считает обращения — их должно быть ноль.
+    """
+    import threading
+    from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+
+    hits = []
+
+    class Handler(BaseHTTPRequestHandler):
+        def do_GET(self):
+            hits.append(self.path)
+            self.send_response(200)
+            self.send_header("Content-Length", "2")
+            self.end_headers()
+            self.wfile.write(b"ok")
+
+        def log_message(self, *args):
+            pass
+
+    server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    try:
+        port = server.server_address[1]
+        # контроль: настоящий requests через prepare/send доходит
+        data, _, _ = convert_to_md._download_url(
+            f"http://127.0.0.1:{port}/ok",
+            timeout=3,
+            max_bytes=100,
+            allow_private=True,
+        )
+        assert data == b"ok"
+        with pytest.raises(ValueError, match="non-public address"):
+            convert_to_md._download_url(
+                f"http://127.0.0.1:{port}\\@93.184.216.34/check",
+                timeout=3,
+                max_bytes=100,
+                allow_private=False,
+            )
+    finally:
+        server.shutdown()
+        server.server_close()
+    assert hits == ["/ok"]  # до /%5C@93.184.216.34/check не дошло
