@@ -503,6 +503,11 @@ def front_matter(source: str, title: str | None, tool: str,
 # эмпирически: типичный «пустой» PDF (скан без OCR) даёт 0-5 символов
 # на страницу (пробелы и NUL); нормальный текстовый PDF — сотни.
 _PDF_MIN_CHARS_PER_PAGE = 20
+# Граница страниц в тексте pypdfium2: колонтитулы ищутся по страницам
+# (`_clean_pdf_text`). Перенос строки перед `\f` сохраняет разбиение
+# на строки ровно таким, как при склейке через `\n`: ремонт кириллицы
+# построчный, и `\f` внутри строки менял бы его решения.
+_PDF_PAGE_BREAK = "\n\f"
 _BROKEN_CYRILLIC_ASCII = frozenset(
     "0123456789:;<=>?@ABCDEFGHIJKLMNO"
 )
@@ -613,7 +618,7 @@ def _pdf_text_layer_probe(path: Path) -> tuple[str, int] | None:
                         _close_pdfium(textpage)
                 finally:
                     _close_pdfium(page)
-            return "\n".join(parts), page_count
+            return _PDF_PAGE_BREAK.join(parts), page_count
         finally:
             _close_pdfium(doc)
     except Exception:
@@ -1133,6 +1138,23 @@ def _ranges_overlap(a0: float, a1: float, b0: float, b1: float) -> bool:
     return a0 < b1 and b0 < a1
 
 
+def _outside_tables(page, boxes: list):
+    """Страница без символов принятых таблиц.
+
+    Символ относится к таблице по своей середине — тем же правилом
+    pdfplumber раскладывает символы по ячейкам. Поэтому ни один символ
+    не попадает и в таблицу, и в текст, а текст сбоку от таблицы (на её
+    высоте, слева или справа) остаётся в полосах `_crop_text`."""
+    def keep(obj) -> bool:
+        if obj.get("object_type") != "char":
+            return True
+        cx = (obj["x0"] + obj["x1"]) / 2
+        cy = (obj["top"] + obj["bottom"]) / 2
+        return not any(b[0] <= cx < b[2] and b[1] <= cy < b[3]
+                       for b in boxes)
+    return page.filter(keep)
+
+
 def _region_to_blocks(rows: list) -> list:
     """Сегментирует строки региона-таблицы в блоки ("table", rows) /
     ("text", str): псевдо-таблицы из прозы демотятся в текст."""
@@ -1180,15 +1202,14 @@ def _page_blocks(page) -> list:
         return [("text", text)] if text else []
 
     regions.sort(key=lambda r: r[0][1])
-    blocks: list = []
     cursor = 0.0
     processed: list = []  # bbox уже выведенных регионов
+    emitted: list = []
     for bbox, rows in regions:
         x0, top, x1, bottom = bbox[0], bbox[1], bbox[2], bbox[3]
         if top < cursor - 1:  # перекрытие по вертикали с предыдущим
             # Вложение/дубль (пересечение и по X) — пропускаем; таблицы
-            # рядом по горизонтали (side-by-side) — выводим без band-текста,
-            # чтобы не потерять контент (M-PDF-02).
+            # рядом по горизонтали (side-by-side) выводим (M-PDF-02).
             nested = any(
                 _ranges_overlap(top, bottom, b[1], b[3])
                 and _ranges_overlap(x0, x1, b[0], b[2])
@@ -1196,16 +1217,26 @@ def _page_blocks(page) -> list:
             )
             if nested:
                 continue
-            blocks.extend(_region_to_blocks(rows))
-            processed.append(bbox)
-            continue
-        above = _crop_text(page, cursor, top)
+        else:
+            cursor = max(cursor, bottom)
+        processed.append(bbox)
+        emitted.append((bbox, rows))
+
+    # Полосы текста режутся со страницы БЕЗ символов таблиц, и каждая
+    # идёт от верха предыдущей таблицы, а не от её низа: полоса на всю
+    # ширину страницы между таблицами теряла текст сбоку от таблицы
+    # (подпись справа, пометка слева), а символы самих таблиц в неё
+    # теперь не попадают и не дублируются.
+    outside = _outside_tables(page, processed)
+    blocks: list = []
+    cursor = 0.0
+    for bbox, rows in emitted:
+        above = _crop_text(outside, cursor, bbox[1])
         if above:
             blocks.append(("text", above))
         blocks.extend(_region_to_blocks(rows))
-        processed.append(bbox)
-        cursor = max(cursor, bottom)
-    below = _crop_text(page, cursor, page.height)
+        cursor = max(cursor, bbox[1])
+    below = _crop_text(outside, cursor, page.height)
     if below:
         blocks.append(("text", below))
     return blocks
@@ -1238,10 +1269,10 @@ def _join_continued_tables(blocks: list) -> list:
 _PDF_PAGE_NUM_RE = re.compile(r"^\s*\d{1,4}\s*$")
 _PDF_ATX_RE = re.compile(r"^\s*#{1,6}(?:\s|$)")
 
-# Какую долю строк документа должна покрывать цепочка номеров страниц,
-# чтобы считаться сквозной нумерацией, а не локальным перечнем.
-# Замер на реальном документе: настоящая пагинация покрывает 99%.
-_PAGE_NUM_SPAN = 0.6
+# Сколько первых и последних строк страницы составляют её верхнюю и
+# нижнюю зону: там стоят колонтитулы и номера страниц. Три строки —
+# запас на колонтитул из нескольких строк (название, организация).
+_PDF_EDGE_LINES = 3
 
 # --- распознавание строк кода/команд/конфигов для обёртки в ``` ---
 _FENCE = "```"
@@ -1370,98 +1401,244 @@ def _fence_code_blocks(text: str) -> str:
     return "\n".join(out)
 
 
-def _paginated_number_indices(lines: list, page_count: int) -> set:
-    """Индексы строк-номеров страниц, опознанных по СОГЛАСОВАННОЙ
-    сквозной нумерации.
+def _furniture_marks(pages: list, page_count: int) -> list:
+    """Для каждой страницы — индексы строк-колонтитулов и номеров.
 
-    Одиночное число неотличимо от легитимного (ссылка на пункт,
-    результат измерения), поэтому режется только длинная цепочка:
-    значения строго возрастают по ходу документа, не превышают числа
-    страниц, и таких строк набирается не меньше половины объёма.
-    Число, выпадающее из цепочки, остаётся — именно так уцелевают
-    ссылки вида «3» посреди текста.
+    `pages` — строки каждой страницы по порядку чтения; None — не
+    строка текста (таблица): место в зоне занимает, но не режется.
 
-    Нумерация, не совпадающая с номерами страниц (выдержка из
-    документа, где печатные номера начинаются с 40 на шести
-    страницах), под правило НЕ подпадает: там работает старый путь по
-    найденному колонтитулу.
+    Колонтитул — короткая строка в верхней или нижней зоне страницы
+    (`_PDF_EDGE_LINES` строк), повторённая в той же зоне на РАЗНЫХ
+    страницах. Прежнее правило считало повторы по всему тексту, и
+    частые строки содержания («ANSWER: B» ×15 в тесте, «Практическое
+    занятие:» ×10 в тематическом плане) уходили как колонтитул.
+    Режется только вхождение в зоне: та же строка в теле остаётся.
 
-    Одной длины цепочки НЕДОСТАТОЧНО: нумерованный перечень (колонка
-    «№» таблицы, разобранной как проза) тоже даёт длинную возрастающую
-    последовательность и раньше вырезался целиком. Отличает их охват —
-    сквозная нумерация идёт ЧЕРЕЗ ВЕСЬ документ, перечень сидит в
-    одном месте. На реальном 60-страничном документе цепочка номеров
-    страниц покрывает 99% строк, поэтому порог взят с большим запасом.
-    """
-    chain: list[int] = []
-    last = 0
-    for i, ln in enumerate(lines):
-        if ln.lstrip().startswith("|"):
-            continue
-        if not _PDF_PAGE_NUM_RE.match(ln):
-            continue
-        val = int(ln.strip())
-        if last < val <= page_count:
-            chain.append(i)
-            last = val
-    if len(chain) < max(5, page_count // 2):
-        return set()
-    if chain[-1] - chain[0] < len(lines) * _PAGE_NUM_SPAN:
-        return set()
-    return set(chain)
+    Номер страницы — голое число в той же зоне, идущее в ногу со
+    страницами: «значение минус индекс страницы» одинаково на многих
+    страницах. Прежде найденный колонтитул разрешал срезать ЛЮБОЕ
+    отдельное число — пропадали номера строк таблицы и год на титуле.
+    Постоянный сдвиг допускает нумерацию не с первой страницы (у ГОСТ
+    арабские номера начинаются с пятой) и выдержку с номерами от 40.
+    Перечень 1..N в теле страницы в зону не попадает, а на стыке
+    страниц его конец внизу и начало вверху — в разных зонах (так и
+    пункт «1» в начале первой страницы не путается с номерами внизу).
+    На странице режется только крайнее число группы: строка таблицы
+    «5» прямо над номером «5» остаётся.
 
-
-def _strip_pdf_furniture(lines: list, page_count: int) -> list:
-    """Убирает сквозные колонтитулы (повторяющиеся короткие строки — номер
-    документа, версия) и страничные номера, текущие в тело на стыках стр.
-
-    Порог повторов — max(5, page_count // 2), то есть НЕ МЕНЬШЕ пяти
-    при любом объёме. Поэтому на 3-4-страничных PDF колонтитул, даже
-    стоящий на каждой странице, остаётся: на коротких документах легко
-    срезать легитимный повтор, и осторожность важнее полноты."""
-    counts: dict[str, int] = {}
-    for ln in lines:
-        s = ln.strip()
-        if s and not ln.lstrip().startswith("|"):
-            counts[s] = counts.get(s, 0) + 1
+    Порог для обоих — max(5, page_count // 2) страниц, то есть НЕ
+    МЕНЬШЕ пяти: на 3-4-страничных PDF колонтитул и номера остаются —
+    на коротком документе легко срезать легитимный повтор, и
+    осторожность важнее полноты."""
     threshold = max(5, page_count // 2)
-    # Строка из одной пунктуации («}» из примеров кода) — не колонтитул:
-    # настоящий колонтитул (номер документа, версия) всегда содержит
-    # буквы или цифры. Без этой проверки повторяющиеся скобки кода
-    # вырезались бы молча (Р 71207-2024, 5 строк «}»).
-    repeated = {s for s, n in counts.items()
-                if n >= threshold and len(s) <= 60
-                and re.search(r"\w", s)}
-    # Страничные номера чистим только если колонтитул реально найден
-    # (иначе можно срезать легитимное одиночное число).
-    drop_page_numbers = bool(repeated)
-    paginated = _paginated_number_indices(lines, page_count)
-    kept: list[str] = []
-    for i, ln in enumerate(lines):
-        s = ln.strip()
-        if not s or ln.lstrip().startswith("|"):
-            kept.append(ln)
+    groups: dict[tuple, list] = {}
+    for p, lines in enumerate(pages):
+        filled = [i for i, ln in enumerate(lines)
+                  if ln is None or ln.strip()]
+        bottom = len(filled) - _PDF_EDGE_LINES
+        for pos, i in enumerate(filled):
+            ln = lines[i]
+            if ln is None or ln.lstrip().startswith("|"):
+                continue
+            if _PDF_EDGE_LINES <= pos < bottom:
+                continue  # середина страницы — не колонтитул
+            s = ln.strip()
+            # На короткой странице зоны перекрываются; строка относится
+            # к ближнему краю, иначе номер внизу считался бы и верхним.
+            zone = "top" if pos <= len(filled) - 1 - pos else "bottom"
+            if _PDF_PAGE_NUM_RE.match(s):
+                groups.setdefault((zone, "page", int(s) - p),
+                                  []).append((p, i))
+            # Строка из одной пунктуации («}» из примеров кода) — не
+            # колонтитул: настоящий колонтитул (номер документа,
+            # версия) всегда содержит буквы или цифры (Р 71207-2024).
+            if len(s) <= 60 and re.search(r"\w", s):
+                groups.setdefault((zone, "line", s), []).append((p, i))
+    marks: list = [set() for _ in pages]
+    for (zone, kind, _), found in groups.items():
+        if len({p for p, _ in found}) < threshold:
             continue
-        if s in repeated:
+        if kind == "page":
+            # Крайнее число зоны: сверху первое, снизу последнее.
+            found = list({p: i for p, i in (
+                reversed(found) if zone == "top" else found)}.items())
+        for p, i in found:
+            marks[p].add(i)
+    return marks
+
+
+def _strip_pdf_furniture(pages: list, page_count: int) -> list:
+    """Страницы (списки строк) без колонтитулов и номеров страниц."""
+    marks = _furniture_marks(pages, page_count)
+    return [[ln for i, ln in enumerate(lines) if i not in drop]
+            for lines, drop in zip(pages, marks)]
+
+
+def _strip_block_furniture(pages: list, page_count: int) -> list:
+    """Колонтитулы на pdfplumber-пути: чистка идёт по блокам каждой
+    страницы ДО склейки абзацев и таблиц, пока границы страниц ещё
+    известны. Возвращает плоский список блоков документа.
+
+    Опустевший текстовый блок остаётся пустым, а не исчезает: так
+    переносная таблица склеивается (или нет) так же, как до чистки."""
+    page_lines: list = []
+    page_refs: list = []
+    for blocks in pages:
+        lines: list = []
+        refs: list = []
+        for b, (kind, content) in enumerate(blocks):
+            if kind == "table":
+                lines.append(None)
+                refs.append((b, -1))
+                continue
+            for j, ln in enumerate(content.split("\n")):
+                lines.append(ln)
+                refs.append((b, j))
+        page_lines.append(lines)
+        page_refs.append(refs)
+    marks = _furniture_marks(page_lines, page_count)
+    out: list = []
+    for blocks, refs, drop in zip(pages, page_refs, marks):
+        gone = {refs[i] for i in drop}
+        for b, (kind, content) in enumerate(blocks):
+            if kind == "text" and gone:
+                content = "\n".join(
+                    ln for j, ln in enumerate(content.split("\n"))
+                    if (b, j) not in gone
+                )
+            out.append((kind, content))
+    return out
+
+
+def _pdf_page_texts(path: Path) -> list | None:
+    """Текст каждой страницы через pdfplumber — тем же вызовом
+    `extract_text`, которым MarkItDown 0.1.x извлекает обычные
+    (не похожие на форму) страницы."""
+    if pdfplumber is None:
+        return None
+    try:
+        texts = []
+        with pdfplumber.open(str(path)) as pdf:
+            for page in pdf.pages:
+                texts.append((page.extract_text() or "").strip())
+                page.close()
+        return texts
+    except Exception:
+        return None
+
+
+def _form_page_segments(text: str, start: int, end: int,
+                        missing: list, texts: list) -> list:
+    """Границы страниц-форм `missing` в промежутке text[start:end]
+    вывода MarkItDown: список (начало, конец, страница).
+
+    MarkItDown склеивает страницы пустой строкой, но пустые строки
+    бывают и внутри формы (рабочая тетрадь: 5-8 кусков на две
+    страницы), поэтому счёт кусков ничего не даёт. Страница начинается
+    с куска, первая строка которого совпадает с первой строкой её
+    текста pdfplumber; страницы ищутся по порядку. Если какая-то не
+    нашлась или промежуток начинается не с первой из них, границы
+    неизвестны — промежуток остаётся как есть: лишний колонтитул
+    честнее потерянного текста."""
+    pieces = []
+    pos = start
+    for piece in text[start:end].split("\n\n"):
+        if piece.strip():
+            head = piece.strip().split("\n", 1)[0].strip()
+            pieces.append((pos, pos + len(piece), head))
+        pos += len(piece) + 2
+    firsts: list = []
+    k = 0
+    for q in missing:
+        head = texts[q].split("\n", 1)[0].strip()
+        while k < len(pieces) and pieces[k][2] != head:
+            k += 1
+        if k == len(pieces):
+            return []
+        firsts.append(k)
+        k += 1
+    if firsts[0] != 0:
+        return []
+    bounds = firsts + [len(pieces)]
+    return [(pieces[bounds[n]][0], pieces[bounds[n + 1] - 1][1], q)
+            for n, q in enumerate(missing)]
+
+
+def _strip_markitdown_furniture(text: str, path: Path) -> str:
+    """Колонтитулы и номера страниц в тексте фолбэка MarkItDown
+    (многостраничного, от трёх страниц).
+
+    Чистке нужны границы страниц. Если MarkItDown шёл через pdfminer,
+    страницы разделены `\\f` (в выводе MarkItDown для 8-страничного PDF
+    их 7 — число страниц берётся из самого PDF, а не по счёту `\\f`).
+    Иначе он склеивает текст страниц пустой строкой и границы теряет;
+    тогда текст каждой страницы (pdfplumber) ищется в выводе дословно,
+    по порядку и по границам строк. Однострочную страницу ищем только
+    вплотную к предыдущей — короткая строка легко найдётся и в чужом
+    месте.
+
+    Страницу-форму (MarkItDown выводит её таблицей) так не найти — её
+    границы ищет `_form_page_segments`."""
+    if "\f" in text:
+        pages = [pg.split("\n") for pg in text.split("\f")]
+        page_count = _pdf_page_count(path) or len(pages)
+        if page_count < 3:
+            return text
+        pages = _strip_pdf_furniture(pages, page_count)
+        return "\f".join("\n".join(pg) for pg in pages)
+    texts = _pdf_page_texts(path)
+    if not texts or len(texts) < 3:
+        return text
+    page_count = len(texts)
+    spans = []
+    cursor = 0
+    for p, chunk in enumerate(texts):
+        if not chunk:
             continue
-        if drop_page_numbers and _PDF_PAGE_NUM_RE.match(ln):
+        pos = text.find(chunk, cursor)
+        end = pos + len(chunk)
+        if pos < 0 or not ((pos == 0 or text[pos - 1] == "\n")
+                           and (end == len(text) or text[end] == "\n")):
             continue
-        if i in paginated:
+        if "\n" not in chunk and text[cursor:pos].strip():
             continue
-        kept.append(ln)
-    return kept
+        spans.append((p, pos, end))
+        cursor = end
+    segs = []
+    prev_p, prev_end = -1, 0
+    for p, pos, end in spans + [(len(texts), len(text), len(text))]:
+        missing = [q for q in range(prev_p + 1, p) if texts[q]]
+        if missing:
+            segs += _form_page_segments(text, prev_end, pos, missing,
+                                        texts)
+        if p < len(texts):
+            segs.append((pos, end, p))
+        prev_p, prev_end = p, end
+    pages = [[] for _ in texts]
+    for pos, end, p in segs:
+        pages[p] = text[pos:end].split("\n")
+    pages = _strip_pdf_furniture(pages, page_count)
+    out = []
+    prev = 0
+    for pos, end, p in segs:
+        out += [text[prev:pos], "\n".join(pages[p])]
+        prev = end
+    out.append(text[prev:])
+    return "".join(out)
 
 
 def _clean_pdf_text(text: str, page_count: int) -> str:
     """Чистит типичный мусор PDF-текста и улучшает разметку:
-    1) сквозные колонтитулы и страничные номера (многостраничные);
+    1) сквозные колонтитулы и страничные номера (многостраничные),
+       если страницы разделены `_PDF_PAGE_BREAK`; pdfplumber-путь
+       чистит их раньше, по блокам страниц (`_strip_block_furniture`);
     2) обёртка прогонов кода/команд/конфигов в ``` (плейсхолдеры `<...>`
        и спецсимволы рендерятся буквально);
     3) экранирование ложных `#`-заголовков ВНЕ код-блоков."""
-    lines = text.split("\n")
-    if page_count >= 3:
-        lines = _strip_pdf_furniture(lines, page_count)
-    text = _fence_code_blocks("\n".join(lines))
+    pages = [pg.split("\n") for pg in text.split(_PDF_PAGE_BREAK)]
+    if page_count >= 3 and len(pages) > 1:
+        pages = _strip_pdf_furniture(pages, page_count)
+    text = _fence_code_blocks("\n".join("\n".join(pg) for pg in pages))
     out: list[str] = []
     in_fence = False
     for ln in text.split("\n"):
@@ -1526,17 +1703,20 @@ def _pdf_tables_result(path: Path):
     if pdfplumber is None:
         return None
     try:
-        doc_blocks: list = []
+        page_blocks: list = []
         page_count = 0
         with pdfplumber.open(str(path)) as pdf:
             page_count = len(pdf.pages)
             for page in pdf.pages:
-                doc_blocks.extend(_page_blocks(page))
+                page_blocks.append(_page_blocks(page))
                 page.close()  # освобождаем кэш страницы сразу
     except Exception:
         return None
+    doc_blocks = [blk for blocks in page_blocks for blk in blocks]
     if not any(kind == "table" for kind, _ in doc_blocks):
         return None  # таблиц нет — пусть отработает обычный путь
+    if page_count >= 3:
+        doc_blocks = _strip_block_furniture(page_blocks, page_count)
     doc_blocks = _join_continued_tables(doc_blocks)
     doc_blocks = _merge_text_blocks(doc_blocks)
     parts = []
@@ -2514,7 +2694,6 @@ def _convert_file_to_target(path: Path, target: Path, opts: dict,
     print(f"Converting {path.name} ...")
     result = None
     note = None
-    furniture_done = False
     # PDF: сначала пытаемся извлечь таблицы по геометрии (pdfplumber).
     # Если документ без таблиц или pdfplumber недоступен — откат на
     # штатный путь MarkItDown ниже (поведение не меняется).
@@ -2526,13 +2705,26 @@ def _convert_file_to_target(path: Path, target: Path, opts: dict,
         if pdf_result is not None:
             result = pdf_result
             note = f"{pdf_result.pdf_tables} table(s) via pdfplumber"
-            furniture_done = True  # _clean_pdf_text внутри
     if result is None:
         try:
             result, note = _convert_file_data(path)
         except Exception as exc:
             print(f"[error] Failed to convert {path.name}: {exc}")
             return "fail"
+        if suffix == ".pdf":
+            # Фолбэк MarkItDown идёт мимо _clean_pdf_text:
+            # колонтитулы и номера страниц оставались в .md
+            # (Р 71207-2024, 19 шт.), тогда как pdfplumber-путь их
+            # срезает. Применяем ТОЛЬКО чистку колонтитулов:
+            # фенсинг и экранирование настроены на pdfplumber-текст
+            # и на фолбэк не переносятся. Чистка — ДО ремонта
+            # кириллицы, как на pdfplumber-пути: страницы ищутся по
+            # дословному тексту, а ремонт его меняет («Меры по ЗИ» с
+            # --pdf-tables off не находили ни одной страницы).
+            text = result.text_content
+            kept = _strip_markitdown_furniture(text, path)
+            if kept != text:
+                result = _TextResult(result, kept)
 
     if suffix == ".pdf":
         repaired = _repair_broken_cyrillic_pdf_text(result.text_content)
@@ -2567,7 +2759,6 @@ def _convert_file_to_target(path: Path, target: Path, opts: dict,
                 clean = _clean_pdf_text(clean, page_count).strip()
                 if clean:
                     result = _TextResult(result, clean + "\n")
-                    furniture_done = True  # _clean_pdf_text выше
                     fallback_note = "text via pypdfium2"
                     note = (
                         f"{note}; {fallback_note}"
@@ -2586,17 +2777,6 @@ def _convert_file_to_target(path: Path, target: Path, opts: dict,
                     f"(requires Tesseract).",
                     file=sys.stderr,
                 )
-        if not furniture_done and page_count and page_count >= 3:
-            # Фолбэк MarkItDown идёт мимо _clean_pdf_text:
-            # колонтитулы и номера страниц оставались в .md
-            # (Р 71207-2024, 19 шт.), тогда как pdfplumber-путь их
-            # срезает. Применяем ТОЛЬКО чистку колонтитулов:
-            # фенсинг и экранирование настроены на pdfplumber-текст
-            # и на фолбэк не переносятся.
-            lines = result.text_content.split("\n")
-            kept = _strip_pdf_furniture(lines, page_count)
-            if kept != lines:
-                result = _TextResult(result, "\n".join(kept))
         escaped = _escape_table_rows(result.text_content)
         if escaped != result.text_content:
             result = _TextResult(result, escaped)

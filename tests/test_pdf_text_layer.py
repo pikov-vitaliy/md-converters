@@ -567,15 +567,22 @@ def test_markitdown_fallback_strips_page_furniture(tmp_path, monkeypatch):
     out = tmp_path / "out"
     out.mkdir()
 
-    pages = "\n".join(
+    chunks = [
         f"ПНСТ 123—2024\n"
         f"Содержательный текст страницы {i} о требованиях "
         f"безопасности разработки программного обеспечения.\n{i}"
         for i in range(1, 13)
-    )
+    ]
+    # Так MarkItDown склеивает страницы на pdfplumber-ветке: пустой
+    # строкой, без разделителя страниц. Границы восстанавливаются по
+    # тексту страниц (pdfplumber), он подменён тем же содержимым.
+    pages = "\n\n".join(chunks)
     fake_result = SimpleNamespace(text_content=pages, title=None)
     monkeypatch.setattr(
         convert_to_md, "_pdf_tables_result", lambda p: None
+    )
+    monkeypatch.setattr(
+        convert_to_md, "_pdf_page_texts", lambda p: chunks
     )
     monkeypatch.setattr(
         convert_to_md, "_convert_file_data", lambda p: (fake_result, None)
@@ -600,4 +607,59 @@ def test_markitdown_fallback_strips_page_furniture(tmp_path, monkeypatch):
     assert status == "ok"
     body = (out / "plain.md").read_text(encoding="utf-8")
     assert "ПНСТ 123—2024" not in body
+    assert "\n7\n" not in body
     assert "Содержательный текст страницы 3" in body
+
+
+def test_markitdown_fallback_strips_furniture_before_repair(
+    tmp_path, monkeypatch
+):
+    """Колонтитулы фолбэка MarkItDown срезаются ДО ремонта кириллицы.
+
+    Страницы ищутся в выводе MarkItDown по дословному тексту страниц
+    pdfplumber, а ремонт сломанного шрифта этот текст меняет. Пока
+    чистка шла после ремонта, на «Мерах по ЗИ» с --pdf-tables off не
+    находилась ни одна страница, и все номера страниц оставались.
+    """
+    src = tmp_path / "broken.pdf"
+    src.write_bytes(b"%PDF-1.4 fake")
+    out = tmp_path / "out"
+    out.mkdir()
+    broken = ("НастояIая Методика выявления уя7вимосте9 и "
+              "о1еспеGения це;остности данных")
+    # Сломанная строка — первой: и поиск страницы целиком, и поиск
+    # формы по первой строке после ремонта промахнулись бы.
+    chunks = [f"{broken} {i}.\n{broken}.\nПНСТ 123—2024\n{i}"
+              for i in range(1, 13)]
+    pages = "\n\n".join(chunks)
+    fake_result = SimpleNamespace(text_content=pages, title=None)
+    monkeypatch.setattr(
+        convert_to_md, "_pdf_tables_result", lambda p: None
+    )
+    monkeypatch.setattr(
+        convert_to_md, "_pdf_page_texts", lambda p: chunks
+    )
+    monkeypatch.setattr(
+        convert_to_md, "_convert_file_data", lambda p: (fake_result, None)
+    )
+    monkeypatch.setattr(
+        convert_to_md, "_pdf_text_layer_probe", lambda p: (pages, 12)
+    )
+    assert convert_to_md._repair_broken_cyrillic_pdf_text(pages) != pages
+
+    opts = {
+        "force": True,
+        "frontmatter": False,
+        "keep_images": False,
+        "unsafe_raw_markdown": False,
+        "out_dir": out,
+        "scan": {".pdf"},
+        "tool": "tomd",
+        "planned": set(),
+    }
+
+    assert convert_to_md.convert_file(src, opts) == "ok"
+    body = (out / "broken.md").read_text(encoding="utf-8")
+    assert "Настоящая Методика выявления уязвимостей" in body
+    assert "ПНСТ 123—2024" not in body
+    assert "\n7\n" not in body

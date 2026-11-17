@@ -597,12 +597,12 @@ def test_fence_russian_comment_continues_code_block():
 
 
 def test_clean_pdf_text_strips_repeated_footer_and_page_numbers():
-    lines = []
+    pages = []
     for p in range(6):
-        lines.append(f"Контент страницы {p}")
-        lines.append("РУСБ.10015-01 95 01-1")  # сквозной колонтитул
-        lines.append(str(40 + p))              # номер страницы
-    out = c._clean_pdf_text("\n".join(lines), page_count=6)
+        pages.append(f"Контент страницы {p}\n"
+                     "РУСБ.10015-01 95 01-1\n"  # сквозной колонтитул
+                     f"{40 + p}")               # номер страницы
+    out = c._clean_pdf_text(c._PDF_PAGE_BREAK.join(pages), page_count=6)
     assert "РУСБ.10015-01 95 01-1" not in out
     assert "\n40\n" not in ("\n" + out + "\n")
     assert "Контент страницы 0" in out
@@ -612,7 +612,8 @@ def test_clean_pdf_text_strips_repeated_footer_and_page_numbers():
 def test_clean_pdf_text_keeps_unique_doc_and_standalone_number():
     # Нет повторяющегося колонтитула -> одиночное число НЕ срезается
     # (защита документов вроде Предзащиты).
-    text = "Параграф один\nПараграф два\n42\nПараграф три"
+    text = c._PDF_PAGE_BREAK.join(
+        ["Параграф один", "Параграф два\n42", "Параграф три"])
     out = c._clean_pdf_text(text, page_count=10)
     assert "42" in out
     assert "Параграф один" in out and "Параграф три" in out
@@ -724,16 +725,17 @@ def test_merge_text_blocks_joins_consecutive_prose():
 def test_clean_pdf_text_strips_page_numbers_without_footer():
     """Сквозной нумерации без колонтитула раньше хватало, чтобы
     засорить весь вывод: на реальном 60-страничном документе в `.md`
-    оставалось 66 голых чисел. Номера убираются, только если образуют
-    согласованную возрастающую последовательность, поэтому число,
-    выпадающее из неё (ссылка на пункт), сохраняется."""
-    lines = []
+    оставалось 66 голых чисел. Номера убираются, только если идут в
+    ногу со страницами, поэтому число, выпадающее из нумерации (ссылка
+    на пункт), сохраняется."""
+    pages = []
     for p in range(1, 13):
-        lines.append(f"Содержательный абзац номер {p}")
+        lines = [f"Содержательный абзац номер {p}"]
         if p == 5:
             lines.append("3")  # ссылка на пункт, назад по счётчику
         lines.append(str(p))
-    out = c._clean_pdf_text("\n".join(lines), page_count=12)
+        pages.append("\n".join(lines))
+    out = c._clean_pdf_text(c._PDF_PAGE_BREAK.join(pages), page_count=12)
     body = "\n" + out + "\n"
 
     assert "\n7\n" not in body
@@ -751,23 +753,76 @@ def test_clean_pdf_text_keeps_clustered_numbered_list():
     уезжала в мусор целиком: длины цепочки (40 номеров при пороге 30)
     хватало, чтобы принять перечень за пагинацию, и на 60-страничном
     документе молча исчезали все сорок номеров подряд."""
-    lines = []
+    pages = []
     for p in range(1, 61):
-        for k in range(30):
-            lines.append(f"Абзац {p}.{k} о требованиях к защите данных.")
+        lines = [f"Абзац {p}.{k} о требованиях к защите данных."
+                 for k in range(30)]
         if p == 11:
             for n in range(1, 41):
                 lines.append(str(n))
                 lines.append(f"Требование номер {n} к средству защиты.")
-    out = c._clean_pdf_text("\n".join(lines), page_count=60)
+        pages.append("\n".join(lines))
+    out = c._clean_pdf_text(c._PDF_PAGE_BREAK.join(pages), page_count=60)
     body = "\n" + out + "\n"
 
     missing = [n for n in range(1, 41) if f"\n{n}\n" not in body]
     assert missing == []
 
 
+def test_strip_pdf_furniture_keeps_list_crossing_pages():
+    """Нумерованный перечень, перетекающий через страницы, — не номера
+    страниц. Конец перечня внизу страницы и начало вверху следующей
+    дают одинаковый сдвиг «значение минус индекс страницы», но стоят в
+    разных зонах; пункт «1» в начале первой страницы совпадает по
+    сдвигу с номерами страниц, но они внизу. Настоящие номера страниц
+    при этом срезаются."""
+    pages = []
+    for p in range(12):
+        lines = []
+        for n in range(5 * p + 1, 5 * p + 6):
+            lines += [str(n), f"Пункт перечня {n} о мерах защиты."]
+        lines.append(str(p + 1))  # номер страницы
+        pages.append(lines)
+
+    kept = [ln for page in c._strip_pdf_furniture(pages, 12)
+            for ln in page]
+
+    assert [ln for ln in kept if ln.isdigit()] == [
+        str(n) for n in range(1, 61)]
+
+
+def test_strip_pdf_furniture_keeps_number_next_to_page_number():
+    """Число того же значения прямо над номером страницы (последняя
+    строка таблицы «5» на пятой странице) — содержание: на странице
+    срезается только крайний номер зоны."""
+    pages = [[f"Строка {k} страницы {p + 1}." for k in range(6)]
+             + [str(p + 1)] for p in range(12)]
+    pages[4].insert(6, "5")
+
+    kept = c._strip_pdf_furniture(pages, 12)
+
+    assert kept[4][-1] == "5" and len(kept[4]) == 7
+    assert all(len(page) == 6 for i, page in enumerate(kept) if i != 4)
+
+
+def test_strip_pdf_furniture_short_pages_keep_top_number():
+    """На короткой странице (слайд) зоны перекрываются, и номер внизу
+    попадал бы и в верхнюю зону. Строка относится к ближнему краю,
+    поэтому крупное «3» в начале третьего слайда остаётся, а номера
+    слайдов внизу срезаются."""
+    pages = [[f"Слайд {p + 1}: тема занятия", str(p + 1)]
+             for p in range(12)]
+    pages[2].insert(0, "3")
+
+    kept = c._strip_pdf_furniture(pages, 12)
+
+    assert kept[2] == ["3", "Слайд 3: тема занятия"]
+    assert all(len(page) == 1 for i, page in enumerate(kept) if i != 2)
+
+
 def test_clean_pdf_text_protects_table_rows():
-    text = "FOOT\nFOOT\nFOOT\nFOOT\nFOOT\n| FOOT | x |\n| --- | --- |"
+    text = c._PDF_PAGE_BREAK.join(
+        ["FOOT"] * 4 + ["FOOT\n| FOOT | x |\n| --- | --- |"])
     out = c._clean_pdf_text(text, page_count=10)
     assert "| FOOT | x |" in out   # строка таблицы не тронута
     assert "\nFOOT\n" not in ("\n" + out + "\n")  # одиночный колонтитул убран
@@ -835,15 +890,239 @@ def test_strip_pdf_furniture_keeps_pure_punctuation_lines():
     """
     pages = []
     for i in range(1, 13):
-        pages += [
+        pages.append([
             "ГОСТ Р 00000—2024",
             f"int f{i}(void) {{",
             "return 0;",
             "}",
             f"проза страницы {i} о безопасной разработке",
-        ]
+        ])
 
-    kept = c._strip_pdf_furniture(pages, 12)
+    kept = [ln for page in c._strip_pdf_furniture(pages, 12)
+            for ln in page]
 
     assert kept.count("}") == 12          # код цел
     assert "ГОСТ Р 00000—2024" not in kept  # колонтитул срезан
+
+
+# --- колонтитулы по зонам страниц и текст сбоку от таблицы ---------------
+
+def _pages_pdf(contents: list) -> bytes:
+    """Многостраничный PDF (A4, Helvetica): по потоку содержимого на
+    страницу. Без сторонних библиотек, как `_wrap_pdf`."""
+    n = len(contents)
+    font = 3 + 2 * n
+    kids = b" ".join(b"%d 0 R" % (3 + 2 * i) for i in range(n))
+    objs = [
+        b"<< /Type /Catalog /Pages 2 0 R >>",
+        b"<< /Type /Pages /Kids [%s] /Count %d >>" % (kids, n),
+    ]
+    for i, content in enumerate(contents):
+        objs.append(
+            b"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 595 842] "
+            b"/Resources << /Font << /F1 %d 0 R >> >> "
+            b"/Contents %d 0 R >>" % (font, 4 + 2 * i))
+        objs.append(b"<< /Length %d >>\nstream\n%s\nendstream"
+                    % (len(content), content))
+    objs.append(b"<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>")
+    out = b"%PDF-1.4\n"
+    offsets = []
+    for i, body in enumerate(objs, 1):
+        offsets.append(len(out))
+        out += b"%d 0 obj\n%s\nendobj\n" % (i, body)
+    xref_pos = len(out)
+    out += b"xref\n0 %d\n" % (len(objs) + 1)
+    out += b"0000000000 65535 f \n"
+    for off in offsets:
+        out += b"%010d 00000 n \n" % off
+    out += (b"trailer\n<< /Size %d /Root 1 0 R >>\nstartxref\n%d\n%%%%EOF\n"
+            % (len(objs) + 1, xref_pos))
+    return out
+
+
+def _text(x: int, y: int, s: str) -> bytes:
+    lit = s.encode().replace(b"(", b"\\(").replace(b")", b"\\)")
+    return b"BT /F1 11 Tf %d %d Td (%s) Tj ET\n" % (x, y, lit)
+
+
+def _ruled_table(top: int) -> bytes:
+    """Разлинованная таблица 2x3 (x 100..340), верхний край на `top`."""
+    out = [_text(105, top - 15, "Name"), _text(225, top - 15, "Value"),
+           _text(105, top - 35, "alpha"), _text(225, top - 35, "1"),
+           _text(105, top - 55, "beta"), _text(225, top - 55, "2"),
+           b"0.5 w\n"]
+    for x in (100, 220, 340):
+        out.append(b"%d %d m %d %d l S\n" % (x, top - 60, x, top))
+    for y in (top, top - 20, top - 40, top - 60):
+        out.append(b"100 %d m 340 %d l S\n" % (y, y))
+    return b"".join(out)
+
+
+def _workbook_pdf(with_table: bool, form_page: bool = False) -> bytes:
+    """Восемь страниц: колонтитул сверху и номер страницы снизу (со
+    второй страницы). В теле — то, что чистка обязана сохранить:
+    «ANSWER: B» на каждой странице (а на третьей ещё и первой строкой
+    под колонтитулом), номера строк чек-листа 1..8, одиночное «6» над
+    номером страницы и год «2024» на титуле.
+
+    `form_page` добавляет на шестую и седьмую страницы безрамочную
+    сетку слов: MarkItDown разбирает их как формы (таблицей) и
+    склеивает страницы БЕЗ `\\f`."""
+    pages = [_text(200, 500, "Workbook of the final project")
+             + _text(200, 480, "Moscow") + _text(200, 460, "2024")]
+    for p in range(2, 9):
+        lines = [f"Question {p} about the model",
+                 f"A) option {p}.1", f"B) option {p}.2", "ANSWER: B",
+                 f"Explanation of question {p}", f"Remark {p}",
+                 f"Closing text of page {p}"]
+        if p == 3:
+            lines.insert(0, "ANSWER: B")
+        if p == 4:
+            lines[4:4] = ["Checklist", "No What How",
+                          *map(str, range(1, 9)), "Pass if all rows done"]
+        if p == 5:
+            lines.append("6")
+        body = [_text(72, 800, "DOC-7 Workbook rev 2")]
+        body += [_text(72, 760 - 20 * k, s) for k, s in enumerate(lines)]
+        body.append(_text(290, 40, str(p)))
+        if with_table and p == 2:
+            body.append(_ruled_table(320))
+        if form_page and p in (6, 7):
+            body += [_text(x, 500 - 20 * r, f"{name}{r}")
+                     for r in range(8)
+                     for x, name in ((72, "Key"), (250, "Val"),
+                                     (430, "Unit"))]
+        pages.append(b"".join(body))
+    return _pages_pdf(pages)
+
+
+def _bare_numbers(text: str) -> list:
+    return [ln.strip() for ln in text.split("\n")
+            if re.fullmatch(r"\d{1,4}", ln.strip())]
+
+
+def test_pdf_tables_result_keeps_repeated_body_lines(tmp_path):
+    """Колонтитул — строка в верхней или нижней зоне РАЗНЫХ страниц, а
+    не просто частая строка. Прежнее правило считало повторы по всему
+    тексту: «ANSWER: B» ×15 в тесте и «Практическое занятие:» ×10 в
+    тематическом плане вырезались как колонтитул."""
+    pytest.importorskip("pdfplumber")
+    pdf = tmp_path / "quiz.pdf"
+    pdf.write_bytes(_workbook_pdf(with_table=True))
+
+    res = c._pdf_tables_result(pdf)
+
+    assert res is not None and res.pdf_tables == 1
+    text = res.text_content
+    assert text.count("ANSWER: B") == 8
+    assert "DOC-7 Workbook rev 2" not in text   # колонтитул срезан
+    assert "| alpha | 1 |" in text
+
+
+def test_pdf_tables_result_keeps_body_numbers_and_title_year(tmp_path):
+    """Номер страницы режется по положению и последовательности, а не
+    «любое отдельное число, раз нашёлся колонтитул»: так пропадали
+    номера строк таблицы 1..8 и год «2024» на титуле."""
+    pytest.importorskip("pdfplumber")
+    pdf = tmp_path / "numbers.pdf"
+    pdf.write_bytes(_workbook_pdf(with_table=True))
+
+    text = c._pdf_tables_result(pdf).text_content
+
+    assert "\n1\n2\n3\n4\n5\n6\n7\n8\n" in text   # номера строк целы
+    assert "Remark 5\nClosing text of page 5\n6" in text
+    assert "2024" in _bare_numbers(text)
+    # Кроме них голых чисел нет: номера страниц 2..8 срезаны.
+    assert sorted(_bare_numbers(text), key=int) == [
+        "1", "2", "3", "4", "5", "6", "6", "7", "8", "2024"]
+
+
+@pytest.mark.parametrize("form_page", [False, True])
+def test_markitdown_fallback_keeps_body_lines_and_numbers(tmp_path,
+                                                          form_page):
+    """Фолбэк MarkItDown (PDF без таблиц) чистит колонтитулы по тем же
+    зонам страниц, что и pdfplumber-путь, — и когда MarkItDown делит
+    страницы `\\f` (pdfminer), и когда склеивает их пустой строкой
+    (есть страница-форма; как у Р 71207-2024)."""
+    pytest.importorskip("pdfplumber")
+    src = tmp_path / "plain.pdf"
+    src.write_bytes(_workbook_pdf(with_table=False, form_page=form_page))
+    out = tmp_path / "out"
+    out.mkdir()
+    opts = _pdf_opts(out)
+    opts["sandbox"] = False
+
+    assert c.convert_file(src, opts) == "ok"
+
+    body = (out / "plain.md").read_text(encoding="utf-8")
+    assert body.count("ANSWER: B") == 8
+    assert "DOC-7 Workbook rev 2" not in body
+    assert sorted(_bare_numbers(body), key=int) == [
+        "1", "2", "3", "4", "5", "6", "6", "7", "8", "2024"]
+    assert ("| Key0 | Val0 | Unit0 |" in body) is form_page
+
+
+def test_pdf_tables_result_keeps_text_beside_table(tmp_path):
+    """Текст сбоку от таблицы (на её высоте, слева или справа) не
+    теряется: раньше извлекались только полосы выше и ниже таблицы на
+    всю ширину страницы. Символы самой таблицы в текст не попадают."""
+    pytest.importorskip("pdfplumber")
+    pdf = tmp_path / "side.pdf"
+    pdf.write_bytes(_wrap_pdf(
+        _text(72, 780, "Text above the table")
+        + _ruled_table(720)
+        + _text(20, 685, "LEFT_NOTE")
+        + _text(370, 685, "SIDE_NOTE_KEEP")
+        + _text(72, 600, "Text below the table")))
+
+    res = c._pdf_tables_result(pdf)
+
+    assert res is not None and res.pdf_tables == 1
+    text = res.text_content
+    assert "SIDE_NOTE_KEEP" in text
+    assert "LEFT_NOTE" in text
+    assert "| alpha | 1 |" in text
+    assert text.count("alpha") == 1     # таблица не продублирована
+    assert text.index("Text above") < text.index("| Name")
+    assert text.index("| beta") < text.index("Text below")
+
+
+def test_pdfium_fallback_strips_furniture_by_pages(tmp_path, monkeypatch,
+                                                   capsys):
+    """Текст pypdfium2 (когда MarkItDown вернул мусор) чистится по
+    страницам: зонд склеивает их через `_PDF_PAGE_BREAK`, и
+    `_clean_pdf_text` видит границы страниц."""
+    pytest.importorskip("pypdfium2")
+    src = tmp_path / "pdfium.pdf"
+    src.write_bytes(_workbook_pdf(with_table=False))
+    out = tmp_path / "out"
+    out.mkdir()
+    garbage = SimpleNamespace(text_content="??", title=None)
+    monkeypatch.setattr(c, "_convert_file_data", lambda p: (garbage, None))
+    opts = _pdf_opts(out)
+    opts["sandbox"] = False
+
+    assert c.convert_file(src, opts) == "ok"
+
+    assert "text via pypdfium2" in capsys.readouterr().out
+    body = (out / "pdfium.md").read_text(encoding="utf-8")
+    assert body.count("ANSWER: B") == 8
+    assert "DOC-7 Workbook rev 2" not in body
+    assert sorted(_bare_numbers(body), key=int) == [
+        "1", "2", "3", "4", "5", "6", "6", "7", "8", "2024"]
+
+
+def test_markitdown_formfeed_pages_use_real_page_count(tmp_path):
+    """Число страниц на ветке `\f` — не число `\f`.
+
+    В выводе MarkItDown (pdfminer) на 12 страниц приходится 11 `\f`.
+    Порог по ним был бы max(5, 11 // 2) = 5 вместо 6, и строка вверху
+    ровно пяти страниц из двенадцати срезалась бы как колонтитул."""
+    pages = [f"Раздел {p}. Требования к средствам защиты." for p in range(12)]
+    for p in (0, 3, 6, 8, 10):
+        pages[p] = "Повторяющаяся строка раздела\n" + pages[p]
+    text = "\f".join(pages)
+
+    out = c._strip_markitdown_furniture(text, tmp_path / "absent.pdf")
+
+    assert out.count("Повторяющаяся строка раздела") == 5
