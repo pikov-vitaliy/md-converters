@@ -1041,3 +1041,19 @@ def test_pdfium_fallback_strips_furniture_by_pages(tmp_path, monkeypatch,
     assert "DOC-7 Workbook rev 2" not in body
     assert sorted(_bare_numbers(body), key=int) == [
         "1", "2", "3", "4", "5", "6", "6", "7", "8", "2024"]
+
+
+def test_markitdown_formfeed_pages_use_real_page_count(tmp_path):
+    """Число страниц на ветке `\f` — не число `\f`.
+
+    В выводе MarkItDown (pdfminer) на 12 страниц приходится 11 `\f`.
+    Порог по ним был бы max(5, 11 // 2) = 5 вместо 6, и строка вверху
+    ровно пяти страниц из двенадцати срезалась бы как колонтитул."""
+    pages = [f"Раздел {p}. Требования к средствам защиты." for p in range(12)]
+    for p in (0, 3, 6, 8, 10):
+        pages[p] = "Повторяющаяся строка раздела\n" + pages[p]
+    text = "\f".join(pages)
+
+    out = c._strip_markitdown_furniture(text, tmp_path / "absent.pdf")
+
+    assert out.count("Повторяющаяся строка раздела") == 5

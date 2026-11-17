@@ -1439,7 +1439,8 @@ def _strip_markitdown_furniture(text: str, path: Path) -> str:
     (многостраничного, от трёх страниц).
 
     Чистке нужны границы страниц. Если MarkItDown шёл через pdfminer,
-    страницы разделены `\\f` (он ставит его после каждой страницы).
+    страницы разделены `\\f` (в выводе MarkItDown для 8-страничного PDF
+    их 7 — число страниц берётся из самого PDF, а не по счёту `\\f`).
     Иначе он склеивает текст страниц пустой строкой и границы теряет;
     тогда текст каждой страницы (pdfplumber) ищется в выводе дословно,
     по порядку и по границам строк. Однострочную страницу ищем только
@@ -1449,10 +1450,10 @@ def _strip_markitdown_furniture(text: str, path: Path) -> str:
     Страницу-форму (MarkItDown выводит её таблицей) так не найти — её
     границы ищет `_form_page_segments`."""
     if "\f" in text:
-        page_count = text.count("\f")
+        pages = [pg.split("\n") for pg in text.split("\f")]
+        page_count = _pdf_page_count(path) or len(pages)
         if page_count < 3:
             return text
-        pages = [pg.split("\n") for pg in text.split("\f")]
         pages = _strip_pdf_furniture(pages, page_count)
         return "\f".join("\n".join(pg) for pg in pages)
     texts = _pdf_page_texts(path)
