@@ -60,6 +60,7 @@ import ipaddress
 import json
 import os
 import re
+import shutil
 import shlex
 import socket
 import subprocess
@@ -559,6 +560,345 @@ def _pdf_text_layer_probe(path: Path) -> tuple[str, int] | None:
             return "\n".join(parts), page_count
         finally:
             _close_pdfium(doc)
+    except Exception:
+        return None
+
+
+# --- Карта шрифта PDF по контурам глифов ----------------------------------
+# Частая порча PDF из Word и издательских систем: встроенный TrueType-шрифт
+# цел, а таблица ToUnicode, по которой извлекатели переводят коды в буквы,
+# неверна (Методика ФСТЭК России 12.05.2026: «5B>48:0» вместо «методика»,
+# прописные — управляющими символами, часть букв теряется вовсе). Угадывать
+# карту по тексту ненадёжно; надёжно — сравнить КОНТУР каждого глифа с тем
+# же шрифтом, установленным в системе: совпавший контур однозначно даёт
+# букву. Работает для любого шрифта и языка, если такой шрифт установлен;
+# если нет или контуры не совпали — PDF не трогается и дальше работает
+# прежний ремонт по тексту. Исходный файл не меняется: конвейер читает
+# исправленную временную копию.
+
+_GLYPH_FIX_MIN_SIGNALS = 5   # сломанных прогонов / управляющих символов
+_GLYPH_FIX_PROBE_PAGES = 5
+_GLYPH_FIX_MIN_SHARE = 0.2   # доля глифов шрифта, где карта неверна
+_SYSTEM_FONTS: dict | None = None
+
+
+def _pdf_glyph_fix_needed(path: Path) -> bool:
+    """Дешёвая проба первых страниц: есть ли признаки битой карты."""
+    if pypdfium2 is None:
+        return False
+    try:
+        doc = pypdfium2.PdfDocument(str(path))
+    except Exception:
+        return False
+    try:
+        parts = []
+        for index in range(min(len(doc), _GLYPH_FIX_PROBE_PAGES)):
+            page = doc[index]
+            try:
+                textpage = page.get_textpage()
+                try:
+                    parts.append(textpage.get_text_range() or "")
+                finally:
+                    _close_pdfium(textpage)
+            finally:
+                _close_pdfium(page)
+    except Exception:
+        return False
+    finally:
+        _close_pdfium(doc)
+    text = "\n".join(parts)
+    ctrl = sum(1 for ch in text if ch < " " and ch not in "\t\n\r\f")
+    broken = sum(
+        1 for m in _BROKEN_RUN.finditer(text)
+        if len(m.group()) >= 3 and _run_looks_broken(m.group())
+    )
+    return ctrl + broken >= _GLYPH_FIX_MIN_SIGNALS
+
+
+def _font_name_key(name: str) -> str:
+    """«ABCDEF+TimesNewRoman,Bold» и «Times New Roman Bold» -> один ключ."""
+    name = name.split("+", 1)[-1]
+    return re.sub(r"[^0-9a-z]", "", name.lower())
+
+
+def _font_dirs() -> list[Path]:
+    dirs = []
+    extra = os.environ.get("MD_CONVERTERS_FONT_DIRS")
+    if extra:  # тесты и нестандартные установки
+        dirs += [Path(p) for p in extra.split(os.pathsep) if p]
+    if sys.platform == "win32":
+        dirs.append(Path(os.environ.get("WINDIR", r"C:\Windows")) / "Fonts")
+        local = os.environ.get("LOCALAPPDATA")
+        if local:
+            dirs.append(Path(local) / "Microsoft" / "Windows" / "Fonts")
+    elif sys.platform == "darwin":
+        dirs += [Path("/System/Library/Fonts"), Path("/Library/Fonts"),
+                 Path.home() / "Library" / "Fonts"]
+    else:
+        dirs += [Path("/usr/share/fonts"), Path("/usr/local/share/fonts"),
+                 Path.home() / ".fonts",
+                 Path.home() / ".local" / "share" / "fonts"]
+    return [d for d in dirs if d.is_dir()]
+
+
+def _system_font_index() -> dict:
+    """Ключ имени шрифта -> [(файл, номер в коллекции)]; строится раз."""
+    global _SYSTEM_FONTS
+    if _SYSTEM_FONTS is not None:
+        return _SYSTEM_FONTS
+    from fontTools.ttLib import TTCollection, TTFont
+    index: dict = {}
+    for folder in _font_dirs():
+        for file in folder.rglob("*"):
+            ext = file.suffix.lower()
+            if ext not in (".ttf", ".ttc"):
+                continue
+            try:
+                count = (len(TTCollection(str(file), lazy=True).fonts)
+                         if ext == ".ttc" else 1)
+                for number in range(count):
+                    font = TTFont(str(file), fontNumber=number, lazy=True)
+                    if "glyf" not in font:
+                        continue
+                    table = font["name"]
+                    family = (table.getDebugName(16)
+                              or table.getDebugName(1) or "")
+                    style = (table.getDebugName(17)
+                             or table.getDebugName(2) or "")
+                    names = {table.getDebugName(4), table.getDebugName(6),
+                             family + style}
+                    if style.lower() in ("regular", "normal", "обычный"):
+                        names.add(family)
+                    for name in names:
+                        if name:
+                            index.setdefault(_font_name_key(name), []).append(
+                                (str(file), number))
+            except Exception:
+                continue
+    _SYSTEM_FONTS = index
+    return index
+
+
+def _glyph_key(font, name: str, depth: int = 0):
+    """Отпечаток контура глифа с шириной; None — пустой или битый глиф."""
+    glyph = font["glyf"][name]
+    width = font["hmtx"][name][0]
+    if glyph.isComposite():
+        if depth > 8:
+            return None
+        parts = []
+        for comp in glyph.components:
+            sub = _glyph_key(font, comp.glyphName, depth + 1)
+            if sub is None:
+                return None
+            transform = getattr(comp, "transform", None)
+            parts.append((sub, comp.x, comp.y,
+                          tuple(map(tuple, transform)) if transform else ()))
+        return ("c", width, tuple(parts))
+    if glyph.numberOfContours <= 0:
+        return None  # пробелы и пустые глифы не различаются по контуру
+    flags = tuple(f & 1 for f in glyph.flags)
+    return ("s", width, tuple(glyph.coordinates),
+            tuple(glyph.endPtsOfContours), flags)
+
+
+def _script(cp: int) -> str:
+    if 0x0400 <= cp <= 0x04FF:
+        return "cyr"
+    if 0x0370 <= cp <= 0x03FF:
+        return "greek"
+    if cp < 0x0250:
+        return "latin"
+    return "other"
+
+
+def _resolve_glyphs(embedded, gids: dict, system_font) -> dict:
+    """cid -> множество кодов Unicode по совпадению контура."""
+    reverse: dict = {}
+    for cp, name in system_font.getBestCmap().items():
+        reverse.setdefault(system_font.getGlyphID(name), set()).add(cp)
+    sys_order = system_font.getGlyphOrder()
+    emb_order = embedded.getGlyphOrder()
+    by_shape = None
+    found = {}
+    for cid, gid in gids.items():
+        if gid >= len(emb_order):
+            continue
+        try:
+            key = _glyph_key(embedded, emb_order[gid])
+        except Exception:
+            continue
+        if key is None:
+            continue
+        cps = None
+        # Подмножество обычно сохраняет номера глифов: тот же номер и тот
+        # же контур — буква определена без двусмысленности.
+        if gid < len(sys_order) and gid in reverse:
+            try:
+                if _glyph_key(system_font, sys_order[gid]) == key:
+                    cps = reverse[gid]
+            except Exception:
+                cps = None
+        if cps is None:
+            if by_shape is None:
+                by_shape = {}
+                for sgid, codes in reverse.items():
+                    try:
+                        skey = _glyph_key(system_font, sys_order[sgid])
+                    except Exception:
+                        continue
+                    if skey is not None:
+                        by_shape.setdefault(skey, set()).update(codes)
+            cps = by_shape.get(key)
+        if cps:
+            found[cid] = {cp for cp in cps if cp >= 0x20}
+    return {cid: cps for cid, cps in found.items() if cps}
+
+
+def _choose_codepoints(found: dict, current: dict) -> dict:
+    """Одна буква на глиф. Двойники по контуру (латинская A и русская А
+    в одном начертании) решаются письменностью шрифта: берётся та, что
+    у глифов без двусмысленности, а при равенстве — прежняя карта."""
+    votes: dict = {}
+    for cps in found.values():
+        if len(cps) == 1:
+            s = _script(next(iter(cps)))
+            votes[s] = votes.get(s, 0) + 1
+    chosen = {}
+    for cid, cps in found.items():
+        old = current.get(cid)
+        if old is not None and len(old) == 1 and ord(old) in cps:
+            chosen[cid] = old
+            continue
+        ranked = sorted(cps, key=lambda cp: (-votes.get(_script(cp), 0), cp))
+        chosen[cid] = chr(ranked[0])
+    return chosen
+
+
+def _tounicode_stream(mapping: dict) -> bytes:
+    def utf16(text: str) -> str:
+        return text.encode("utf-16-be").hex().upper()
+
+    lines = [
+        "/CIDInit /ProcSet findresource begin", "12 dict begin",
+        "begincmap",
+        "/CIDSystemInfo << /Registry (Adobe) /Ordering (UCS) "
+        "/Supplement 0 >> def",
+        "/CMapName /Adobe-Identity-UCS def", "/CMapType 2 def",
+        "1 begincodespacerange", "<0000> <FFFF>", "endcodespacerange",
+    ]
+    items = sorted(mapping.items())
+    for start in range(0, len(items), 100):
+        chunk = items[start:start + 100]
+        lines.append(f"{len(chunk)} beginbfchar")
+        lines += [f"<{cid:04X}> <{utf16(text)}>" for cid, text in chunk]
+        lines.append("endbfchar")
+    lines += ["endcmap", "CMapName currentdict /CMap defineresource pop",
+              "end", "end"]
+    return "\n".join(lines).encode("ascii")
+
+
+def _read_tounicode(data: bytes) -> dict:
+    from pdfminer.cmapdb import CMapParser, FileUnicodeMap
+    umap = FileUnicodeMap()
+    CMapParser(umap, io.BytesIO(data)).run()
+    return dict(umap.cid2unichr)
+
+
+def _iter_fonts(resources, seen: set):
+    """Шрифты страницы и её форм (XObject), каждый объект — один раз."""
+    if not resources:
+        return
+    resources = resources.get_object()
+    fonts = resources.get("/Font")
+    if fonts:
+        for ref in fonts.get_object().values():
+            font = ref.get_object()
+            if id(font) not in seen:
+                seen.add(id(font))
+                yield font
+    xobjects = resources.get("/XObject")
+    if xobjects:
+        for ref in xobjects.get_object().values():
+            xobj = ref.get_object()
+            if xobj.get("/Subtype") == "/Form" and id(xobj) not in seen:
+                seen.add(id(xobj))
+                yield from _iter_fonts(xobj.get("/Resources"), seen)
+
+
+def _fix_type0_font(font, writer) -> int:
+    """Чинит ToUnicode одного Type0/CIDFontType2; число исправленных букв."""
+    from fontTools.ttLib import TTFont
+    from pypdf.generic import NameObject, StreamObject
+    if font.get("/Subtype") != "/Type0" or "/ToUnicode" not in font:
+        return 0
+    desc = font["/DescendantFonts"][0].get_object()
+    if desc.get("/Subtype") != "/CIDFontType2":
+        return 0
+    file2 = desc.get("/FontDescriptor", {}).get_object().get("/FontFile2")
+    if file2 is None:
+        return 0
+    current = _read_tounicode(font["/ToUnicode"].get_object().get_data())
+    if not current:
+        return 0
+    c2g = desc.get("/CIDToGIDMap", "/Identity")
+    c2g = c2g.get_object() if hasattr(c2g, "get_object") else c2g
+    if c2g == "/Identity":
+        gids = {cid: cid for cid in current}
+    else:
+        raw = c2g.get_data()
+        gids = {cid: int.from_bytes(raw[2 * cid:2 * cid + 2], "big")
+                for cid in current if 2 * cid + 2 <= len(raw)}
+    key = _font_name_key(str(font.get("/BaseFont", "")))
+    candidates = _system_font_index().get(key, [])
+    if not candidates:
+        return 0
+    embedded = TTFont(io.BytesIO(file2.get_object().get_data()))
+    best: dict = {}
+    for file, number in candidates[:4]:
+        try:
+            system_font = TTFont(file, fontNumber=number)
+            found = _resolve_glyphs(embedded, gids, system_font)
+        except Exception:
+            continue
+        if len(found) > len(best):
+            best = found
+    if not best:
+        return 0
+    chosen = _choose_codepoints(best, current)
+    wrong = {cid: ch for cid, ch in chosen.items() if current.get(cid) != ch}
+    # Несколько расхождений бывают и в исправном PDF (лигатуры, двойники):
+    # чиним, только если карта неверна у заметной доли глифов.
+    if len(wrong) < max(3, _GLYPH_FIX_MIN_SHARE * len(chosen)):
+        return 0
+    stream = StreamObject()
+    stream.set_data(_tounicode_stream({**current, **wrong}))
+    font[NameObject("/ToUnicode")] = writer._add_object(stream)
+    return len(wrong)
+
+
+def _pdf_glyph_fixed_copy(path: Path) -> tuple[Path, int] | None:
+    """Копия PDF с картой шрифтов по контурам глифов или None."""
+    if not _pdf_glyph_fix_needed(path):
+        return None
+    try:
+        from pypdf import PdfWriter
+        writer = PdfWriter(clone_from=str(path))
+        fixed = 0
+        seen: set = set()
+        for page in writer.pages:
+            for font in _iter_fonts(page.get("/Resources"), seen):
+                try:
+                    fixed += _fix_type0_font(font, writer)
+                except Exception:
+                    continue
+        if not fixed:
+            return None
+        folder = Path(tempfile.mkdtemp(prefix="md-converters-pdf-"))
+        out = folder / path.name
+        with open(out, "wb") as handle:
+            writer.write(handle)
+        return out, fixed
     except Exception:
         return None
 
@@ -2150,25 +2490,50 @@ def _file_too_large(path: Path, max_bytes: int) -> bool:
 
 def _convert_file_to_target(path: Path, target: Path, opts: dict,
                             suffix: str, source_id: str) -> str:
+    if suffix == ".pdf":
+        fixed = _pdf_glyph_fixed_copy(path)
+        if fixed is not None:
+            src, count = fixed
+            try:
+                return _convert_file_to_target_from(
+                    path, src, target, opts, suffix, source_id,
+                    f"PDF font mapping fixed by glyph outlines "
+                    f"({count} glyph(s))",
+                )
+            finally:
+                shutil.rmtree(src.parent, ignore_errors=True)
+    return _convert_file_to_target_from(
+        path, path, target, opts, suffix, source_id, None
+    )
+
+
+def _convert_file_to_target_from(path: Path, src: Path, target: Path,
+                                 opts: dict, suffix: str, source_id: str,
+                                 glyph_note: str | None) -> str:
+    """src — что читать (для PDF может быть исправленной копией), path —
+    исходный файл: его имя в сообщениях и в front matter."""
     print(f"Converting {path.name} ...")
     result = None
-    note = None
+    note = glyph_note
     furniture_done = False
     # PDF: сначала пытаемся извлечь таблицы по геометрии (pdfplumber).
     # Если документ без таблиц или pdfplumber недоступен — откат на
     # штатный путь MarkItDown ниже (поведение не меняется).
     if suffix == ".pdf" and opts.get("pdf_tables", "auto") != "off":
         try:
-            pdf_result = _pdf_tables_result(path)
+            pdf_result = _pdf_tables_result(src)
         except Exception:
             pdf_result = None
         if pdf_result is not None:
             result = pdf_result
-            note = f"{pdf_result.pdf_tables} table(s) via pdfplumber"
+            tables_note = f"{pdf_result.pdf_tables} table(s) via pdfplumber"
+            note = f"{note}; {tables_note}" if note else tables_note
             furniture_done = True  # _clean_pdf_text внутри
     if result is None:
         try:
-            result, note = _convert_file_data(path)
+            result, data_note = _convert_file_data(src)
+            if data_note:
+                note = f"{note}; {data_note}" if note else data_note
         except Exception as exc:
             print(f"[error] Failed to convert {path.name}: {exc}")
             return "fail"
@@ -2185,10 +2550,10 @@ def _convert_file_to_target(path: Path, target: Path, opts: dict,
     # Markdown, и пользователь должен знать, почему.
     pdf_text_layer = None
     if suffix == ".pdf":
-        probe = _pdf_text_layer_probe(path)
+        probe = _pdf_text_layer_probe(src)
         if probe is None:
             text_for_diagnose = result.text_content
-            page_count = _pdf_page_count(path)
+            page_count = _pdf_page_count(src)
         else:
             pdfium_text, page_count = probe
             text_for_diagnose = pdfium_text

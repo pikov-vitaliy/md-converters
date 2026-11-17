@@ -40,6 +40,11 @@ dependencies = [
     # прямой импорт не должен зависеть от состава транзитивных зависимостей
     # под потолком markitdown<1.0.0. Apache-2.0 — без AGPL.
     "requests>=2.32,<3",
+    # Карта шрифта PDF по контурам глифов (_pdf_glyph_fixed_copy):
+    # fontTools читает встроенный и системный шрифты, pypdf пишет
+    # исправленную ToUnicode во временную копию PDF. MIT / BSD-3.
+    "fonttools>=4.50,<5",
+    "pypdf>=5,<7",
 ]
 
 [dependency-groups]
