@@ -1625,10 +1625,20 @@ def _sanitize_html_url_attr(match: re.Match,
     return f' {match.group("name").lower()}={quote}{safe}{quote}'
 
 
+def _escape_match(match: re.Match) -> str:
+    return _escape_html_text(match.group())
+
+
 def sanitize_markdown(text: str, keep_images: bool) -> str:
-    """Нейтрализует опасные ссылки и raw HTML в Markdown-теле."""
-    text = _DANGEROUS_BLOCK_TAG.sub("", text)
-    text = _DANGEROUS_SINGLE_TAG.sub("", text)
+    """Нейтрализует опасные ссылки и raw HTML в Markdown-теле.
+
+    Опасные теги (`<script>`, `<iframe>`…) экранируются, а не
+    вырезаются: в выводе MarkItDown это литеральный текст документа
+    (пример XSS на слайде, `&lt;script&gt;` в HTML), и удаление съедало
+    его вместе с содержимым. Экранированный тег просмотрщик покажет
+    как текст и не исполнит."""
+    text = _DANGEROUS_BLOCK_TAG.sub(_escape_match, text)
+    text = _DANGEROUS_SINGLE_TAG.sub(_escape_match, text)
     text = _HTML_EVENT_ATTR.sub("", text)
     text = _HTML_URL_ATTR.sub(
         lambda m: _sanitize_html_url_attr(m, keep_images),
@@ -1740,35 +1750,119 @@ def _convert_box_tables(text: str) -> str:
     return "\n".join(out)
 
 
-def _apply_outside_fences(text: str, fn) -> str:
-    """Применяет fn к сегментам ВНЕ код-блоков (```), оставляя содержимое
-    фенсов нетронутым. Так sanitize/конвертация псевдографики/сворачивание
-    картинок не искажают технический контент в код-блоках (важно для базы
-    знаний по ИБ: `<script>`, `javascript:`, `data:` в примерах). Контент
-    вне фенсов по-прежнему санитизируется — посторонняя активная разметка
-    не проходит (фенс-блок рендерится как инертный <pre><code>)."""
+# Ограда кода по CommonMark: ``` или ~~~ от трёх знаков, отступ до трёх
+# пробелов, после ограды — язык. Раньше узнавалась только голая ```, и
+# содержимое ```html и ~~~ санитизация вычищала как прозу. У ``` в
+# строке языка не бывает обратных кавычек: это уже встроенный код.
+_FENCE_OPEN_RE = re.compile(r"^ {0,3}(`{3,}(?=[^`]*$)|~{3,})")
+_FENCE_CLOSE_RE = re.compile(r"^ {0,3}(`{3,}|~{3,})\s*$")
+# Сырой HTML-блок: строка начинается с тега, и до конца блока Markdown
+# не разбирается — ни ограда, ни обратные кавычки кодом не становятся,
+# а `<script>` внутри живой. Конец блока — по CommonMark: свой
+# закрывающий признак у script/pre/style/textarea, комментария, `<?`,
+# CDATA и `<!`, у остальных — пустая строка. Начало взято с запасом:
+# лишний «HTML-блок» лишь санитизируется, как раньше.
+_HTML_BLOCK_START = re.compile(r"^ {0,3}<[A-Za-z/!?]")
+_HTML_BLOCK_ENDS = (
+    (re.compile(r"(?i)^ {0,3}<(?:script|pre|style|textarea)(?:[\s>]|$)"),
+     re.compile(r"(?i)</(?:script|pre|style|textarea)>")),
+    (re.compile(r"^ {0,3}<!--"), re.compile(r"-->")),
+    (re.compile(r"^ {0,3}<\?"), re.compile(r"\?>")),
+    (re.compile(r"^ {0,3}<!\[CDATA\["), re.compile(r"\]\]>")),
+    (re.compile(r"^ {0,3}<![A-Za-z]"), re.compile(r">")),
+)
+_BLANK_LINE = re.compile(r"^\s*$")
+# Встроенный код и то, что CommonMark разбирает раньше него: HTML-тег,
+# комментарий, автоссылка. Обратная кавычка внутри тега кода не
+# открывает (`<a title="`" onclick=…>` — живой тег), поэтому тег
+# поглощается первым: до `>` вне кавычек, до пустой строки или до
+# конца. Это шире стандарта, но лишнее совпадение лишь оставляет текст
+# под санитизацией, а без закрывающих границ разбор был бы
+# квадратичным. Кавычка после `\` — литерал, не код; код длиннее 4096
+# знаков не прячется — граница времени разбора.
+_PARA_CHAR = r"(?:[^\n]|\n(?![ \t]*\n))"
+_INLINE_CODE_OR_TAG = re.compile(
+    r"(?P<tag><[A-Za-z/!?](?:[^>\"'\n]|\n(?![ \t]*\n)"
+    r"|\"(?:[^\"\n]|\n(?![ \t]*\n))*+\"?"
+    r"|'(?:[^'\n]|\n(?![ \t]*\n))*+'?)*+>?)"
+    r"|(?<![`\\])(?P<ticks>`+)(?!`)"
+    + _PARA_CHAR + r"{1,4096}?(?<!`)(?P=ticks)(?!`)"
+)
+_CODE_PLACEHOLDER = re.compile("\x00(\\d+)\x00")
+
+
+def _mask_inline_code(lines: list, spans: list) -> str:
+    """Прячет встроенный код за метками `\\x00N\\x00` (их не бывает в
+    тексте: управляющие символы tidy() уже вычистил). Строки сырого
+    HTML-блока не трогаются — там обратные кавычки не код."""
     out: list[str] = []
-    prose: list[str] = []
-    in_fence = False
+    run: list[str] = []
+
+    def code(match: re.Match) -> str:
+        if match.group("tag"):
+            return match.group()
+        spans.append(match.group())
+        return f"\x00{len(spans) - 1}\x00"
+
+    def flush() -> None:
+        if run:
+            out.append(_INLINE_CODE_OR_TAG.sub(code, "\n".join(run)))
+            run.clear()
+
+    for line, in_html in lines:
+        if in_html:
+            flush()
+            out.append(line)
+        else:
+            run.append(line)
+    flush()
+    return "\n".join(out)
+
+
+def _apply_outside_fences(text: str, fn) -> str:
+    """Применяет fn к тексту ВНЕ кода, оставляя код нетронутым: ограды
+    ```/~~~ с языком и без, встроенный `код`. Так sanitize/конвертация
+    псевдографики/сворачивание картинок не искажают технический контент
+    (важно для базы знаний по ИБ: `<script>`, `javascript:`, `data:` в
+    примерах). Контент вне кода по-прежнему санитизируется — посторонняя
+    активная разметка не проходит (код рендерится инертно)."""
+    out: list[str] = []
+    prose: list[tuple[str, bool]] = []
+    fence = None      # открывающая ограда текущего код-блока
+    html_end = None   # признак конца текущего HTML-блока
 
     def flush() -> None:
         if prose:
-            out.append(fn("\n".join(prose)))
+            spans: list[str] = []
+            done = fn(_mask_inline_code(prose, spans))
+            out.append(_CODE_PLACEHOLDER.sub(
+                lambda m: spans[int(m.group(1))], done))
             prose.clear()
 
     for line in text.split("\n"):
-        if line.strip() == _FENCE:
-            if in_fence:
-                out.append(line)
-                in_fence = False
-            else:
+        if fence is not None:
+            out.append(line)
+            close = _FENCE_CLOSE_RE.match(line)
+            if (close and close.group(1)[0] == fence[0]
+                    and len(close.group(1)) >= len(fence)):
+                fence = None
+            continue
+        if html_end is None:
+            opened = _FENCE_OPEN_RE.match(line)
+            if opened:
                 flush()
                 out.append(line)
-                in_fence = True
-        elif in_fence:
-            out.append(line)
-        else:
-            prose.append(line)
+                fence = opened.group(1)
+                continue
+            if _HTML_BLOCK_START.match(line):
+                html_end = next(
+                    (end for start, end in _HTML_BLOCK_ENDS
+                     if start.match(line)),
+                    _BLANK_LINE,
+                )
+        prose.append((line, html_end is not None))
+        if html_end is not None and html_end.search(line):
+            html_end = None
     flush()
     return "\n".join(out)
 
@@ -2044,15 +2138,52 @@ def _convert_reencoded(raw: bytes) -> tuple:
     return result, f"re-encoded from {enc}"
 
 
+def _data_language(suffix: str | None,
+                   mimetype: str | None = None) -> str | None:
+    """'json' | 'xml' для форматов-данных, иначе None."""
+    suffix = (suffix or "").lower()
+    mimetype = (mimetype or "").lower()
+    if (suffix == ".json" or mimetype in ("application/json", "text/json")
+            or mimetype.endswith("+json")):
+        return "json"
+    if (suffix == ".xml" or mimetype in ("application/xml", "text/xml")
+            or mimetype.endswith("+xml")):
+        return "xml"
+    return None
+
+
+def _fence_data(result, language: str):
+    """Сырой JSON/XML -> ограда кода с языком.
+
+    MarkItDown отдаёт их сырым текстом, а это данные, не проза:
+    санитизация портила значения («"data:field"» -> «blocked»,
+    «<script>» внутри строки вырезался), многострочный JSON во вьюере
+    схлопывался в абзац. В ограде они инертны и сохраняют вид. XML,
+    разобранный MarkItDown как RSS/Atom, уже Markdown — его не трогаем.
+    Ограда длиннее любого прогона ` внутри, чтобы данные её не закрыли.
+    """
+    text = result.text_content.strip("\n")
+    if language == "xml" and not text.lstrip().startswith("<"):
+        return result
+    ticks = max((len(run) for run in re.findall(r"`+", text)), default=0)
+    fence = "`" * max(3, ticks + 1)
+    return _TextResult(result, f"{fence}{language}\n{text}\n{fence}\n")
+
+
 def _convert_file_data(path: Path) -> tuple:
-    """(result, note). Для HTML — с автоопределением кодировки."""
+    """(result, note). Для HTML — с автоопределением кодировки, JSON и
+    XML — в ограде кода."""
     if path.suffix.lower() in (".html", ".htm"):
         raw = path.read_bytes()
         try:
             raw.decode("utf-8")
         except UnicodeDecodeError:
             return _convert_reencoded(raw)
-    return _md().convert(str(path)), None
+    result = _md().convert(str(path))
+    language = _data_language(path.suffix)
+    if language:
+        result = _fence_data(result, language)
+    return result, None
 
 
 def _positive_float(value: str, name: str) -> float:
