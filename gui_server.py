@@ -28,7 +28,14 @@ from typing import AsyncGenerator
 from urllib.parse import quote
 
 import uvicorn
-from fastapi import FastAPI, Form, Request, Response, UploadFile
+from fastapi import (
+    FastAPI,
+    Form,
+    HTTPException,
+    Request,
+    Response,
+    UploadFile,
+)
 from fastapi.concurrency import run_in_threadpool
 from fastapi.responses import (
     HTMLResponse,
@@ -36,6 +43,16 @@ from fastapi.responses import (
     StreamingResponse,
 )
 from fastapi.staticfiles import StaticFiles
+
+# python-multipart — зависимость экстры [gui]; модуль python_multipart
+# появился в 0.0.13, нижняя граница в pyproject — 0.0.12.
+try:
+    from python_multipart.multipart import (
+        MultipartParser,
+        parse_options_header,
+    )
+except ImportError:  # pragma: no cover — python-multipart 0.0.12
+    from multipart.multipart import MultipartParser, parse_options_header
 
 import convert_to_md as core
 
@@ -280,6 +297,78 @@ async def _open_browser_when_ready(port: int) -> None:
             return
         except (ConnectionError, OSError):
             await asyncio.sleep(0.5)
+
+
+# --- Лимит загрузки ДО приёма тела (c3) ---
+
+class _UploadTooLarge(HTTPException):
+    """Часть multipart больше _MAX_UPLOAD_BYTES. HTTPException — чтобы
+    FastAPI не подменил причину общим 400 «error parsing the body»."""
+
+
+@app.exception_handler(_UploadTooLarge)
+async def _upload_too_large(request: Request, exc: _UploadTooLarge):
+    # фронтенд читает поле error (как у _bad_request), не detail
+    return JSONResponse({"error": exc.detail}, status_code=413)
+
+
+class _UploadLimit:
+    """Обрывает приём, как только одна часть multipart больше лимита.
+
+    Starlette пишет файловую часть во временный файл целиком (его
+    max_part_size на файлы не действует), а проверка размера в
+    _save_upload_streaming шла уже после — 101 МиБ ложились на диск до
+    отказа. Здесь каждый кусок тела сначала проходит через свой
+    разборщик-счётчик и, если часть перевалила лимит, отвергается ДО
+    того, как его получит Starlette. Лимит — на часть, не на запрос:
+    несколько файлов по 100 МБ в одной загрузке допустимы, как раньше.
+    """
+
+    def __init__(self, app):
+        self.app = app
+
+    async def __call__(self, scope, receive, send):
+        if scope["type"] != "http":
+            return await self.app(scope, receive, send)
+        ctype = dict(scope["headers"]).get(b"content-type", b"")
+        kind, params = parse_options_header(ctype)
+        boundary = params.get(b"boundary")
+        if kind != b"multipart/form-data" or not boundary:
+            return await self.app(scope, receive, send)
+        size = 0
+
+        def on_part_begin():
+            nonlocal size
+            size = 0
+
+        def on_part_data(data, start, end):
+            nonlocal size
+            size += end - start
+            if size > _MAX_UPLOAD_BYTES:
+                raise _UploadTooLarge(413, (
+                    f"Файл больше {_MAX_UPLOAD_BYTES // 1048576} МБ — "
+                    "загрузка прервана"
+                ))
+
+        parser = MultipartParser(boundary, {
+            "on_part_begin": on_part_begin,
+            "on_part_data": on_part_data,
+        })
+
+        async def limited_receive():
+            message = await receive()
+            if message["type"] == "http.request":
+                parser.write(message.get("body", b""))
+            return message
+
+        await self.app(scope, limited_receive, send)
+
+
+# Регистрируем ДО _check_origin — ограничитель окажется ВНУТРИ него.
+# Снаружи исключение из receive проходило бы через task group
+# BaseHTTPMiddleware, доходило до FastAPI завёрнутым в ExceptionGroup,
+# и тот отвечал общим 400 вместо 413 с причиной.
+app.add_middleware(_UploadLimit)
 
 
 # --- DNS rebinding / CSRF protection (BLK-6, S1) ---

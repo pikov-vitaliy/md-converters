@@ -1331,3 +1331,59 @@ def test_sse_disconnect_keeps_lock_until_worker_ends(monkeypatch):
     ).decode("utf-8")
     assert "MARKER_A" not in body_b
     assert sys.stdout is real_stdout
+
+
+def test_upload_limit_stops_reading_body_early(monkeypatch):
+    """c3: файл сверх лимита отвергается, не дочитывая тело.
+
+    Раньше Starlette принимал multipart-часть во временный файл
+    целиком, а лимит проверялся уже после: 101 МиБ ложились на диск.
+    Тело отдаётся кусками по 1 КБ при лимите 4 КБ — приложение должно
+    перестать читать задолго до конца и ответить 413 с причиной.
+    """
+    import asyncio
+
+    monkeypatch.setattr(gui_server, "_MAX_UPLOAD_BYTES", 4096)
+    saved = []
+
+    async def fake_save(upload, dest):
+        saved.append(dest)
+        raise ValueError("File too large")  # прежний, поздний отказ
+
+    monkeypatch.setattr(gui_server, "_save_upload_streaming", fake_save)
+    boundary = "LIMITBOUNDARY"
+    chunks = [(
+        f"--{boundary}\r\n"
+        'Content-Disposition: form-data; name="files"; '
+        'filename="big.csv"\r\n'
+        "Content-Type: text/csv\r\n\r\n"
+    ).encode()]
+    chunks += [b"a" * 1024] * 64
+    chunks.append(f"\r\n--{boundary}--\r\n".encode())
+    state = {"read": 0}
+    sent = []
+
+    async def receive():
+        if state["read"] < len(chunks):
+            state["read"] += 1
+            return {"type": "http.request",
+                    "body": chunks[state["read"] - 1],
+                    "more_body": state["read"] < len(chunks)}
+        return {"type": "http.disconnect"}
+
+    async def send(message):
+        sent.append(message)
+
+    asyncio.run(gui_server.app(
+        _asgi_scope("/api/convert/files",
+                    f"multipart/form-data; boundary={boundary}"),
+        receive, send,
+    ))
+    start = next(m for m in sent if m["type"] == "http.response.start")
+    assert start["status"] == 413
+    body = b"".join(m.get("body", b"") for m in sent
+                    if m["type"] == "http.response.body")
+    assert "загрузка прервана" in json.loads(body)["error"]
+    # шапка части + 4 куска до лимита + кусок, на котором он сработал
+    assert state["read"] <= 6, f"прочитано {state['read']} из {len(chunks)}"
+    assert saved == []
