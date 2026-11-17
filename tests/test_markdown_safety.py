@@ -233,3 +233,32 @@ def test_convert_json_and_xml_are_fenced_data(tmp_path):
     assert body("markup") == f"```xml\n{xml}\n```\n"
     # RSS MarkItDown уже разобрал в Markdown — его не огораживаем.
     assert "```" not in body("feed") and "# Лента" in body("feed")
+
+
+def test_xml_data_fence_keeps_whitespace_of_values(tmp_path):
+    # В значениях XML пробелы и пустые строки — данные: MarkItDown
+    # срезал «one  » и сжимал четыре перевода строки в два, tidy() —
+    # тоже. В ограду идёт исходник, декодированный как парсером XML:
+    # BOM, затем encoding из объявления, иначе UTF-8.
+    cdata = "<root><v><![CDATA[one  \n\n\n\ntwo]]></v>\n<w>x   </w></root>"
+    (tmp_path / "cdata.xml").write_text(cdata, encoding="utf-8")
+    cp1251 = ('<?xml version="1.0" encoding="windows-1251"?>\n'
+              "<r><![CDATA[Привет  \n\n\nмир]]></r>")
+    (tmp_path / "cp1251.xml").write_bytes(cp1251.encode("cp1251"))
+    (tmp_path / "utf16.xml").write_bytes(cdata.encode("utf-16"))
+    out = tmp_path / "out"
+    opts = {
+        "force": True, "frontmatter": False, "keep_images": False,
+        "unsafe_raw_markdown": False, "out_dir": out, "sandbox": False,
+        "scan": {".xml"}, "tool": "tomd", "planned": set(),
+    }
+
+    for name in ("cdata.xml", "cp1251.xml", "utf16.xml"):
+        assert convert_to_md.convert_file(tmp_path / name, opts) == "ok"
+
+    def body(stem):
+        return (out / f"{stem}.md").read_text(encoding="utf-8")
+
+    assert body("cdata") == f"```xml\n{cdata}\n```\n"
+    assert body("cp1251") == f"```xml\n{cp1251}\n```\n"
+    assert body("utf16") == f"```xml\n{cdata}\n```\n"

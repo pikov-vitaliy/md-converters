@@ -54,6 +54,7 @@ from __future__ import annotations
 import glob
 import argparse
 import base64
+import codecs
 import hashlib
 import io
 import ipaddress
@@ -1481,16 +1482,29 @@ def _escape_html_text(value: str) -> str:
     return value.replace("<", "&lt;").replace(">", "&gt;")
 
 
+# Обратная кавычка в ячейке с предшествующими `\`: их удваиваем и
+# добавляем свою, иначе `\` экранировал бы уже не кавычку, а себя.
+_BACKTICK_RE = re.compile(r"(\\*)`")
+
+
+def _escape_table_cell_text(line: str) -> str:
+    line = _escape_html_text(line)
+    return _BACKTICK_RE.sub(lambda m: m.group(1) * 2 + "\\`", line)
+
+
 def _escape_table_rows(text: str) -> str:
-    """Экранирует HTML-символы в строках GFM-таблиц.
+    """Экранирует HTML-символы и обратные кавычки в строках GFM-таблиц.
 
     Ячейка PDF — литеральный текст: «<script>x</script>» санитизация
     вырезала целиком, а «List<T>» просмотрщик рендерил как «List».
-    Вызывается ПОСЛЕ ремонта кириллицы: в сломанном шрифте «<» и «>» —
-    буквы «м» и «о», и раннее экранирование испортило бы их ремонт.
+    Обратные кавычки — тоже литерал: «`List<T>`» без экранирования
+    становился кодом, а в коде сущности не раскрываются, и было видно
+    «List&lt;T&gt;». Вызывается ПОСЛЕ ремонта кириллицы: в сломанном
+    шрифте «<» и «>» — буквы «м» и «о», и раннее экранирование испортило
+    бы их ремонт.
     """
     return "\n".join(
-        _escape_html_text(ln) if _GFM_ROW_RE.match(ln) else ln
+        _escape_table_cell_text(ln) if _GFM_ROW_RE.match(ln) else ln
         for ln in text.split("\n")
     )
 
@@ -2544,7 +2558,7 @@ def _apply_outside_fences(text: str, fn) -> str:
 
 
 def tidy(text: str, keep_images: bool, phantom_images: bool = False,
-         safe_markdown: bool = True) -> str:
+         safe_markdown: bool = True, data_fence: bool = False) -> str:
     """Прибирает вывод: чистит управляющие символы, конвертирует
     псевдографику таблиц в GFM, убирает хвостовые пробелы, схлопывает
     пустые строки, обрезает края и (по умолчанию) сворачивает base64-
@@ -2558,6 +2572,10 @@ def tidy(text: str, keep_images: bool, phantom_images: bool = False,
     text = text.replace("\r\n", "\n").replace("\r", "\n")
     text = _CTRL_TO_SPACE.sub(" ", text)
     text = _CTRL_DROP.sub("", text)
+    if data_fence:
+        # Весь текст — ограда с JSON/XML (_fence_data): пробелы в концах
+        # строк и пустые строки внутри — значения, их не трогаем.
+        return text.strip("\n") + "\n"
 
     def _transform_prose(seg: str) -> str:
         seg = _convert_box_tables(seg)
@@ -2705,6 +2723,7 @@ def _emit(target: Path, result, source: str, frontmatter: bool,
         keep_images,
         phantom_images,
         safe_markdown=safe_markdown,
+        data_fence=getattr(result, "data_fence", False),
     )
     if frontmatter:
         title = getattr(result, "title", None)
@@ -2771,13 +2790,56 @@ def _best_cyrillic_decode(raw: bytes) -> tuple[str, str] | None:
     return None
 
 
+# Метки кодировок, которые в HTML означают другую кодировку, чем в
+# Python (стандарт WHATWG Encoding, его применяют браузеры):
+# «iso-8859-1»/«ascii» — это windows-1252, иначе «€» и типографские
+# кавычки становились управляющими U+0080..U+009F. Так же latin5 ->
+# windows-1254 и tis-620 -> windows-874.
+_WHATWG_LABELS = {
+    **dict.fromkeys((
+        "ansi_x3.4-1968", "ascii", "cp819", "csisolatin1", "ibm819",
+        "iso-8859-1", "iso-ir-100", "iso8859-1", "iso88591",
+        "iso_8859-1", "iso_8859-1:1987", "l1", "latin1", "us-ascii",
+    ), "windows-1252"),
+    **dict.fromkeys((
+        "csisolatin5", "iso-8859-9", "iso-ir-148", "iso8859-9",
+        "iso88599", "iso_8859-9", "iso_8859-9:1989", "l5", "latin5",
+    ), "windows-1254"),
+    **dict.fromkeys((
+        "dos-874", "iso-8859-11", "iso8859-11", "iso885911", "tis-620",
+    ), "windows-874"),
+}
+
+
+def _html_encoding(label: str) -> str:
+    return _WHATWG_LABELS.get(label.strip().lower(), label)
+
+
+def _decode_html_label(raw: bytes, encoding: str) -> str | None:
+    """Декодирует по метке HTML. У windows-1252/1254 незанятые байты
+    (0x81, 0x8D…) по WHATWG — управляющие U+0081…: без этого страница
+    с таким байтом, прежде читавшаяся как latin-1, падала бы в эвристики
+    и могла стать кириллической кашей."""
+    if encoding in ("windows-1252", "windows-1254"):
+        return raw.decode(encoding, errors="whatwg-c1")
+    return _decode_with(raw, encoding)
+
+
+def _c1_fallback(error: UnicodeDecodeError) -> tuple[str, int]:
+    chunk = error.object[error.start:error.end]
+    return chunk.decode("latin-1"), error.end
+
+
+codecs.register_error("whatwg-c1", _c1_fallback)
+
+
 def decode_html_bytes(raw: bytes,
                       http_charset: str | None = None) -> tuple[str, str]:
     """Декодирует HTML с приоритетом BOM/meta и русскоязычных кодировок.
 
     http_charset — кодировка из заголовка Content-Type (HTML по URL). По
     HTML-стандарту она важнее <meta>, но уступает BOM — так читает и
-    браузер."""
+    браузер. Метки заголовка и <meta> читаются по таблице WHATWG."""
     if raw.startswith(b"\xef\xbb\xbf"):
         text = _decode_with(raw, "utf-8-sig")
         if text is not None:
@@ -2794,13 +2856,15 @@ def decode_html_bytes(raw: bytes,
             return text, "utf-16"
 
     if http_charset:
-        text = _decode_with(raw, http_charset)
+        http_charset = _html_encoding(http_charset)
+        text = _decode_html_label(raw, http_charset)
         if text is not None:
             return text, http_charset
 
     declared = _meta_charset(raw)
     if declared:
-        text = _decode_with(raw, declared)
+        declared = _html_encoding(declared)
+        text = _decode_html_label(raw, declared)
         if text is not None:
             return text, declared
 
@@ -2851,7 +2915,26 @@ def _data_language(suffix: str | None,
     return None
 
 
-def _fence_data(result, language: str):
+_XML_DECL_ENCODING = re.compile(
+    rb"""^<\?xml[^>]*?\sencoding\s*=\s*["']([A-Za-z][A-Za-z0-9._-]*)""")
+
+
+def _decode_data(raw: bytes) -> str | None:
+    """Исходник JSON/XML так, как его читает парсер: BOM, затем
+    encoding из объявления XML, иначе UTF-8. None — не декодируется."""
+    for bom, encoding in ((b"\xef\xbb\xbf", "utf-8-sig"),
+                          (b"\xff\xfe\x00\x00", "utf-32"),
+                          (b"\x00\x00\xfe\xff", "utf-32"),
+                          (b"\xff\xfe", "utf-16"), (b"\xfe\xff", "utf-16")):
+        if raw.startswith(bom):
+            return _decode_with(raw, encoding)
+    declared = _XML_DECL_ENCODING.match(raw)
+    if declared:
+        return _decode_with(raw, declared.group(1).decode("ascii"))
+    return _decode_with(raw, "utf-8")
+
+
+def _fence_data(result, language: str, raw: bytes | None = None):
     """Сырой JSON/XML -> ограда кода с языком.
 
     MarkItDown отдаёт их сырым текстом, а это данные, не проза:
@@ -2860,13 +2943,23 @@ def _fence_data(result, language: str):
     схлопывался в абзац. В ограде они инертны и сохраняют вид. XML,
     разобранный MarkItDown как RSS/Atom, уже Markdown — его не трогаем.
     Ограда длиннее любого прогона ` внутри, чтобы данные её не закрыли.
+
+    В ограду идёт исходник (raw), а не текст MarkItDown: тот срезает
+    пробелы в концах строк и сжимает пустые строки, а в значениях
+    (CDATA, xml:space) это данные. Не декодируется — текст MarkItDown.
+    tidy() внутри такой ограды пробелы тоже не трогает (data_fence).
     """
     text = result.text_content.strip("\n")
     if language == "xml" and not text.lstrip().startswith("<"):
         return result
+    source = _decode_data(raw) if raw is not None else None
+    if source is not None:
+        text = source.strip("\r\n")
     ticks = max((len(run) for run in re.findall(r"`+", text)), default=0)
     fence = "`" * max(3, ticks + 1)
-    return _TextResult(result, f"{fence}{language}\n{text}\n{fence}\n")
+    fenced = _TextResult(result, f"{fence}{language}\n{text}\n{fence}\n")
+    fenced.data_fence = True
+    return fenced
 
 
 def _convert_file_data(path: Path) -> tuple:
@@ -2881,7 +2974,7 @@ def _convert_file_data(path: Path) -> tuple:
     result = _md().convert(str(path))
     language = _data_language(path.suffix)
     if language:
-        result = _fence_data(result, language)
+        result = _fence_data(result, language, path.read_bytes())
     return result, None
 
 
@@ -3088,7 +3181,7 @@ def _convert_url_data(url: str, opts: dict) -> tuple:
         )
     language = None if is_html else _data_language(suffix, mimetype)
     if language:
-        result = _fence_data(result, language)
+        result = _fence_data(result, language, data)
     return result, final_url
 
 

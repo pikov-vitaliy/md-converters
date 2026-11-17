@@ -354,6 +354,23 @@ def test_convert_url_uses_charset_from_content_type(monkeypatch):
     assert text in result.text_content
 
 
+def test_convert_url_reads_iso_8859_1_as_windows_1252(monkeypatch):
+    # Сервер объявляет iso-8859-1, страница — windows-1252: браузер
+    # читает обе метки как windows-1252, «€» и “кавычки” сохраняются.
+    _serve_once(
+        monkeypatch,
+        ('<html><head><meta charset="windows-1252"></head><body>'
+         "<p>20 €, “yes”</p></body></html>"
+         ).encode("cp1252"),
+        "text/html; charset=iso-8859-1",
+    )
+
+    result, _ = convert_to_md._convert_url_data(
+        "https://example.com/page", dict(_URL_OPTS))
+
+    assert "20 €, “yes”" in result.text_content
+
+
 def test_convert_url_fences_json_by_content_type(monkeypatch):
     # JSON по URL без расширения — те же данные, что и файл .json.
     data = '{"data:field": "KEEP_ME"}'
