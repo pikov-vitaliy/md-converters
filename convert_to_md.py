@@ -58,6 +58,7 @@ import hashlib
 import io
 import ipaddress
 import json
+import math
 import os
 import re
 import shlex
@@ -2257,6 +2258,11 @@ def _positive_float(value: str, name: str) -> float:
         number = float(value)
     except ValueError as exc:
         raise ValueError(f"{name} must be a number") from exc
+    # float() принимает «nan» и «inf»: nan проходил проверку `<= 0`, и
+    # дальше _build_opts падал на int(nan) (inf — на OverflowError),
+    # а тайм-ауты уходили в настройки бесконечными.
+    if not math.isfinite(number):
+        raise ValueError(f"{name} must be a finite number")
     if number <= 0:
         raise ValueError(f"{name} must be greater than 0")
     return number

@@ -2,7 +2,23 @@ import sys
 from pathlib import Path
 from types import SimpleNamespace
 
+import pytest
+
 import convert_to_md
+
+
+@pytest.mark.parametrize("option", [
+    "--url-timeout", "--max-url-mb", "--max-input-mb",
+    "--conversion-timeout",
+])
+@pytest.mark.parametrize("value", ["nan", "inf", "1e400"])
+def test_parse_rejects_non_finite_numbers(option, value):
+    # float() принимает nan/inf: они проходили проверку, и _build_opts
+    # падал на int(nan)/int(inf) вместо штатной ошибки аргумента.
+    parsed = convert_to_md._parse(["file.html", option, value])
+
+    assert any("finite" in err for err in parsed["errors"])
+    convert_to_md._build_opts(parsed, None)
 
 
 def test_parse_rejects_option_as_output_value():
