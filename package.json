@@ -1,0 +1,40 @@
+{
+  "name": "md-converters",
+  "version": "2.0.0",
+  "description": "Конвертация документов (PDF, Word, Excel, PowerPoint, HTML и др.) в Markdown: Web-GUI и команда md-converters",
+  "bin": {
+    "md-converters": "npm/cli.js"
+  },
+  "scripts": {
+    "prepack": "node npm/prepack.js"
+  },
+  "files": [
+    "npm/cli.js",
+    "npm/requirements.txt",
+    "npm/wheel/*.whl",
+    "LICENSE"
+  ],
+  "engines": {
+    "node": ">=18"
+  },
+  "keywords": [
+    "markdown",
+    "pdf",
+    "docx",
+    "xlsx",
+    "pptx",
+    "converter",
+    "markitdown",
+    "russian"
+  ],
+  "license": "MIT",
+  "author": "Vitaly Pikov",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/pikov-vitaliy/md-converters.git"
+  },
+  "homepage": "https://github.com/pikov-vitaliy/md-converters#readme",
+  "bugs": {
+    "url": "https://github.com/pikov-vitaliy/md-converters/issues"
+  }
+}

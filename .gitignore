@@ -56,3 +56,8 @@ desktop.ini
 /pip-audit*.json
 # Короткое имя для разовых экспортов requirements (из промта аудитора)
 /rt.txt
+
+# npm-пакет: собирается npm/prepack.js
+/npm/wheel/
+/npm/requirements.txt
+/*.tgz

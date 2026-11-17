@@ -3,7 +3,7 @@
 [![CI](https://github.com/pikov-vitaliy/md-converters/actions/workflows/ci.yml/badge.svg)](https://github.com/pikov-vitaliy/md-converters/actions/workflows/ci.yml)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 
-Версия: **1.4.0**.
+Версия: **2.0.0**. Нужен Python 3.14 (при установке через npm он ставится сам).
 
 Универсальный инструмент перевода документов в Markdown. Одна команда `tomd`
 понимает формат по расширению и конвертирует **что угодно**:
@@ -21,6 +21,41 @@
 
 Команды-синонимы для привычки: `pdf2md` (только PDF) и `html2md` (только HTML)
 — это тот же `tomd` с фильтром формата.
+
+---
+
+## Установка через npm (проще всего)
+
+Нужен только [Node.js](https://nodejs.org/) 18 или новее. Python ставить
+не нужно: при первом запуске пакет сам подготовит Python 3.14 и библиотеки.
+
+```powershell
+npm install -g md-converters
+md-converters
+```
+
+`md-converters` без аргументов открывает Web-GUI в браузере: перетащите
+файлы в окно и скачайте результат. С файлами работает как команда `tomd`:
+
+```powershell
+md-converters отчёт.pdf
+md-converters документы\*.docx -o результат
+md-converters --help
+```
+
+Без установки: `npx md-converters`.
+
+Первый запуск занимает несколько минут: пакет готовит своё окружение
+(около 400 МБ) в `%LOCALAPPDATA%\md-converters` (Linux и macOS:
+`~/.local/share/md-converters`). Если в системе есть
+[uv](https://docs.astral.sh/uv/) или Python 3.14, используются они; иначе
+пакет ставит uv официальным установщиком в ту же папку, PATH не меняет,
+а uv скачивает Python 3.14. Библиотеки ставятся строго по версиям и хешам
+из `uv.lock`. В корпоративной сети с прокси задайте `HTTPS_PROXY`.
+
+- `md-converters --where` — где лежит окружение;
+- `md-converters --reinstall` — пересобрать окружение;
+- удалить всё: `npm uninstall -g md-converters` и папку из `--where`.
 
 ---
 
@@ -209,7 +244,7 @@ source_name: "sample-report.html"
 source_path: "examples\\sample-report.html"
 source_id: "path:..."
 converted: 2026-06-10
-generator: tomd 1.4.0 (MarkItDown)
+generator: tomd 2.0.0 (MarkItDown)
 ---
 
 # Отчёт об уязвимостях — demo-project
@@ -304,7 +339,7 @@ source_name: "имя-исходного-файла.docx"
 source_path: "путь\\к\\имя-исходного-файла.docx"
 source_id: "path:короткий-хэш-источника"
 converted: 2026-06-10
-generator: tomd 1.4.0 (MarkItDown)
+generator: tomd 2.0.0 (MarkItDown)
 ---
 ```
 
