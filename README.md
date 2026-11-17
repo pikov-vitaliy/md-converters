@@ -52,8 +52,8 @@ md-converters --help
 |-----|---------|
 | Документы | PDF, Word `.docx`, Excel `.xlsx`, PowerPoint `.pptx` |
 | Веб и данные | HTML, веб-страница по ссылке, CSV, JSON, XML, RSS, EPUB |
-| Прочее | Outlook `.msg`, Jupyter `.ipynb`, изображения (EXIF) |
-| Архивы | `.zip`, `.7z`, `.tar` – на выходе `.zip` со всеми `.md` |
+| Прочее | Outlook `.msg`, Jupyter `.ipynb`, изображения – метаданные EXIF, если установлен [ExifTool](https://exiftool.org/) (путь можно задать переменной `EXIFTOOL_PATH`) |
+| Архивы | в окне браузера: `.zip`, `.7z`, `.tar` – на выходе `.zip` со всеми `.md`; в командной строке `.zip` превращается в один `.md` |
 
 - **PDF.**
   - Таблицы извлекаются по линиям разметки страницы.

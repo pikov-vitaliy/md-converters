@@ -830,7 +830,9 @@ def _choose_codepoints(found: dict, current: dict, own: dict) -> dict:
     """Одна буква на глиф. Правило строгое (три круга ревью Codex):
     меняется ТОЛЬКО то, что контур опровергает.
     1) прежнее значение, подтверждённое контуром (в том числе двойник:
-       русская А при контуре A/А, Ё при Ё/Ë, «1» для ¹), остаётся;
+       русская А при контуре A/А, Ё при Ё/Ë, «1» для ¹) или собственной
+       Unicode-картой встроенного шрифта для этого глифа, остаётся (у
+       системной версии гарнитуры двойника может не быть вовсе);
     2) многосимвольное печатное значение («1/2», «ffi») — сознательное
        раскрытие, остаётся; пустое и управляющие символы — мусор;
     3) для опровергнутых — собственная Unicode-карта встроенного шрифта
@@ -845,7 +847,8 @@ def _choose_codepoints(found: dict, current: dict, own: dict) -> dict:
     for cid, (cps, same) in found.items():
         old = current.get(cid)
         if old is not None and (
-            _confirmed(old, cps) or (len(old) > 1 and old.isprintable())
+            _confirmed(old, cps) or _confirmed(old, own.get(cid, set()))
+            or (len(old) > 1 and old.isprintable())
         ):
             chosen[cid] = old
             continue
@@ -2880,6 +2883,16 @@ def _positive_float(value: str, name: str) -> float:
     return number
 
 
+def _positive_mb(value: str, name: str) -> float:
+    """Мегабайты: 1e308 конечно, но в байтах это уже бесконечность, и
+    int() в _build_opts падал OverflowError (ревью Codex)."""
+    number = _positive_float(value, name)
+    size = number * 1024 * 1024
+    if not math.isfinite(size) or size >= 2 ** 63:
+        raise ValueError(f"{name} is too large")
+    return number
+
+
 # CGNAT / shared address space (RFC 6598). На Python <3.13 он ошибочно
 # проходит ip.is_global=True (исправлено в 3.13); отвергаем явно, чтобы
 # SSRF-проверка не зависела от версии Python.
@@ -3457,13 +3470,13 @@ def _parse(tokens: list) -> dict:
         url_timeout = _DEFAULT_URL_TIMEOUT
 
     try:
-        max_url_mb = _positive_float(parsed.max_url_mb, "--max-url-mb")
+        max_url_mb = _positive_mb(parsed.max_url_mb, "--max-url-mb")
     except ValueError as exc:
         errors.append(f"[error] {exc}")
         max_url_mb = _DEFAULT_MAX_URL_MB
 
     try:
-        max_input_mb = _positive_float(parsed.max_input_mb, "--max-input-mb")
+        max_input_mb = _positive_mb(parsed.max_input_mb, "--max-input-mb")
     except ValueError as exc:
         errors.append(f"[error] {exc}")
         max_input_mb = _DEFAULT_MAX_INPUT_MB

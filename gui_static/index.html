@@ -806,18 +806,44 @@ setInterval(() => fetch("/api/heartbeat", {method: "POST"}), 5000);
     btn.textContent = dark ? "☀" : "☾";
     btn.title = dark ? "Светлая тема" : "Тёмная тема";
   };
-  btn.addEventListener("click", () => {
-    const next = root.getAttribute("data-theme") === "dark" ? "light" : "dark";
-    root.setAttribute("data-theme", next);
+  const boundary = () => {
     const d = new Date(), h = d.getHours(), until = new Date(d);
     until.setHours(h >= 7 && h < 20 ? 20 : 7, 0, 0, 0);
     if (until <= d) until.setDate(until.getDate() + 1);
+    return until;
+  };
+  const byClock = () => {
+    const h = new Date().getHours();
+    return (h >= 20 || h < 7) ? "dark" : "light";
+  };
+  const chosen = () => {
     try {
-      localStorage.setItem("mdc-theme", JSON.stringify({theme: next, until: until.getTime()}));
+      const s = JSON.parse(localStorage.getItem("mdc-theme") || "null");
+      if (s && s.until > Date.now()) return s.theme;
+    } catch (e) {}
+    return null;
+  };
+  // Открытая вкладка тоже меняет тему в 07:00 и 20:00 и при возврате к
+  // ней (ревью Codex: без этого тема менялась только при перезагрузке).
+  const refresh = () => {
+    root.setAttribute("data-theme", chosen() || byClock());
+    paint();
+  };
+  const schedule = () => setTimeout(() => { refresh(); schedule(); },
+    Math.max(1000, boundary() - Date.now() + 1000));
+  document.addEventListener("visibilitychange", () => {
+    if (!document.hidden) refresh();
+  });
+  btn.addEventListener("click", () => {
+    const next = root.getAttribute("data-theme") === "dark" ? "light" : "dark";
+    root.setAttribute("data-theme", next);
+    try {
+      localStorage.setItem("mdc-theme", JSON.stringify({theme: next, until: boundary().getTime()}));
     } catch (e) {}
     paint();
   });
   paint();
+  schedule();
 })();
 loadSettings();
 fetch("/api/flags").then(r => r.json()).then(d => {

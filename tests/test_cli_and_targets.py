@@ -21,6 +21,15 @@ def test_parse_rejects_non_finite_numbers(option, value):
     convert_to_md._build_opts(parsed, None)
 
 
+def test_parse_rejects_megabytes_overflowing_bytes():
+    # Конечное 1e308 МБ проходило isfinite, а перевод в байты давал
+    # бесконечность и OverflowError в _build_opts.
+    for option in ("--max-input-mb", "--max-url-mb"):
+        parsed = convert_to_md._parse(["file.html", option, "1e308"])
+        assert any("too large" in err for err in parsed["errors"])
+        convert_to_md._build_opts(parsed, None)
+
+
 def test_parse_rejects_option_as_output_value():
     parsed = convert_to_md._parse(["file.html", "-o", "--force"])
 

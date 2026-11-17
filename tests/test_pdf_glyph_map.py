@@ -346,6 +346,23 @@ def test_multichar_values_kept(tmp_path, monkeypatch):
 
 
 
+# Ревью Codex (финальный круг): своя карта встроенного шрифта
+# подтверждает кириллицу, даже если у системной версии гарнитуры для этого
+# контура есть только латиница.
+
+def test_own_cmap_confirms_value_missing_in_system_font(tmp_path,
+                                                        monkeypatch):
+    latin = [("A", 0x41, 1), ("B", 0x42, 2), ("C", 0x43, 3)]
+    cyr = [("uni0410", 0x410, 1), ("uni0412", 0x412, 2),
+           ("uni0421", 0x421, 3)]
+    _install(tmp_path, monkeypatch, _font_bytes(glyphs=latin + MIR))
+    mapping = {1: "А", 2: "В", 3: "С", 4: "\x14", 5: "\x15", 6: "\x16"}
+    src = _pdf(tmp_path / "doc.pdf", _font_bytes(glyphs=cyr + MIR),
+               _tounicode(mapping), cids=[1, 2, 3, 4, 5, 6] * 3)
+    text = _fixed_text(src)
+    assert "АВСмир" in text and "ABC" not in text
+
+
 # Ревью Codex (круг E3): меняется только то, что контур опровергает.
 
 def test_empty_value_does_not_abort_repair(tmp_path, monkeypatch):
