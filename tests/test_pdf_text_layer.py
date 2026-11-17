@@ -262,6 +262,40 @@ def test_repair_leaves_unknown_all_ascii_runs_alone():
     assert "по стандарту 8601:2004 указан" in repaired
 
 
+def test_repair_keeps_numbers_with_units_in_normal_text():
+    # Десяток «10кВт» в обычном документе проходил порог повреждения,
+    # и ремонт делал из них «бакВт»: цифры рядом с целой кириллицей —
+    # число с единицей, а не сломанный шрифт. «А+Б» проверяет сам
+    # порог: открытый, он пускает весь ремонт («+» между прописными
+    # становится «Ч»), даже если «10кВт» уцелело бы. Концевая «;» и
+    # знак сравнения перед числом — тоже не буквы.
+    text = "\n".join(
+        f"Двигатель {i}: мощность 10кВт; ток I=10мА, P=10кВт, "
+        f"зазор d<10мм, пуск t>5мин, схема А+Б."
+        for i in range(1, 11)
+    )
+
+    assert convert_to_md._repair_broken_cyrillic_pdf_text(text) == text
+
+
+def test_repair_keeps_number_prefix_in_broken_document():
+    # В сломанном документе цифра — буква, только если документ это
+    # доказывает (цифра внутри слова, «уя7вимосте9»): «1ыть» = «быть»,
+    # а у «10кВт» цифра 0 буквой нигде не стоит.
+    text = _ALT_FONT_BODY + (
+        "Двигатель должен 1ыть мощностью 10кВт и размером 2х4 метра.\n"
+        "Оценивается полнота поверхности атаки2 и ее границы.\n"
+        "Параметры: мощность 10кВт; P=10кВт, зазор d<10мм.\n"
+    )
+
+    repaired = convert_to_md._repair_broken_cyrillic_pdf_text(text)
+
+    assert "Настоящая Методика выявления уязвимостей" in repaired
+    assert "должен быть мощностью 10кВт и размером 2х4 метра" in repaired
+    assert "поверхности атаки2 и ее границы" in repaired
+    assert "мощность 10кВт; P=10кВт, зазор d<10мм." in repaired
+
+
 def test_front_matter_includes_pdf_text_layer_when_provided():
     text = convert_to_md.front_matter(
         "report.pdf",

@@ -1,5 +1,7 @@
 from types import SimpleNamespace
 
+import pytest
+
 import convert_to_md
 
 
@@ -101,3 +103,133 @@ def test_safe_data_image_requires_strict_base64_when_images_kept():
 
     assert "QUJDRA==" in out
     assert "QUJD RA==" not in out
+
+
+# --- b2: текст не вычищается, а экранируется; код и данные не трогаются ---
+
+def test_tidy_escapes_dangerous_tags_in_prose_instead_of_deleting():
+    # Строка со слайда реальной презентации: «<script>» исчезал, хотя
+    # это текст документа, а не разметка.
+    text = (
+        "- [ ] тесты: <script>, onclick - вычищаются\n\n"
+        "Пример: <script>alert(1)</script> и <iframe src=x></iframe>\n"
+    )
+
+    out = convert_to_md.tidy(text, keep_images=False)
+
+    assert "<script" not in out and "<iframe" not in out
+    assert "тесты: &lt;script&gt;, onclick - вычищаются" in out
+    assert "&lt;script&gt;alert(1)&lt;/script&gt;" in out
+    markdown_it = pytest.importorskip("markdown_it")
+    html = markdown_it.MarkdownIt("commonmark", {"html": True}).render(out)
+    assert "<script" not in html and "<iframe" not in html
+    assert "&lt;script&gt;alert(1)&lt;/script&gt;" in html
+
+
+def test_tidy_keeps_fenced_code_with_language_and_tildes():
+    text = (
+        "```html\n<script>KEEP_1</script>\n```\n\n"
+        "~~~\n<iframe src=javascript:KEEP_2></iframe>\n~~~\n\n"
+        "````md\n```\n<script>KEEP_3</script>\n```\n````\n\n"
+        "<script>OUT</script>\n"
+    )
+
+    out = convert_to_md.tidy(text, keep_images=False)
+
+    assert "<script>KEEP_1</script>" in out
+    assert "<iframe src=javascript:KEEP_2></iframe>" in out
+    # Внутренняя ``` не закрывает внешнюю ````: содержимое — код.
+    assert "<script>KEEP_3</script>" in out
+    # После закрытой ограды проза снова под санитизацией.
+    assert "&lt;script&gt;OUT&lt;/script&gt;" in out
+
+
+def test_tidy_keeps_inline_code():
+    text = (
+        "Пример `<script>KEEP</script>` и ``a ` <iframe>b`` в тексте,\n"
+        "ссылка `[y](javascript:alert(2))` тоже код.\n"
+    )
+
+    assert convert_to_md.tidy(text, keep_images=False) == text
+
+
+@pytest.mark.parametrize("text", [
+    # Обратная кавычка в атрибуте не открывает код: тег разбирается
+    # раньше, и обработчик живой.
+    'текст <a title="`" onclick="alert(1)" x="`">x</a>',
+    # В сыром HTML-блоке Markdown не действует — ни кавычки, ни ограда
+    # кодом не становятся; в том числе внутри цитаты и пункта списка.
+    "<div>\n`<script>alert(2)</script>`\n</div>",
+    "<pre>\n\n```\n<script>alert(3)</script>\n```\n</pre>",
+    "> <div>\n> `<script>alert(4)</script>`",
+    "- <div>\n  `<script>alert(5)</script>`",
+    # Экранированная кавычка — литерал, код она не открывает.
+    "\\`<script>alert(6)</script>`",
+    # Встроенный код не переходит границу блока и ячейки таблицы.
+    "# Заголовок `x\nтекст <script>alert(7)</script>` y",
+    "| h1 | h2 |\n| --- | --- |\n| `a | <script>alert(8)</script> b` |",
+    # Отступ 4+ без пустой строки перед ним — продолжение абзаца, а
+    # строка левее такой ограды уже вне пункта списка.
+    "абзац\n    ```\n    <script>alert(9)</script>",
+    "    ```\nтекст <script>alert(10)</script>\n    ```",
+    "- a\n\n    ```\n    x\n<script>alert(11)</script>\n    ```",
+    # Ограда с отступом 4+ внутри обычной ограды — её содержимое.
+    "```\n    ```\ncode\n```\n<script>alert(12)</script>",
+    # Переводы строк Windows и одиночный «\r» — тоже границы строк.
+    "```\r\ncode\r\n```\r\n<script>alert(13)</script>\r\n",
+    "# Заголовок `x\rтекст <script>alert(14)</script>` y",
+])
+def test_tidy_code_markers_inside_live_html_are_not_code(text):
+    out = convert_to_md.tidy(text, keep_images=False)
+
+    assert "onclick" not in out
+    assert "<script" not in out
+    markdown_it = pytest.importorskip("markdown_it")
+    html = markdown_it.MarkdownIt(
+        "commonmark", {"html": True}
+    ).enable("table").render(out)
+    assert "<script" not in html and "onclick" not in html
+
+
+def test_tidy_keeps_code_fences_in_nested_lists():
+    # Так MarkItDown пишет код во вложенном списке: ограда с отступом 4
+    # после пустой строки. Это код, санитизация его не трогает.
+    text = (
+        "* item\n  + sub\n\n    ```\n"
+        '    <script>x</script> onclick="1" data:x\n    ```\n\n'
+        "1. step\n\n   ```\n   <iframe src=javascript:y>\n   ```\n"
+    )
+
+    assert convert_to_md.tidy(text, keep_images=False) == text
+
+
+def test_convert_json_and_xml_are_fenced_data(tmp_path):
+    # «"data:field"» превращался в «blocked», «<script>» внутри строки
+    # вырезался: JSON и XML — данные, их место в ограде кода. Ограда
+    # длиннее ``` внутри значения, иначе данные закрыли бы её.
+    data = ('{"data:field":"KEEP_ME", '
+            '"example":"<script>TEXT</script>", "md": "```"}')
+    (tmp_path / "values.json").write_text(data, encoding="utf-8")
+    xml = '<root><a href="javascript:x">v</a><script>T</script></root>'
+    (tmp_path / "markup.xml").write_text(xml, encoding="utf-8")
+    rss = ('<?xml version="1.0"?><rss version="2.0"><channel>'
+           "<title>Лента</title><item><title>Новость</title>"
+           "</item></channel></rss>")
+    (tmp_path / "feed.xml").write_text(rss, encoding="utf-8")
+    out = tmp_path / "out"
+    opts = {
+        "force": True, "frontmatter": False, "keep_images": False,
+        "unsafe_raw_markdown": False, "out_dir": out, "sandbox": False,
+        "scan": {".json", ".xml"}, "tool": "tomd", "planned": set(),
+    }
+
+    for name in ("values.json", "markup.xml", "feed.xml"):
+        assert convert_to_md.convert_file(tmp_path / name, opts) == "ok"
+
+    def body(stem):
+        return (out / f"{stem}.md").read_text(encoding="utf-8")
+
+    assert body("values") == f"````json\n{data}\n````\n"
+    assert body("markup") == f"```xml\n{xml}\n```\n"
+    # RSS MarkItDown уже разобрал в Markdown — его не огораживаем.
+    assert "```" not in body("feed") and "# Лента" in body("feed")

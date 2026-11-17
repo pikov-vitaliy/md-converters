@@ -58,6 +58,7 @@ import hashlib
 import io
 import ipaddress
 import json
+import math
 import os
 import re
 import shlex
@@ -66,7 +67,8 @@ import subprocess
 import sys
 import tempfile
 import warnings
-from datetime import date
+from datetime import date, datetime
+from email.message import Message
 from pathlib import Path
 from urllib.parse import unquote, urljoin, urlparse
 
@@ -205,7 +207,62 @@ def _md() -> MarkItDown:
         _missing_markitdown()
     if _converter is None:
         _converter = MarkItDown()
+        xlsx = _text_cells_xlsx_converter()
+        if xlsx is not None:
+            _converter.register_converter(xlsx)
     return _converter
+
+
+def _excel_cell(value):
+    """Дата без времени — датой, как её показывал и штатный путь."""
+    if isinstance(value, datetime) and value.time() == datetime.min.time():
+        return value.date()
+    return value
+
+
+def _text_cells_xlsx_converter():
+    """XLSX без угадывания типов: текстовая ячейка остаётся текстом.
+
+    Штатный конвертер MarkItDown читает лист через pandas.read_excel с
+    выводом типов, и текст менялся: «00123» -> 123, «NA»/«NULL» -> NaN,
+    пустая ячейка -> «NaN». Здесь ячейки приходят как есть (dtype=object,
+    без списка NA-значений): числа, даты и флаги — своими типами из
+    openpyxl, текст — строкой. Регистрируется ПЕРЕД штатным: если это
+    чтение упадёт (книга, которую openpyxl открывает только после
+    ремонта MarkItDown), MarkItDown сам откатится на штатный конвертер.
+    None — если нет pandas: тогда остаётся штатный конвертер, а прочие
+    форматы работают как прежде.
+    """
+    try:
+        import pandas as pd
+        from markitdown import DocumentConverterResult
+        from markitdown.converters import XlsxConverter
+    except ImportError:
+        return None
+
+    class TextCellsXlsxConverter(XlsxConverter):
+        def convert(self, file_stream, stream_info, **kwargs):
+            sheets = pd.read_excel(
+                file_stream, sheet_name=None, engine="openpyxl",
+                dtype=object, keep_default_na=False,
+            )
+            parts = []
+            for name, frame in sheets.items():
+                # Не DataFrame.map: он заново выводит типы, и 5 рядом с
+                # 6.5 стало бы 5.0. Строки собираются с dtype=object.
+                frame = pd.DataFrame(
+                    [[_excel_cell(value) for value in row]
+                     for row in frame.itertuples(index=False, name=None)],
+                    columns=frame.columns, dtype=object,
+                )
+                html = frame.to_html(index=False)
+                table = self._html_converter.convert_string(
+                    html, **kwargs
+                ).markdown.strip()
+                parts.append(f"## {name}\n{table}")
+            return DocumentConverterResult(markdown="\n\n".join(parts))
+
+    return TextCellsXlsxConverter()
 
 
 def _is_url(token) -> bool:
@@ -653,6 +710,45 @@ def _repair_alt_font_line(line: str) -> str:
 # почти всегда буквы (`м`,`н`,`о`,`п`,`р`), их переводим как раньше.
 _TRAIL_PUNCT = frozenset(":;")
 _CLEAN_WORD = re.compile(r"[А-Яа-яЁё]{3,}")
+# Знак, зажатый между строчными русскими буквами («уя7вимосте9»), —
+# улика, что этот документ отдаёт им букву. В обычном тексте так не
+# пишут, а число рядом с буквами («10кВт», «Ту154», сноска «атаки2»,
+# «P=10кВт», «d<10мм») — пишут постоянно.
+_LETTER_MARK = re.compile(r"(?<=[а-яё])[0-9<=>A-O](?=[а-яё])")
+# Ведущее число: цифры, перед ними знак сравнения и, возможно, латинская
+# буква-обозначение («=10кВт», «<10мм», «I=10мА»). Знак между русским
+# словом и числом («Uном=220В») сюда сознательно не входит: в
+# сломанных документах это обычный вид слова («о=8» = «они»), и такое
+# расширение правила портило их ремонт.
+_LEADING_NUMBER = re.compile(r"[A-O]?[<=>]*\d+")
+
+
+def _letter_marks(text: str) -> frozenset[str]:
+    """Знаки, которые документ доказанно ставит на место букв."""
+    return frozenset(_LETTER_MARK.findall(text))
+
+
+def _digits_are_numbers(word: str, letter_marks: frozenset[str]) -> bool:
+    """Прогон из цифр и целой кириллицы, где цифры — числа, а не буквы.
+
+    Такой прогон не улика сломанного шрифта: без этого десяток «10кВт»
+    в обычном документе проходил порог, и ремонт делал из них «бакВт».
+    Ведущее число — число, если хоть один его знак не доказан как
+    буква («10кВт», «=10кВт», тогда как «1ыть» = «быть» в сломанном
+    документе ремонтируется). Прочие цифры — числа, если ни одна не
+    доказана («атаки2» со сноской); иначе прогон чинится как раньше.
+    Концевые `:`/`;` — пунктуация («10кВт;»), как и в самом ремонте.
+    """
+    core = word.rstrip(":;")
+    lead = _LEADING_NUMBER.match(core)
+    lead = lead.group() if lead else ""
+    marks = {ch for ch in core[len(lead):] if ch in _BROKEN_CYRILLIC_ASCII}
+    if not all(ch.isdigit() for ch in marks):
+        return False
+    if lead and not set(lead) <= letter_marks:
+        return True
+    marks |= set(lead)
+    return bool(marks) and not marks & letter_marks
 
 
 def _clean_word_vocabulary(text: str) -> set[str]:
@@ -690,7 +786,9 @@ def _split_trailing_punct(
     return word[:-1], word[-1]
 
 
-def _repair_main_font_line(line: str, vocab: set[str]) -> str:
+def _repair_main_font_line(
+    line: str, vocab: set[str], letter_marks: frozenset[str]
+) -> str:
     """Переводит строку основного шрифта документа."""
     parts = []
     start = 0
@@ -698,7 +796,10 @@ def _repair_main_font_line(line: str, vocab: set[str]) -> str:
         word = match.group()
         if not any(ch in _BROKEN_CYRILLIC_ASCII for ch in word):
             continue
-        if not any("а" <= ch <= "я" or ch == "ё" for ch in word):
+        has_lower = any("а" <= ch <= "я" or ch == "ё" for ch in word)
+        if has_lower and _digits_are_numbers(word, letter_marks):
+            continue
+        if not has_lower:
             # Ни одной уцелевшей строчной буквы: обычно это версия,
             # дата или аббревиатура. Чисто цифровой прогон не
             # переводим вовсе: «345» декодируется в частое «где», и
@@ -769,13 +870,14 @@ def _restore_alt_capitals(line: str, freq: dict[str, int]) -> str:
 
 
 def _repair_pass(
-    lines: list[str], alt_flags: list[bool], vocab: set[str]
+    lines: list[str], alt_flags: list[bool], vocab: set[str],
+    letter_marks: frozenset[str],
 ) -> str:
     """Один полный проход ремонта по строкам исходного текста."""
     return "\n".join(
         _repair_alt_font_line(line)
         if is_alt
-        else _repair_main_font_line(line, vocab)
+        else _repair_main_font_line(line, vocab, letter_marks)
         for line, is_alt in zip(lines, alt_flags)
     )
 
@@ -798,9 +900,12 @@ def _repair_broken_cyrillic_pdf_text(text: str) -> str:
     cyrillic_chars = sum(
         ("А" <= ch <= "я") or ch in "Ёё" for ch in text
     )
+    letter_marks = _letter_marks(text)
     for match in _BROKEN_CYRILLIC_SPAN.finditer(text):
         word = match.group()
         if not any("а" <= ch <= "я" or ch == "ё" for ch in word):
+            continue
+        if _digits_are_numbers(word, letter_marks):
             continue
         bad = sum(ch in _BROKEN_CYRILLIC_ASCII for ch in word)
         if bad:
@@ -818,7 +923,7 @@ def _repair_broken_cyrillic_pdf_text(text: str) -> str:
     lines = text.split("\n")
     alt_flags = _alt_font_line_flags(lines)
     vocab = _clean_word_vocabulary(text)
-    repaired = _repair_pass(lines, alt_flags, vocab)
+    repaired = _repair_pass(lines, alt_flags, vocab, letter_marks)
     # Второй проход. Слова, восстановленные первым проходом, — тоже
     # улики: прогон без единой уцелевшей буквы (`<>4C;59`) остаётся
     # без подтверждения, пока то же слово где-то в документе не
@@ -829,7 +934,7 @@ def _repair_broken_cyrillic_pdf_text(text: str) -> str:
     # неограниченным циклом — это только расширяло бы шлюз.
     grown = vocab | _clean_word_vocabulary(repaired)
     if grown != vocab:
-        repaired = _repair_pass(lines, alt_flags, grown)
+        repaired = _repair_pass(lines, alt_flags, grown, letter_marks)
     # Заглавные второго шрифта попадают в печатную пунктуацию, поэтому
     # достаются отдельным шагом и только по уликам готового текста.
     if any(alt_flags):
@@ -975,6 +1080,31 @@ def _table_to_gfm(rows: list) -> str:
            "| " + " | ".join("---" for _ in norm[0]) + " |"]
     out += ["| " + " | ".join(r) + " |" for r in norm[1:]]
     return "\n".join(out)
+
+
+# Литеральный текст, который Markdown прочёл бы как HTML: `<`/`>` и `&`
+# перед именем сущности (написанное в документе «&lt;» должно остаться
+# «&lt;», а не стать «<»). Просмотрщик покажет исходные символы.
+_ENTITY_LIKE = re.compile(r"&(?=#?[0-9A-Za-z]+;)")
+
+
+def _escape_html_text(value: str) -> str:
+    value = _ENTITY_LIKE.sub("&amp;", value)
+    return value.replace("<", "&lt;").replace(">", "&gt;")
+
+
+def _escape_table_rows(text: str) -> str:
+    """Экранирует HTML-символы в строках GFM-таблиц.
+
+    Ячейка PDF — литеральный текст: «<script>x</script>» санитизация
+    вырезала целиком, а «List<T>» просмотрщик рендерил как «List».
+    Вызывается ПОСЛЕ ремонта кириллицы: в сломанном шрифте «<» и «>» —
+    буквы «м» и «о», и раннее экранирование испортило бы их ремонт.
+    """
+    return "\n".join(
+        _escape_html_text(ln) if _GFM_ROW_RE.match(ln) else ln
+        for ln in text.split("\n")
+    )
 
 
 def _crop_text(page, top0: float, top1: float) -> str:
@@ -1561,10 +1691,20 @@ def _sanitize_html_url_attr(match: re.Match,
     return f' {match.group("name").lower()}={quote}{safe}{quote}'
 
 
+def _escape_match(match: re.Match) -> str:
+    return _escape_html_text(match.group())
+
+
 def sanitize_markdown(text: str, keep_images: bool) -> str:
-    """Нейтрализует опасные ссылки и raw HTML в Markdown-теле."""
-    text = _DANGEROUS_BLOCK_TAG.sub("", text)
-    text = _DANGEROUS_SINGLE_TAG.sub("", text)
+    """Нейтрализует опасные ссылки и raw HTML в Markdown-теле.
+
+    Опасные теги (`<script>`, `<iframe>`…) экранируются, а не
+    вырезаются: в выводе MarkItDown это литеральный текст документа
+    (пример XSS на слайде, `&lt;script&gt;` в HTML), и удаление съедало
+    его вместе с содержимым. Экранированный тег просмотрщик покажет
+    как текст и не исполнит."""
+    text = _DANGEROUS_BLOCK_TAG.sub(_escape_match, text)
+    text = _DANGEROUS_SINGLE_TAG.sub(_escape_match, text)
     text = _HTML_EVENT_ATTR.sub("", text)
     text = _HTML_URL_ATTR.sub(
         lambda m: _sanitize_html_url_attr(m, keep_images),
@@ -1676,35 +1816,149 @@ def _convert_box_tables(text: str) -> str:
     return "\n".join(out)
 
 
-def _apply_outside_fences(text: str, fn) -> str:
-    """Применяет fn к сегментам ВНЕ код-блоков (```), оставляя содержимое
-    фенсов нетронутым. Так sanitize/конвертация псевдографики/сворачивание
-    картинок не искажают технический контент в код-блоках (важно для базы
-    знаний по ИБ: `<script>`, `javascript:`, `data:` в примерах). Контент
-    вне фенсов по-прежнему санитизируется — посторонняя активная разметка
-    не проходит (фенс-блок рендерится как инертный <pre><code>)."""
+# Ограда кода по CommonMark: ``` или ~~~ от трёх знаков, после ограды —
+# язык. Раньше узнавалась только голая ```, и содержимое ```html и ~~~
+# санитизация вычищала как прозу. У ``` в строке языка не бывает
+# обратных кавычек: это уже встроенный код. Ограда с отступом до трёх
+# пробелов — обычная. С отступом 4+ (так MarkItDown пишет код во
+# вложенном списке) — только после пустой строки: иначе это
+# продолжение абзаца, и текст под ней живой. Её содержимое кончается
+# на строке с меньшим отступом — эта строка уже вне пункта списка.
+_FENCE_OPEN_RE = re.compile(
+    r"^(?P<indent>[ \t]*)(?P<fence>`{3,}(?=[^`]*$)|~{3,})")
+_FENCE_CLOSE_RE = re.compile(
+    r"^(?P<indent>[ \t]*)(?P<fence>`{3,}|~{3,})[ \t]*$")
+# Сырой HTML-блок: строка начинается с тега (в том числе внутри цитаты
+# `>` или пункта списка), и до конца блока Markdown не разбирается —
+# ни ограда, ни обратные кавычки кодом не становятся, а `<script>`
+# внутри живой. Конец блока — по CommonMark: свой закрывающий признак
+# у script/pre/style/textarea, комментария, `<?`, CDATA и `<!`, у
+# остальных — пустая строка. Начало взято с запасом: лишний
+# «HTML-блок» лишь санитизируется, как раньше.
+_HTML_PREFIX = r"^[ \t]*(?:(?:>|[-*+]|\d{1,9}[.)])[ \t]*)*"
+_HTML_BLOCK_START = re.compile(_HTML_PREFIX + r"<[A-Za-z/!?]")
+_HTML_BLOCK_ENDS = (
+    (re.compile("(?i)" + _HTML_PREFIX
+                + r"<(?:script|pre|style|textarea)(?:[\s>]|$)"),
+     re.compile(r"(?i)</(?:script|pre|style|textarea)>")),
+    (re.compile(_HTML_PREFIX + r"<!--"), re.compile(r"-->")),
+    (re.compile(_HTML_PREFIX + r"<\?"), re.compile(r"\?>")),
+    (re.compile(_HTML_PREFIX + r"<!\[CDATA\["), re.compile(r"\]\]>")),
+    (re.compile(_HTML_PREFIX + r"<![A-Za-z]"), re.compile(r">")),
+)
+_BLANK_LINE = re.compile(r"^\s*$")
+# Встроенный код и то, что CommonMark разбирает раньше него: HTML-тег,
+# комментарий, автоссылка. Обратная кавычка внутри тега кода не
+# открывает (`<a title="`" onclick=…>` — живой тег), поэтому тег
+# поглощается первым: до `>` вне кавычек, до пустой строки или до
+# конца. Это шире стандарта, но лишнее совпадение лишь оставляет текст
+# под санитизацией, а без закрывающих границ разбор был бы
+# квадратичным. Код прячется, только если он целиком в одной строке и
+# без неэкранированной `|`: многострочный мог бы склеить кавычки
+# соседних блоков (заголовка и абзаца), а `|` в строке GFM-таблицы
+# делит ячейки раньше, чем разбирается код. Кавычка после `\` —
+# литерал, не код; код длиннее 4096 знаков не прячется — граница
+# времени разбора.
+_INLINE_CODE_OR_TAG = re.compile(
+    r"(?P<tag><[A-Za-z/!?](?:[^>\"'\n]|\n(?![ \t]*\n)"
+    r"|\"(?:[^\"\n]|\n(?![ \t]*\n))*+\"?"
+    r"|'(?:[^'\n]|\n(?![ \t]*\n))*+'?)*+>?)"
+    r"|(?<![`\\])(?P<ticks>`+)(?!`)"
+    r"(?:[^\n|\\]|\\.){1,4096}?(?<!`)(?P=ticks)(?!`)"
+)
+
+
+def _indent_width(prefix: str) -> int:
+    return len(prefix.expandtabs(4))
+_CODE_PLACEHOLDER = re.compile("\x00(\\d+)\x00")
+
+
+def _mask_inline_code(lines: list, spans: list) -> str:
+    """Прячет встроенный код за метками `\\x00N\\x00` (их не бывает в
+    тексте: управляющие символы tidy() уже вычистил). Строки сырого
+    HTML-блока не трогаются — там обратные кавычки не код."""
     out: list[str] = []
-    prose: list[str] = []
-    in_fence = False
+    run: list[str] = []
+
+    def code(match: re.Match) -> str:
+        if match.group("tag"):
+            return match.group()
+        spans.append(match.group())
+        return f"\x00{len(spans) - 1}\x00"
+
+    def flush() -> None:
+        if run:
+            out.append(_INLINE_CODE_OR_TAG.sub(code, "\n".join(run)))
+            run.clear()
+
+    for line, in_html in lines:
+        if in_html:
+            flush()
+            out.append(line)
+        else:
+            run.append(line)
+    flush()
+    return "\n".join(out)
+
+
+def _apply_outside_fences(text: str, fn) -> str:
+    """Применяет fn к тексту ВНЕ кода, оставляя код нетронутым: ограды
+    ```/~~~ с языком и без, встроенный `код`. Так sanitize/конвертация
+    псевдографики/сворачивание картинок не искажают технический контент
+    (важно для базы знаний по ИБ: `<script>`, `javascript:`, `data:` в
+    примерах). Контент вне кода по-прежнему санитизируется — посторонняя
+    активная разметка не проходит (код рендерится инертно)."""
+    out: list[str] = []
+    prose: list[tuple[str, bool]] = []
+    fence = None      # (открывающая ограда, её отступ)
+    html_end = None   # признак конца текущего HTML-блока
+    prev_blank = True
 
     def flush() -> None:
         if prose:
-            out.append(fn("\n".join(prose)))
+            spans: list[str] = []
+            done = fn(_mask_inline_code(prose, spans))
+            out.append(_CODE_PLACEHOLDER.sub(
+                lambda m: spans[int(m.group(1))], done))
             prose.clear()
 
     for line in text.split("\n"):
-        if line.strip() == _FENCE:
-            if in_fence:
+        if fence is not None:
+            run, indent = fence
+            close = _FENCE_CLOSE_RE.match(line)
+            low, high = (0, 3) if indent <= 3 else (indent - 3, indent + 3)
+            if (close and close.group("fence")[0] == run[0]
+                    and len(close.group("fence")) >= len(run)
+                    and low <= _indent_width(close.group("indent")) <= high):
                 out.append(line)
-                in_fence = False
-            else:
+                fence = None
+                prev_blank = False
+                continue
+            width = _indent_width(line[:len(line) - len(line.lstrip())])
+            if indent <= 3 or not line.strip() or width >= indent:
+                out.append(line)
+                prev_blank = not line.strip()
+                continue
+            fence = None  # строка левее ограды из списка — уже не код
+        if html_end is None:
+            opened = _FENCE_OPEN_RE.match(line)
+            width = _indent_width(opened.group("indent")) if opened else 0
+            if opened and (width <= 3 or prev_blank):
                 flush()
                 out.append(line)
-                in_fence = True
-        elif in_fence:
-            out.append(line)
-        else:
-            prose.append(line)
+                fence = (opened.group("fence"), width)
+                prev_blank = False
+                continue
+            if _HTML_BLOCK_START.match(line):
+                html_end = next(
+                    (end for start, end in _HTML_BLOCK_ENDS
+                     if start.match(line)),
+                    _BLANK_LINE,
+                )
+        prose.append((line, html_end is not None))
+        if html_end is not None and html_end.search(line):
+            html_end = None
+        prev_blank = not line.strip()
     flush()
     return "\n".join(out)
 
@@ -1715,8 +1969,13 @@ def tidy(text: str, keep_images: bool, phantom_images: bool = False,
     псевдографику таблиц в GFM, убирает хвостовые пробелы, схлопывает
     пустые строки, обрезает края и (по умолчанию) сворачивает base64-
     картинки и битые картинки-заглушки из PPTX. Конвертация псевдографики,
-    сворачивание картинок и санитизация применяются только ВНЕ код-блоков
-    (```), чтобы не искажать технический контент в примерах кода."""
+    сворачивание картинок и санитизация применяются только ВНЕ кода
+    (ограды ```/~~~ и встроенный `код`), чтобы не искажать технический
+    контент в примерах кода."""
+    # Переводы строк — до разбора кода: с «\r» на конце закрывающая
+    # ограда не узнавалась, а одиночный «\r» прятал границу строки от
+    # правил кода и HTML-блоков, хотя просмотрщик видит там две строки.
+    text = text.replace("\r\n", "\n").replace("\r", "\n")
     text = _CTRL_TO_SPACE.sub(" ", text)
     text = _CTRL_DROP.sub("", text)
 
@@ -1733,7 +1992,7 @@ def tidy(text: str, keep_images: bool, phantom_images: bool = False,
     text = _apply_outside_fences(text, _transform_prose)
     out: list[str] = []
     blank = False
-    for line in text.replace("\r\n", "\n").replace("\r", "\n").split("\n"):
+    for line in text.split("\n"):
         line = line.rstrip()
         if line == "":
             if not blank:
@@ -1932,8 +2191,13 @@ def _best_cyrillic_decode(raw: bytes) -> tuple[str, str] | None:
     return None
 
 
-def decode_html_bytes(raw: bytes) -> tuple[str, str]:
-    """Декодирует HTML с приоритетом BOM/meta и русскоязычных кодировок."""
+def decode_html_bytes(raw: bytes,
+                      http_charset: str | None = None) -> tuple[str, str]:
+    """Декодирует HTML с приоритетом BOM/meta и русскоязычных кодировок.
+
+    http_charset — кодировка из заголовка Content-Type (HTML по URL). По
+    HTML-стандарту она важнее <meta>, но уступает BOM — так читает и
+    браузер."""
     if raw.startswith(b"\xef\xbb\xbf"):
         text = _decode_with(raw, "utf-8-sig")
         if text is not None:
@@ -1948,6 +2212,11 @@ def decode_html_bytes(raw: bytes) -> tuple[str, str]:
         text = _decode_with(raw, "utf-16")
         if text is not None:
             return text, "utf-16"
+
+    if http_charset:
+        text = _decode_with(raw, http_charset)
+        if text is not None:
+            return text, http_charset
 
     declared = _meta_charset(raw)
     if declared:
@@ -1988,15 +2257,52 @@ def _convert_reencoded(raw: bytes) -> tuple:
     return result, f"re-encoded from {enc}"
 
 
+def _data_language(suffix: str | None,
+                   mimetype: str | None = None) -> str | None:
+    """'json' | 'xml' для форматов-данных, иначе None."""
+    suffix = (suffix or "").lower()
+    mimetype = (mimetype or "").lower()
+    if (suffix == ".json" or mimetype in ("application/json", "text/json")
+            or mimetype.endswith("+json")):
+        return "json"
+    if (suffix == ".xml" or mimetype in ("application/xml", "text/xml")
+            or mimetype.endswith("+xml")):
+        return "xml"
+    return None
+
+
+def _fence_data(result, language: str):
+    """Сырой JSON/XML -> ограда кода с языком.
+
+    MarkItDown отдаёт их сырым текстом, а это данные, не проза:
+    санитизация портила значения («"data:field"» -> «blocked»,
+    «<script>» внутри строки вырезался), многострочный JSON во вьюере
+    схлопывался в абзац. В ограде они инертны и сохраняют вид. XML,
+    разобранный MarkItDown как RSS/Atom, уже Markdown — его не трогаем.
+    Ограда длиннее любого прогона ` внутри, чтобы данные её не закрыли.
+    """
+    text = result.text_content.strip("\n")
+    if language == "xml" and not text.lstrip().startswith("<"):
+        return result
+    ticks = max((len(run) for run in re.findall(r"`+", text)), default=0)
+    fence = "`" * max(3, ticks + 1)
+    return _TextResult(result, f"{fence}{language}\n{text}\n{fence}\n")
+
+
 def _convert_file_data(path: Path) -> tuple:
-    """(result, note). Для HTML — с автоопределением кодировки."""
+    """(result, note). Для HTML — с автоопределением кодировки, JSON и
+    XML — в ограде кода."""
     if path.suffix.lower() in (".html", ".htm"):
         raw = path.read_bytes()
         try:
             raw.decode("utf-8")
         except UnicodeDecodeError:
             return _convert_reencoded(raw)
-    return _md().convert(str(path)), None
+    result = _md().convert(str(path))
+    language = _data_language(path.suffix)
+    if language:
+        result = _fence_data(result, language)
+    return result, None
 
 
 def _positive_float(value: str, name: str) -> float:
@@ -2004,6 +2310,11 @@ def _positive_float(value: str, name: str) -> float:
         number = float(value)
     except ValueError as exc:
         raise ValueError(f"{name} must be a number") from exc
+    # float() принимает «nan» и «inf»: nan проходил проверку `<= 0`, и
+    # дальше _build_opts падал на int(nan) (inf — на OverflowError),
+    # а тайм-ауты уходили в настройки бесконечными.
+    if not math.isfinite(number):
+        raise ValueError(f"{name} must be a finite number")
     if number <= 0:
         raise ValueError(f"{name} must be greater than 0")
     return number
@@ -2081,7 +2392,8 @@ def _read_limited_response(response, max_bytes: int) -> bytes:
 def _download_url(url: str, timeout: float, max_bytes: int,
                   allow_private: bool,
                   verify_ssl: bool = True
-                  ) -> tuple[bytes, str, str | None]:
+                  ) -> tuple[bytes, str, str | None, str | None]:
+    """(тело, итоговый URL, расширение пути, заголовок Content-Type)."""
     try:
         import requests
     except ImportError as exc:
@@ -2134,7 +2446,8 @@ def _download_url(url: str, timeout: float, max_bytes: int,
                 _check_url_allowed(final_url, allow_private)
                 data = _read_limited_response(response, max_bytes)
                 suffix = Path(urlparse(final_url).path).suffix or None
-                return data, final_url, suffix
+                content_type = response.headers.get("content-type")
+                return data, final_url, suffix, content_type
             finally:
                 response.close()
         raise ValueError("too many redirects")
@@ -2142,19 +2455,50 @@ def _download_url(url: str, timeout: float, max_bytes: int,
         session.close()
 
 
+def _content_type(header: str | None) -> tuple[str | None, str | None]:
+    """(MIME-тип, charset) из заголовка Content-Type."""
+    if not header:
+        return None, None
+    message = Message()
+    message["content-type"] = header
+    return message.get_content_type(), message.get_content_charset()
+
+
 def _convert_url_data(url: str, opts: dict) -> tuple:
-    data, final_url, suffix = _download_url(
+    data, final_url, suffix, content_type = _download_url(
         url,
         timeout=opts["url_timeout"],
         max_bytes=opts["max_url_bytes"],
         allow_private=opts["allow_private_url"],
         verify_ssl=opts.get("verify_ssl", True),
     )
-    result = _md().convert_stream(
-        io.BytesIO(data),
-        file_extension=suffix,
-        url=final_url,
-    )
+    mimetype, charset = _content_type(content_type)
+    if mimetype:
+        is_html = mimetype in ("text/html", "application/xhtml+xml")
+    else:
+        is_html = (suffix or "").lower() in (".html", ".htm")
+    if is_html and (charset or _decode_with(data, "utf-8") is None):
+        # Кодировка из заголовка до MarkItDown не доходила: он угадывал
+        # её по байтам, и страница в windows-1251 становилась кашей
+        # («Ďđčâĺň»). Декодируем как локальный HTML (BOM, затем
+        # заголовок, затем <meta>) и отдаём UTF-8 с явной кодировкой.
+        text, _ = decode_html_bytes(data, http_charset=charset)
+        md = _md()
+        from markitdown import StreamInfo
+        result = md.convert_stream(
+            io.BytesIO(text.encode("utf-8")),
+            stream_info=StreamInfo(mimetype="text/html", charset="utf-8",
+                                   extension=".html", url=final_url),
+        )
+    else:
+        result = _md().convert_stream(
+            io.BytesIO(data),
+            file_extension=suffix,
+            url=final_url,
+        )
+    language = None if is_html else _data_language(suffix, mimetype)
+    if language:
+        result = _fence_data(result, language)
     return result, final_url
 
 
@@ -2253,6 +2597,9 @@ def _convert_file_to_target(path: Path, target: Path, opts: dict,
             kept = _strip_pdf_furniture(lines, page_count)
             if kept != lines:
                 result = _TextResult(result, "\n".join(kept))
+        escaped = _escape_table_rows(result.text_content)
+        if escaped != result.text_content:
+            result = _TextResult(result, escaped)
 
     # PDF: «Сохранить картинки» извлекает встроенные растровые
     # изображения из PDF и дописывает их (base64) в .md по страницам.

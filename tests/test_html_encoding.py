@@ -80,3 +80,22 @@ def test_decode_fallback_reports_replacement(monkeypatch):
 
     assert text
     assert encoding == "cp1251-replace"
+
+
+def test_decode_http_charset_beats_meta_but_not_bom():
+    # HTML-стандарт: BOM, затем кодировка из Content-Type, затем <meta>.
+    page = '<html><head><meta charset="koi8-r"></head><body>Отчёт</body>'
+    raw = page.encode("cp1251")
+
+    text, encoding = convert_to_md.decode_html_bytes(
+        raw, http_charset="windows-1251")
+
+    assert "Отчёт" in text
+    assert encoding == "windows-1251"
+
+    bom = b"\xef\xbb\xbf" + page.encode("utf-8")
+    text, encoding = convert_to_md.decode_html_bytes(
+        bom, http_charset="windows-1251")
+
+    assert "Отчёт" in text
+    assert encoding == "utf-8-sig"

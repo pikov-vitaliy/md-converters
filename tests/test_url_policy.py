@@ -166,7 +166,7 @@ def test_download_url_follows_checked_redirect(monkeypatch):
         lambda hostname: {"93.184.216.34"},
     )
 
-    data, final_url, suffix = convert_to_md._download_url(
+    data, final_url, suffix, content_type = convert_to_md._download_url(
         "https://example.com/start",
         timeout=3,
         max_bytes=100,
@@ -176,6 +176,7 @@ def test_download_url_follows_checked_redirect(monkeypatch):
     assert data == b"<h1>ok</h1>"
     assert final_url == "https://example.com/final.html"
     assert suffix == ".html"
+    assert content_type is None
     assert session.trust_env is False
     assert [url for url, _ in session.urls] == [
         "https://example.com/start",
@@ -270,7 +271,7 @@ def test_download_url_backslash_userinfo_does_not_reach_localhost():
     try:
         port = server.server_address[1]
         # контроль: настоящий requests через prepare/send доходит
-        data, _, _ = convert_to_md._download_url(
+        data, _, _, _ = convert_to_md._download_url(
             f"http://127.0.0.1:{port}/ok",
             timeout=3,
             max_bytes=100,
@@ -288,3 +289,77 @@ def test_download_url_backslash_userinfo_does_not_reach_localhost():
         server.shutdown()
         server.server_close()
     assert hits == ["/ok"]  # до /%5C@93.184.216.34/check не дошло
+
+
+def _serve_once(monkeypatch, body: bytes, content_type: str):
+    """Подменяет requests: один ответ 200 с заданными телом и
+    Content-Type; публичный адрес для example.com."""
+    class Response:
+        status_code = 200
+        url = "https://example.com/page"
+        headers = {"content-type": content_type,
+                   "content-length": str(len(body))}
+
+        def iter_content(self, chunk_size):
+            return [body]
+
+        def raise_for_status(self):
+            pass
+
+        def close(self):
+            pass
+
+    class Session:
+        trust_env = True
+        headers: dict = {}
+
+        def get(self, url, **kwargs):
+            return Response()
+
+        def prepare_request(self, request):
+            return SimpleNamespace(url=request.url)
+
+        def send(self, prepared, **kwargs):
+            return Response()
+
+        def close(self):
+            pass
+
+    monkeypatch.setitem(
+        sys.modules, "requests", SimpleNamespace(
+            Session=Session,
+            Request=lambda method, url: SimpleNamespace(url=url)))
+    monkeypatch.setattr(
+        convert_to_md, "_resolved_ips", lambda host: {"93.184.216.34"})
+
+
+_URL_OPTS = {"url_timeout": 3, "max_url_bytes": 10_000,
+             "allow_private_url": False}
+
+
+def test_convert_url_uses_charset_from_content_type(monkeypatch):
+    # Кодировка из заголовка до MarkItDown не доходила, и страница в
+    # windows-1251 без <meta> превращалась в «Ďđčâĺň, číćĺíĺđ!».
+    text = "Привет, инженер! Проверка кодировки."
+    _serve_once(
+        monkeypatch,
+        f"<html><body><p>{text}</p></body></html>".encode("cp1251"),
+        "text/html; charset=windows-1251",
+    )
+
+    result, final_url = convert_to_md._convert_url_data(
+        "https://example.com/page", dict(_URL_OPTS))
+
+    assert final_url == "https://example.com/page"
+    assert text in result.text_content
+
+
+def test_convert_url_fences_json_by_content_type(monkeypatch):
+    # JSON по URL без расширения — те же данные, что и файл .json.
+    data = '{"data:field": "KEEP_ME"}'
+    _serve_once(monkeypatch, data.encode("utf-8"), "application/json")
+
+    result, _ = convert_to_md._convert_url_data(
+        "https://example.com/page", dict(_URL_OPTS))
+
+    assert result.text_content == f"```json\n{data}\n```\n"

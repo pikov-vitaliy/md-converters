@@ -339,6 +339,75 @@ def test_convert_file_real_ruled_pdf_end_to_end(tmp_path):
     assert "| alpha | 1 |" in body
 
 
+def _ruled_pdf_with_cells(rows: list) -> bytes:
+    """Разлинованная таблица 2 кол. x 3 стр. с заданным текстом ячеек
+    (раскладка как у _ruled_table_pdf_bytes)."""
+    content = b""
+    for row, y in zip(rows, (705, 685, 665)):
+        for text, x in zip(row, (105, 225)):
+            content += b"BT /F1 11 Tf %d %d Td (%s) Tj ET\n" % (
+                x, y, text.encode("latin-1"))
+    content += b"0.5 w\n"
+    for x in (100, 220, 340):
+        content += b"%d 660 m %d 720 l S\n" % (x, x)
+    for y in (720, 700, 680, 660):
+        content += b"100 %d m 340 %d l S\n" % (y, y)
+    return _wrap_pdf(content)
+
+
+def test_pdf_table_cells_keep_literal_html_characters(tmp_path):
+    # Ячейка PDF — литеральный текст: «<script>x</script>» санитизация
+    # вырезала целиком, а «List<T>» просмотрщик рендерил как «List».
+    pytest.importorskip("pdfplumber")
+    src = tmp_path / "cells.pdf"
+    src.write_bytes(_ruled_pdf_with_cells([
+        ("Name", "Value"),
+        ("<script>x</script>", "1"),
+        ("List<T>", "A & B &lt;"),
+    ]))
+    out = tmp_path / "out"
+    out.mkdir()
+    opts = _pdf_opts(out)
+    opts["sandbox"] = False
+    assert c.convert_file(src, opts) == "ok"
+    body = (out / "cells.md").read_text(encoding="utf-8")
+    assert "pdf_tables: 1" in body
+    assert "| &lt;script&gt;x&lt;/script&gt; | 1 |" in body
+    assert "| List&lt;T&gt; | A & B &amp;lt; |" in body
+
+    markdown_it = pytest.importorskip("markdown_it")
+    html = markdown_it.MarkdownIt(
+        "commonmark", {"html": True}
+    ).enable("table").render(body)
+    # После рендеринга видны исходные символы, а не HTML-разметка.
+    assert "<td>&lt;script&gt;x&lt;/script&gt;</td>" in html
+    assert "<td>List&lt;T&gt;</td>" in html
+    assert "<td>A &amp; B &amp;lt;</td>" in html
+
+
+def test_pdf_table_cells_escaped_after_cyrillic_repair(tmp_path, monkeypatch):
+    # В сломанном шрифте «>» в ячейке — буква «о»: экранирование до
+    # ремонта превратило бы «м>4C;59» в мусор вместо «модулей».
+    src = tmp_path / "broken.pdf"
+    src.write_bytes(b"%PDF-1.4 fake")
+    out = tmp_path / "out"
+    out.mkdir()
+    body = (
+        "НастояIая Методика выявления уя7вимосте9 и "
+        "недекларированных во7можносте9 в программном "
+        "о1еспеGении.\n"
+    ) * 4
+    result = c._PdfResult(
+        body + "\n| Перечень | м>4C;59 |\n| --- | --- |\n| A | B |\n", 1)
+    monkeypatch.setattr(c, "_pdf_tables_result", lambda p: result)
+    monkeypatch.setattr(c, "_pdf_page_count", lambda p: 1)
+    monkeypatch.setattr(c, "_pdf_text_layer_probe", lambda p: None)
+
+    assert c.convert_file(src, _pdf_opts(out)) == "ok"
+    md = (out / "broken.md").read_text(encoding="utf-8")
+    assert "| Перечень | модулей |" in md
+
+
 def test_pdf_text_layer_probe_reads_real_pdf(tmp_path):
     pytest.importorskip("pypdfium2")
     src = tmp_path / "text-layer.pdf"
