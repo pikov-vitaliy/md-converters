@@ -253,16 +253,18 @@ def test_convert_file_pdf_tables_off_skips_pdfplumber(tmp_path, monkeypatch):
 
 # --- реальный PDF: покрываем pdfplumber-glue (без моков) -------------------
 
-def _wrap_pdf(content: bytes) -> bytes:
+def _wrap_pdf(content: bytes, font_extra: bytes = b"") -> bytes:
     """Оборачивает поток содержимого в минимальный валидный PDF (1 стр.,
-    шрифт Helvetica). Используется для side-by-side фикстуры."""
+    шрифт Helvetica). Используется для side-by-side фикстуры.
+    font_extra — добавка в словарь шрифта (например, кодировка)."""
     objs = [
         b"<< /Type /Catalog /Pages 2 0 R >>",
         b"<< /Type /Pages /Kids [3 0 R] /Count 1 >>",
         b"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 595 842] "
         b"/Resources << /Font << /F1 5 0 R >> >> /Contents 4 0 R >>",
         b"<< /Length %d >>\nstream\n%s\nendstream" % (len(content), content),
-        b"<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>",
+        b"<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica %s>>"
+        % font_extra,
     ]
     out = b"%PDF-1.4\n"
     offsets = []
@@ -339,7 +341,7 @@ def test_convert_file_real_ruled_pdf_end_to_end(tmp_path):
     assert "| alpha | 1 |" in body
 
 
-def _ruled_pdf_with_cells(rows: list) -> bytes:
+def _ruled_pdf_with_cells(rows: list, font_extra: bytes = b"") -> bytes:
     """Разлинованная таблица 2 кол. x 3 стр. с заданным текстом ячеек
     (раскладка как у _ruled_table_pdf_bytes)."""
     content = b""
@@ -352,7 +354,7 @@ def _ruled_pdf_with_cells(rows: list) -> bytes:
         content += b"%d 660 m %d 720 l S\n" % (x, x)
     for y in (720, 700, 680, 660):
         content += b"100 %d m 340 %d l S\n" % (y, y)
-    return _wrap_pdf(content)
+    return _wrap_pdf(content, font_extra)
 
 
 def test_pdf_table_cells_keep_literal_html_characters(tmp_path):
@@ -383,6 +385,35 @@ def test_pdf_table_cells_keep_literal_html_characters(tmp_path):
     assert "<td>&lt;script&gt;x&lt;/script&gt;</td>" in html
     assert "<td>List&lt;T&gt;</td>" in html
     assert "<td>A &amp; B &amp;lt;</td>" in html
+
+
+def test_pdf_table_cells_keep_literal_backticks(tmp_path):
+    # «`List<T>`» без экранирования кавычек становился кодом, а в коде
+    # сущности не раскрываются: просмотрщик показывал «List&lt;T&gt;».
+    # Обратная кавычка в ячейке — литерал; «\» перед ней — тоже.
+    pytest.importorskip("pdfplumber")
+    src = tmp_path / "ticks.pdf"
+    # WinAnsi: в стандартной кодировке Helvetica байт 0x60 — «‘».
+    src.write_bytes(_ruled_pdf_with_cells([
+        ("Name", "Value"),
+        ("`List<T>`", "1"),
+        ("x\\\\`y", "2"),  # в PDF-строке «\\» — один «\»
+    ], b"/Encoding /WinAnsiEncoding "))
+    out = tmp_path / "out"
+    out.mkdir()
+    opts = _pdf_opts(out)
+    opts["sandbox"] = False
+    assert c.convert_file(src, opts) == "ok"
+    body = (out / "ticks.md").read_text(encoding="utf-8")
+    assert "| \\`List&lt;T&gt;\\` | 1 |" in body
+    assert "| x\\\\\\`y | 2 |" in body
+
+    markdown_it = pytest.importorskip("markdown_it")
+    html = markdown_it.MarkdownIt(
+        "commonmark", {"html": True}
+    ).enable("table").render(body)
+    assert "<td>`List&lt;T&gt;`</td>" in html
+    assert "<td>x\\`y</td>" in html
 
 
 def test_pdf_table_cells_escaped_after_cyrillic_repair(tmp_path, monkeypatch):

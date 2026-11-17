@@ -1093,16 +1093,29 @@ def _escape_html_text(value: str) -> str:
     return value.replace("<", "&lt;").replace(">", "&gt;")
 
 
+# Обратная кавычка в ячейке с предшествующими `\`: их удваиваем и
+# добавляем свою, иначе `\` экранировал бы уже не кавычку, а себя.
+_BACKTICK_RE = re.compile(r"(\\*)`")
+
+
+def _escape_table_cell_text(line: str) -> str:
+    line = _escape_html_text(line)
+    return _BACKTICK_RE.sub(lambda m: m.group(1) * 2 + "\\`", line)
+
+
 def _escape_table_rows(text: str) -> str:
-    """Экранирует HTML-символы в строках GFM-таблиц.
+    """Экранирует HTML-символы и обратные кавычки в строках GFM-таблиц.
 
     Ячейка PDF — литеральный текст: «<script>x</script>» санитизация
     вырезала целиком, а «List<T>» просмотрщик рендерил как «List».
-    Вызывается ПОСЛЕ ремонта кириллицы: в сломанном шрифте «<» и «>» —
-    буквы «м» и «о», и раннее экранирование испортило бы их ремонт.
+    Обратные кавычки — тоже литерал: «`List<T>`» без экранирования
+    становился кодом, а в коде сущности не раскрываются, и было видно
+    «List&lt;T&gt;». Вызывается ПОСЛЕ ремонта кириллицы: в сломанном
+    шрифте «<» и «>» — буквы «м» и «о», и раннее экранирование испортило
+    бы их ремонт.
     """
     return "\n".join(
-        _escape_html_text(ln) if _GFM_ROW_RE.match(ln) else ln
+        _escape_table_cell_text(ln) if _GFM_ROW_RE.match(ln) else ln
         for ln in text.split("\n")
     )
 
