@@ -54,6 +54,7 @@ from __future__ import annotations
 import glob
 import argparse
 import base64
+import codecs
 import hashlib
 import io
 import ipaddress
@@ -2196,13 +2197,56 @@ def _best_cyrillic_decode(raw: bytes) -> tuple[str, str] | None:
     return None
 
 
+# Метки кодировок, которые в HTML означают другую кодировку, чем в
+# Python (стандарт WHATWG Encoding, его применяют браузеры):
+# «iso-8859-1»/«ascii» — это windows-1252, иначе «€» и типографские
+# кавычки становились управляющими U+0080..U+009F. Так же latin5 ->
+# windows-1254 и tis-620 -> windows-874.
+_WHATWG_LABELS = {
+    **dict.fromkeys((
+        "ansi_x3.4-1968", "ascii", "cp819", "csisolatin1", "ibm819",
+        "iso-8859-1", "iso-ir-100", "iso8859-1", "iso88591",
+        "iso_8859-1", "iso_8859-1:1987", "l1", "latin1", "us-ascii",
+    ), "windows-1252"),
+    **dict.fromkeys((
+        "csisolatin5", "iso-8859-9", "iso-ir-148", "iso8859-9",
+        "iso88599", "iso_8859-9", "iso_8859-9:1989", "l5", "latin5",
+    ), "windows-1254"),
+    **dict.fromkeys((
+        "dos-874", "iso-8859-11", "iso8859-11", "iso885911", "tis-620",
+    ), "windows-874"),
+}
+
+
+def _html_encoding(label: str) -> str:
+    return _WHATWG_LABELS.get(label.strip().lower(), label)
+
+
+def _decode_html_label(raw: bytes, encoding: str) -> str | None:
+    """Декодирует по метке HTML. У windows-1252/1254 незанятые байты
+    (0x81, 0x8D…) по WHATWG — управляющие U+0081…: без этого страница
+    с таким байтом, прежде читавшаяся как latin-1, падала бы в эвристики
+    и могла стать кириллической кашей."""
+    if encoding in ("windows-1252", "windows-1254"):
+        return raw.decode(encoding, errors="whatwg-c1")
+    return _decode_with(raw, encoding)
+
+
+def _c1_fallback(error: UnicodeDecodeError) -> tuple[str, int]:
+    chunk = error.object[error.start:error.end]
+    return chunk.decode("latin-1"), error.end
+
+
+codecs.register_error("whatwg-c1", _c1_fallback)
+
+
 def decode_html_bytes(raw: bytes,
                       http_charset: str | None = None) -> tuple[str, str]:
     """Декодирует HTML с приоритетом BOM/meta и русскоязычных кодировок.
 
     http_charset — кодировка из заголовка Content-Type (HTML по URL). По
     HTML-стандарту она важнее <meta>, но уступает BOM — так читает и
-    браузер."""
+    браузер. Метки заголовка и <meta> читаются по таблице WHATWG."""
     if raw.startswith(b"\xef\xbb\xbf"):
         text = _decode_with(raw, "utf-8-sig")
         if text is not None:
@@ -2219,13 +2263,15 @@ def decode_html_bytes(raw: bytes,
             return text, "utf-16"
 
     if http_charset:
-        text = _decode_with(raw, http_charset)
+        http_charset = _html_encoding(http_charset)
+        text = _decode_html_label(raw, http_charset)
         if text is not None:
             return text, http_charset
 
     declared = _meta_charset(raw)
     if declared:
-        text = _decode_with(raw, declared)
+        declared = _html_encoding(declared)
+        text = _decode_html_label(raw, declared)
         if text is not None:
             return text, declared
 

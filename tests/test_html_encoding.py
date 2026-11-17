@@ -99,3 +99,24 @@ def test_decode_http_charset_beats_meta_but_not_bom():
 
     assert "Отчёт" in text
     assert encoding == "utf-8-sig"
+
+
+def test_decode_html_labels_follow_whatwg():
+    # Для HTML «iso-8859-1» и «latin1» — это windows-1252 (WHATWG, так
+    # читают браузеры): иначе «€» и “кавычки” становились U+0080/U+0093.
+    page = "<p>20 €, “yes”</p>"
+    raw = page.encode("cp1252")
+
+    text, encoding = convert_to_md.decode_html_bytes(
+        raw, http_charset="ISO-8859-1")
+    assert text == page and encoding == "windows-1252"
+
+    meta = b'<meta charset="latin1">' + raw
+    text, encoding = convert_to_md.decode_html_bytes(meta)
+    assert text.endswith(page) and encoding == "windows-1252"
+
+    # Незанятый байт 0x81 — управляющий U+0081, как в браузере, а не
+    # повод уйти в угадывание кодировки.
+    text, encoding = convert_to_md.decode_html_bytes(
+        raw + b"\x81", http_charset="iso-8859-1")
+    assert text == page + "\x81" and encoding == "windows-1252"
