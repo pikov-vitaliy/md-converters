@@ -710,36 +710,42 @@ def _repair_alt_font_line(line: str) -> str:
 # почти всегда буквы (`м`,`н`,`о`,`п`,`р`), их переводим как раньше.
 _TRAIL_PUNCT = frozenset(":;")
 _CLEAN_WORD = re.compile(r"[А-Яа-яЁё]{3,}")
-# Цифра, зажатая между строчными русскими буквами («уя7вимосте9»), —
-# улика, что этот документ отдаёт цифрой букву. В обычном тексте так
-# не пишут, а число рядом с буквами («10кВт», «Ту154», сноска
-# «атаки2») — пишут постоянно.
-_LETTER_DIGIT = re.compile(r"(?<=[а-яё])\d(?=[а-яё])")
-_LEADING_DIGITS = re.compile(r"\d*")
+# Знак, зажатый между строчными русскими буквами («уя7вимосте9»), —
+# улика, что этот документ отдаёт им букву. В обычном тексте так не
+# пишут, а число рядом с буквами («10кВт», «Ту154», сноска «атаки2»,
+# «P=10кВт», «d<10мм») — пишут постоянно.
+_LETTER_MARK = re.compile(r"(?<=[а-яё])[0-9<=>A-O](?=[а-яё])")
+# Ведущее число: цифры, перед ними знак сравнения и, возможно, латинская
+# буква-обозначение («=10кВт», «<10мм», «I=10мА»).
+_LEADING_NUMBER = re.compile(r"[A-O]?[<=>]*\d+")
 
 
-def _letter_digits(text: str) -> frozenset[str]:
-    """Цифры, которые документ доказанно ставит на место букв."""
-    return frozenset(_LETTER_DIGIT.findall(text))
+def _letter_marks(text: str) -> frozenset[str]:
+    """Знаки, которые документ доказанно ставит на место букв."""
+    return frozenset(_LETTER_MARK.findall(text))
 
 
-def _digits_are_numbers(word: str, letter_digits: frozenset[str]) -> bool:
+def _digits_are_numbers(word: str, letter_marks: frozenset[str]) -> bool:
     """Прогон из цифр и целой кириллицы, где цифры — числа, а не буквы.
 
     Такой прогон не улика сломанного шрифта: без этого десяток «10кВт»
     в обычном документе проходил порог, и ремонт делал из них «бакВт».
-    Ведущее число — число, если хоть одна его цифра не доказана как
-    буква («10кВт», тогда как «1ыть» = «быть» в сломанном документе
-    ремонтируется). Прочие цифры — числа, если ни одна не доказана
-    («атаки2» со сноской); иначе прогон чинится как раньше.
+    Ведущее число — число, если хоть один его знак не доказан как
+    буква («10кВт», «=10кВт», тогда как «1ыть» = «быть» в сломанном
+    документе ремонтируется). Прочие цифры — числа, если ни одна не
+    доказана («атаки2» со сноской); иначе прогон чинится как раньше.
+    Концевые `:`/`;` — пунктуация («10кВт;»), как и в самом ремонте.
     """
-    marks = {ch for ch in word if ch in _BROKEN_CYRILLIC_ASCII}
+    core = word.rstrip(":;")
+    lead = _LEADING_NUMBER.match(core)
+    lead = lead.group() if lead else ""
+    marks = {ch for ch in core[len(lead):] if ch in _BROKEN_CYRILLIC_ASCII}
     if not all(ch.isdigit() for ch in marks):
         return False
-    lead = _LEADING_DIGITS.match(word).group()
-    if lead and not set(lead) <= letter_digits:
+    if lead and not set(lead) <= letter_marks:
         return True
-    return not marks & letter_digits
+    marks |= set(lead)
+    return bool(marks) and not marks & letter_marks
 
 
 def _clean_word_vocabulary(text: str) -> set[str]:
@@ -778,7 +784,7 @@ def _split_trailing_punct(
 
 
 def _repair_main_font_line(
-    line: str, vocab: set[str], letter_digits: frozenset[str]
+    line: str, vocab: set[str], letter_marks: frozenset[str]
 ) -> str:
     """Переводит строку основного шрифта документа."""
     parts = []
@@ -788,7 +794,7 @@ def _repair_main_font_line(
         if not any(ch in _BROKEN_CYRILLIC_ASCII for ch in word):
             continue
         has_lower = any("а" <= ch <= "я" or ch == "ё" for ch in word)
-        if has_lower and _digits_are_numbers(word, letter_digits):
+        if has_lower and _digits_are_numbers(word, letter_marks):
             continue
         if not has_lower:
             # Ни одной уцелевшей строчной буквы: обычно это версия,
@@ -862,13 +868,13 @@ def _restore_alt_capitals(line: str, freq: dict[str, int]) -> str:
 
 def _repair_pass(
     lines: list[str], alt_flags: list[bool], vocab: set[str],
-    letter_digits: frozenset[str],
+    letter_marks: frozenset[str],
 ) -> str:
     """Один полный проход ремонта по строкам исходного текста."""
     return "\n".join(
         _repair_alt_font_line(line)
         if is_alt
-        else _repair_main_font_line(line, vocab, letter_digits)
+        else _repair_main_font_line(line, vocab, letter_marks)
         for line, is_alt in zip(lines, alt_flags)
     )
 
@@ -891,12 +897,12 @@ def _repair_broken_cyrillic_pdf_text(text: str) -> str:
     cyrillic_chars = sum(
         ("А" <= ch <= "я") or ch in "Ёё" for ch in text
     )
-    letter_digits = _letter_digits(text)
+    letter_marks = _letter_marks(text)
     for match in _BROKEN_CYRILLIC_SPAN.finditer(text):
         word = match.group()
         if not any("а" <= ch <= "я" or ch == "ё" for ch in word):
             continue
-        if _digits_are_numbers(word, letter_digits):
+        if _digits_are_numbers(word, letter_marks):
             continue
         bad = sum(ch in _BROKEN_CYRILLIC_ASCII for ch in word)
         if bad:
@@ -914,7 +920,7 @@ def _repair_broken_cyrillic_pdf_text(text: str) -> str:
     lines = text.split("\n")
     alt_flags = _alt_font_line_flags(lines)
     vocab = _clean_word_vocabulary(text)
-    repaired = _repair_pass(lines, alt_flags, vocab, letter_digits)
+    repaired = _repair_pass(lines, alt_flags, vocab, letter_marks)
     # Второй проход. Слова, восстановленные первым проходом, — тоже
     # улики: прогон без единой уцелевшей буквы (`<>4C;59`) остаётся
     # без подтверждения, пока то же слово где-то в документе не
@@ -925,7 +931,7 @@ def _repair_broken_cyrillic_pdf_text(text: str) -> str:
     # неограниченным циклом — это только расширяло бы шлюз.
     grown = vocab | _clean_word_vocabulary(repaired)
     if grown != vocab:
-        repaired = _repair_pass(lines, alt_flags, grown, letter_digits)
+        repaired = _repair_pass(lines, alt_flags, grown, letter_marks)
     # Заглавные второго шрифта попадают в печатную пунктуацию, поэтому
     # достаются отдельным шагом и только по уликам готового текста.
     if any(alt_flags):
