@@ -153,23 +153,51 @@ def test_tidy_keeps_inline_code():
     assert convert_to_md.tidy(text, keep_images=False) == text
 
 
-def test_tidy_code_markers_inside_live_html_are_not_code():
-    # Обратная кавычка в атрибуте не открывает код: CommonMark разбирает
-    # тег раньше. И в сыром HTML-блоке Markdown не действует — ни
-    # кавычки, ни ограда там не делают код, `<script>` живой. Блок
-    # <pre> идёт последним: по CommonMark он кончается на строке с
-    # </script>, и вторая ``` открывает ограду до конца текста.
-    text = (
-        'текст <a title="`" onclick="alert(1)" x="`">x</a>\n\n'
-        "<div>\n`<script>alert(2)</script>`\n</div>\n\n"
-        "\\`<script>alert(4)</script>\\`\n\n"
-        "<pre>\n\n```\n<script>alert(3)</script>\n```\n</pre>\n"
-    )
-
+@pytest.mark.parametrize("text", [
+    # Обратная кавычка в атрибуте не открывает код: тег разбирается
+    # раньше, и обработчик живой.
+    'текст <a title="`" onclick="alert(1)" x="`">x</a>',
+    # В сыром HTML-блоке Markdown не действует — ни кавычки, ни ограда
+    # кодом не становятся; в том числе внутри цитаты и пункта списка.
+    "<div>\n`<script>alert(2)</script>`\n</div>",
+    "<pre>\n\n```\n<script>alert(3)</script>\n```\n</pre>",
+    "> <div>\n> `<script>alert(4)</script>`",
+    "- <div>\n  `<script>alert(5)</script>`",
+    # Экранированная кавычка — литерал, код она не открывает.
+    "\\`<script>alert(6)</script>`",
+    # Встроенный код не переходит границу блока и ячейки таблицы.
+    "# Заголовок `x\nтекст <script>alert(7)</script>` y",
+    "| h1 | h2 |\n| --- | --- |\n| `a | <script>alert(8)</script> b` |",
+    # Отступ 4+ без пустой строки перед ним — продолжение абзаца, а
+    # строка левее такой ограды уже вне пункта списка.
+    "абзац\n    ```\n    <script>alert(9)</script>",
+    "    ```\nтекст <script>alert(10)</script>\n    ```",
+    "- a\n\n    ```\n    x\n<script>alert(11)</script>\n    ```",
+    # Ограда с отступом 4+ внутри обычной ограды — её содержимое.
+    "```\n    ```\ncode\n```\n<script>alert(12)</script>",
+])
+def test_tidy_code_markers_inside_live_html_are_not_code(text):
     out = convert_to_md.tidy(text, keep_images=False)
 
     assert "onclick" not in out
     assert "<script" not in out
+    markdown_it = pytest.importorskip("markdown_it")
+    html = markdown_it.MarkdownIt(
+        "commonmark", {"html": True}
+    ).enable("table").render(out)
+    assert "<script" not in html and "onclick" not in html
+
+
+def test_tidy_keeps_code_fences_in_nested_lists():
+    # Так MarkItDown пишет код во вложенном списке: ограда с отступом 4
+    # после пустой строки. Это код, санитизация его не трогает.
+    text = (
+        "* item\n  + sub\n\n    ```\n"
+        '    <script>x</script> onclick="1" data:x\n    ```\n\n'
+        "1. step\n\n   ```\n   <iframe src=javascript:y>\n   ```\n"
+    )
+
+    assert convert_to_md.tidy(text, keep_images=False) == text
 
 
 def test_convert_json_and_xml_are_fenced_data(tmp_path):

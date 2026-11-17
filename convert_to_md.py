@@ -1813,26 +1813,35 @@ def _convert_box_tables(text: str) -> str:
     return "\n".join(out)
 
 
-# Ограда кода по CommonMark: ``` или ~~~ от трёх знаков, отступ до трёх
-# пробелов, после ограды — язык. Раньше узнавалась только голая ```, и
-# содержимое ```html и ~~~ санитизация вычищала как прозу. У ``` в
-# строке языка не бывает обратных кавычек: это уже встроенный код.
-_FENCE_OPEN_RE = re.compile(r"^ {0,3}(`{3,}(?=[^`]*$)|~{3,})")
-_FENCE_CLOSE_RE = re.compile(r"^ {0,3}(`{3,}|~{3,})\s*$")
-# Сырой HTML-блок: строка начинается с тега, и до конца блока Markdown
-# не разбирается — ни ограда, ни обратные кавычки кодом не становятся,
-# а `<script>` внутри живой. Конец блока — по CommonMark: свой
-# закрывающий признак у script/pre/style/textarea, комментария, `<?`,
-# CDATA и `<!`, у остальных — пустая строка. Начало взято с запасом:
-# лишний «HTML-блок» лишь санитизируется, как раньше.
-_HTML_BLOCK_START = re.compile(r"^ {0,3}<[A-Za-z/!?]")
+# Ограда кода по CommonMark: ``` или ~~~ от трёх знаков, после ограды —
+# язык. Раньше узнавалась только голая ```, и содержимое ```html и ~~~
+# санитизация вычищала как прозу. У ``` в строке языка не бывает
+# обратных кавычек: это уже встроенный код. Ограда с отступом до трёх
+# пробелов — обычная. С отступом 4+ (так MarkItDown пишет код во
+# вложенном списке) — только после пустой строки: иначе это
+# продолжение абзаца, и текст под ней живой. Её содержимое кончается
+# на строке с меньшим отступом — эта строка уже вне пункта списка.
+_FENCE_OPEN_RE = re.compile(
+    r"^(?P<indent>[ \t]*)(?P<fence>`{3,}(?=[^`]*$)|~{3,})")
+_FENCE_CLOSE_RE = re.compile(
+    r"^(?P<indent>[ \t]*)(?P<fence>`{3,}|~{3,})[ \t]*$")
+# Сырой HTML-блок: строка начинается с тега (в том числе внутри цитаты
+# `>` или пункта списка), и до конца блока Markdown не разбирается —
+# ни ограда, ни обратные кавычки кодом не становятся, а `<script>`
+# внутри живой. Конец блока — по CommonMark: свой закрывающий признак
+# у script/pre/style/textarea, комментария, `<?`, CDATA и `<!`, у
+# остальных — пустая строка. Начало взято с запасом: лишний
+# «HTML-блок» лишь санитизируется, как раньше.
+_HTML_PREFIX = r"^[ \t]*(?:(?:>|[-*+]|\d{1,9}[.)])[ \t]*)*"
+_HTML_BLOCK_START = re.compile(_HTML_PREFIX + r"<[A-Za-z/!?]")
 _HTML_BLOCK_ENDS = (
-    (re.compile(r"(?i)^ {0,3}<(?:script|pre|style|textarea)(?:[\s>]|$)"),
+    (re.compile("(?i)" + _HTML_PREFIX
+                + r"<(?:script|pre|style|textarea)(?:[\s>]|$)"),
      re.compile(r"(?i)</(?:script|pre|style|textarea)>")),
-    (re.compile(r"^ {0,3}<!--"), re.compile(r"-->")),
-    (re.compile(r"^ {0,3}<\?"), re.compile(r"\?>")),
-    (re.compile(r"^ {0,3}<!\[CDATA\["), re.compile(r"\]\]>")),
-    (re.compile(r"^ {0,3}<![A-Za-z]"), re.compile(r">")),
+    (re.compile(_HTML_PREFIX + r"<!--"), re.compile(r"-->")),
+    (re.compile(_HTML_PREFIX + r"<\?"), re.compile(r"\?>")),
+    (re.compile(_HTML_PREFIX + r"<!\[CDATA\["), re.compile(r"\]\]>")),
+    (re.compile(_HTML_PREFIX + r"<![A-Za-z]"), re.compile(r">")),
 )
 _BLANK_LINE = re.compile(r"^\s*$")
 # Встроенный код и то, что CommonMark разбирает раньше него: HTML-тег,
@@ -1841,16 +1850,23 @@ _BLANK_LINE = re.compile(r"^\s*$")
 # поглощается первым: до `>` вне кавычек, до пустой строки или до
 # конца. Это шире стандарта, но лишнее совпадение лишь оставляет текст
 # под санитизацией, а без закрывающих границ разбор был бы
-# квадратичным. Кавычка после `\` — литерал, не код; код длиннее 4096
-# знаков не прячется — граница времени разбора.
-_PARA_CHAR = r"(?:[^\n]|\n(?![ \t]*\n))"
+# квадратичным. Код прячется, только если он целиком в одной строке и
+# без неэкранированной `|`: многострочный мог бы склеить кавычки
+# соседних блоков (заголовка и абзаца), а `|` в строке GFM-таблицы
+# делит ячейки раньше, чем разбирается код. Кавычка после `\` —
+# литерал, не код; код длиннее 4096 знаков не прячется — граница
+# времени разбора.
 _INLINE_CODE_OR_TAG = re.compile(
     r"(?P<tag><[A-Za-z/!?](?:[^>\"'\n]|\n(?![ \t]*\n)"
     r"|\"(?:[^\"\n]|\n(?![ \t]*\n))*+\"?"
     r"|'(?:[^'\n]|\n(?![ \t]*\n))*+'?)*+>?)"
     r"|(?<![`\\])(?P<ticks>`+)(?!`)"
-    + _PARA_CHAR + r"{1,4096}?(?<!`)(?P=ticks)(?!`)"
+    r"(?:[^\n|\\]|\\.){1,4096}?(?<!`)(?P=ticks)(?!`)"
 )
+
+
+def _indent_width(prefix: str) -> int:
+    return len(prefix.expandtabs(4))
 _CODE_PLACEHOLDER = re.compile("\x00(\\d+)\x00")
 
 
@@ -1891,8 +1907,9 @@ def _apply_outside_fences(text: str, fn) -> str:
     активная разметка не проходит (код рендерится инертно)."""
     out: list[str] = []
     prose: list[tuple[str, bool]] = []
-    fence = None      # открывающая ограда текущего код-блока
+    fence = None      # (открывающая ограда, её отступ)
     html_end = None   # признак конца текущего HTML-блока
+    prev_blank = True
 
     def flush() -> None:
         if prose:
@@ -1904,18 +1921,30 @@ def _apply_outside_fences(text: str, fn) -> str:
 
     for line in text.split("\n"):
         if fence is not None:
-            out.append(line)
+            run, indent = fence
             close = _FENCE_CLOSE_RE.match(line)
-            if (close and close.group(1)[0] == fence[0]
-                    and len(close.group(1)) >= len(fence)):
+            low, high = (0, 3) if indent <= 3 else (indent - 3, indent + 3)
+            if (close and close.group("fence")[0] == run[0]
+                    and len(close.group("fence")) >= len(run)
+                    and low <= _indent_width(close.group("indent")) <= high):
+                out.append(line)
                 fence = None
-            continue
+                prev_blank = False
+                continue
+            width = _indent_width(line[:len(line) - len(line.lstrip())])
+            if indent <= 3 or not line.strip() or width >= indent:
+                out.append(line)
+                prev_blank = not line.strip()
+                continue
+            fence = None  # строка левее ограды из списка — уже не код
         if html_end is None:
             opened = _FENCE_OPEN_RE.match(line)
-            if opened:
+            width = _indent_width(opened.group("indent")) if opened else 0
+            if opened and (width <= 3 or prev_blank):
                 flush()
                 out.append(line)
-                fence = opened.group(1)
+                fence = (opened.group("fence"), width)
+                prev_blank = False
                 continue
             if _HTML_BLOCK_START.match(line):
                 html_end = next(
@@ -1926,6 +1955,7 @@ def _apply_outside_fences(text: str, fn) -> str:
         prose.append((line, html_end is not None))
         if html_end is not None and html_end.search(line):
             html_end = None
+        prev_blank = not line.strip()
     flush()
     return "\n".join(out)
 
