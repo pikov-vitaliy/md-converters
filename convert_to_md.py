@@ -716,7 +716,10 @@ _CLEAN_WORD = re.compile(r"[А-Яа-яЁё]{3,}")
 # «P=10кВт», «d<10мм») — пишут постоянно.
 _LETTER_MARK = re.compile(r"(?<=[а-яё])[0-9<=>A-O](?=[а-яё])")
 # Ведущее число: цифры, перед ними знак сравнения и, возможно, латинская
-# буква-обозначение («=10кВт», «<10мм», «I=10мА»).
+# буква-обозначение («=10кВт», «<10мм», «I=10мА»). Знак между русским
+# словом и числом («Uном=220В») сюда сознательно не входит: в
+# сломанных документах это обычный вид слова («о=8» = «они»), и такое
+# расширение правила портило их ремонт.
 _LEADING_NUMBER = re.compile(r"[A-O]?[<=>]*\d+")
 
 
@@ -1969,6 +1972,10 @@ def tidy(text: str, keep_images: bool, phantom_images: bool = False,
     сворачивание картинок и санитизация применяются только ВНЕ кода
     (ограды ```/~~~ и встроенный `код`), чтобы не искажать технический
     контент в примерах кода."""
+    # Переводы строк — до разбора кода: с «\r» на конце закрывающая
+    # ограда не узнавалась, а одиночный «\r» прятал границу строки от
+    # правил кода и HTML-блоков, хотя просмотрщик видит там две строки.
+    text = text.replace("\r\n", "\n").replace("\r", "\n")
     text = _CTRL_TO_SPACE.sub(" ", text)
     text = _CTRL_DROP.sub("", text)
 
@@ -1985,7 +1992,7 @@ def tidy(text: str, keep_images: bool, phantom_images: bool = False,
     text = _apply_outside_fences(text, _transform_prose)
     out: list[str] = []
     blank = False
-    for line in text.replace("\r\n", "\n").replace("\r", "\n").split("\n"):
+    for line in text.split("\n"):
         line = line.rstrip()
         if line == "":
             if not blank:

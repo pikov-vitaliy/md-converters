@@ -175,6 +175,9 @@ def test_tidy_keeps_inline_code():
     "- a\n\n    ```\n    x\n<script>alert(11)</script>\n    ```",
     # Ограда с отступом 4+ внутри обычной ограды — её содержимое.
     "```\n    ```\ncode\n```\n<script>alert(12)</script>",
+    # Переводы строк Windows и одиночный «\r» — тоже границы строк.
+    "```\r\ncode\r\n```\r\n<script>alert(13)</script>\r\n",
+    "# Заголовок `x\rтекст <script>alert(14)</script>` y",
 ])
 def test_tidy_code_markers_inside_live_html_are_not_code(text):
     out = convert_to_md.tidy(text, keep_images=False)
