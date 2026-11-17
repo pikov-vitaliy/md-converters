@@ -936,38 +936,49 @@ async def convert_url_endpoint(
 
     async def generate() -> AsyncGenerator[str, None]:
         yield _sse("start", {"file": url})
+        # Без «Папки вывода» результат только скачивается: ядро без
+        # out_dir пишет в Path.cwd() — рабочую папку СЕРВЕРА, где .md
+        # оставался мусором. Пишем во временную и удаляем её сами.
+        tmpdir = None
+        if not has_out_dir:
+            tmpdir = Path(tempfile.mkdtemp(prefix="md_url_"))
+            opts["out_dir"] = tmpdir
         try:
-            res = await _run_conversion(
-                _convert_url_with_capture, url, opts
-            )
-        except Exception as exc:
-            yield _sse("error", {
+            try:
+                res = await _run_conversion(
+                    _convert_url_with_capture, url, opts
+                )
+            except Exception as exc:
+                yield _sse("error", {
+                    "file": url,
+                    "error": f"{type(exc).__name__}: {exc}",
+                })
+                yield _sse("complete", {})
+                return
+
+            md_path = res["md_path"]
+            full_content, preview = _read_output(md_path)
+            dl_id = ""
+            if full_content:
+                dl_id = uuid.uuid4().hex[:12]
+                _add_download(dl_id, md_path.name, full_content)
+
+            yield _sse("done", {
                 "file": url,
-                "error": f"{type(exc).__name__}: {exc}",
+                "status": res["status"],
+                "log": res["log"],
+                "warnings": res["warnings"],
+                "preview": preview,
+                "download_id": dl_id,
+                "output": (
+                    str(md_path)
+                    if has_out_dir and md_path else None
+                ),
             })
             yield _sse("complete", {})
-            return
-
-        md_path = res["md_path"]
-        full_content, preview = _read_output(md_path)
-        dl_id = ""
-        if full_content:
-            dl_id = uuid.uuid4().hex[:12]
-            _add_download(dl_id, md_path.name, full_content)
-
-        yield _sse("done", {
-            "file": url,
-            "status": res["status"],
-            "log": res["log"],
-            "warnings": res["warnings"],
-            "preview": preview,
-            "download_id": dl_id,
-            "output": (
-                str(md_path)
-                if has_out_dir and md_path else None
-            ),
-        })
-        yield _sse("complete", {})
+        finally:
+            if tmpdir is not None:
+                shutil.rmtree(tmpdir, ignore_errors=True)
 
     return StreamingResponse(
         generate(), media_type="text/event-stream",

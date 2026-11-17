@@ -703,6 +703,49 @@ def test_ssl_verified_by_default(client, monkeypatch):
     assert cap.get("v") is True
 
 
+def test_url_without_outdir_leaves_no_file_in_cwd(
+    client, tmp_path, monkeypatch
+):
+    """c6: URL без «Папки вывода» только скачивается.
+
+    Ядро без out_dir пишет в Path.cwd() — раньше page.md оставался в
+    рабочей папке сервера, хотя SSE показывал output=null.
+    """
+    import tempfile
+    from types import SimpleNamespace
+
+    cwd = tmp_path / "cwd"
+    cwd.mkdir()
+    monkeypatch.chdir(cwd)
+    monkeypatch.setattr(
+        gui_server.core, "_convert_url_data",
+        lambda url, opts: (
+            SimpleNamespace(text_content="PAGEMARKER\n", title=None),
+            url,
+        ),
+    )
+    made = []
+    real_mkdtemp = tempfile.mkdtemp
+
+    def spy_mkdtemp(*args, **kwargs):
+        made.append(real_mkdtemp(*args, **kwargs))
+        return made[-1]
+
+    monkeypatch.setattr(tempfile, "mkdtemp", spy_mkdtemp)
+    r = client.post(
+        "/api/convert/url", data={"url": "https://example.com/page"}
+    )
+    assert r.status_code == 200
+    done = _done_events(r.text)[0]
+    assert done["status"] == "ok"
+    assert done["output"] is None
+    assert list(cwd.iterdir()) == []
+    got = client.get(f"/api/download?dl_id={done['download_id']}")
+    assert "PAGEMARKER" in got.text
+    # временная папка убрана после ответа
+    assert made and not any(os.path.exists(p) for p in made)
+
+
 # --- A1 (workplan): ValueError из _gui_opts → 400, не голый 500 ---
 
 def _events(body):
