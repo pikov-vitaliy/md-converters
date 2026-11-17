@@ -84,27 +84,35 @@ if (-not (Test-Path (Join-Path $kit 'convert_to_md.py'))) {
 }
 
 # --- 1) Ищем Python -------------------------------------------------------
+function Test-Python314([string]$exe) {
+    # Проект только под Python 3.14: requires-python ">=3.14,<3.15".
+    & $exe -c "import sys; sys.exit(0 if sys.version_info[:2] == (3, 14) else 1)" 2>$null
+    return ($LASTEXITCODE -eq 0)
+}
+
 function Find-Python {
-    foreach ($name in @('python', 'python3')) {
-        $cmd = Get-Command $name -ErrorAction SilentlyContinue
-        if ($cmd -and $cmd.Source -and $cmd.Source -notmatch 'WindowsApps') {
-            return $cmd.Source   # пропускаем заглушку из Microsoft Store
-        }
-    }
     $py = Get-Command py -ErrorAction SilentlyContinue
     if ($py) {
         try {
-            $path = & py -c "import sys; print(sys.executable)" 2>$null
+            $path = & py -3.14 -c "import sys; print(sys.executable)" 2>$null
             if ($LASTEXITCODE -eq 0 -and $path) { return $path.Trim() }
         } catch {}
+    }
+    foreach ($name in @('python3.14', 'python', 'python3')) {
+        $cmd = Get-Command $name -ErrorAction SilentlyContinue
+        # Пропускаем заглушку из Microsoft Store и чужие версии Python.
+        if ($cmd -and $cmd.Source -and $cmd.Source -notmatch 'WindowsApps' -and
+            (Test-Python314 $cmd.Source)) {
+            return $cmd.Source
+        }
     }
     return $null
 }
 
 $python = Find-Python
 if (-not $python) {
-    Write-Host "Python не найден." -ForegroundColor Red
-    Write-Host "Скачайте Python 3.10+ с https://www.python.org/downloads/"
+    Write-Host "Python 3.14 не найден." -ForegroundColor Red
+    Write-Host "Скачайте Python 3.14 с https://www.python.org/downloads/"
     Write-Host "При установке обязательно поставьте галочку 'Add python.exe to PATH',"
     Write-Host "затем запустите install.ps1 ещё раз."
     exit 1

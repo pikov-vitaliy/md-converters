@@ -4,10 +4,12 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "md-converters"
-version = "1.4.0"
+version = "2.0.0"
 description = "Конвертация документов (PDF, HTML, Word, Excel, PowerPoint и др.) в Markdown на базе MarkItDown"
 readme = "README.md"
-requires-python = ">=3.10"
+# Только свежий Python. 3.15 пока нельзя: MarkItDown 0.1.9 объявляет
+# requires-python <3.15, у onnxruntime (через magika) нет колёс cp315.
+requires-python = ">=3.14,<3.15"
 license = { text = "MIT" }
 authors = [{ name = "Vitaly Pikov" }]
 keywords = ["markdown", "pdf", "html", "docx", "xlsx", "converter", "markitdown"]
@@ -16,25 +18,15 @@ classifiers = [
     "Environment :: Console",
     "Operating System :: OS Independent",
     "Programming Language :: Python :: 3",
-    "Programming Language :: Python :: 3.10",
-    "Programming Language :: Python :: 3.11",
-    "Programming Language :: Python :: 3.12",
-    "Programming Language :: Python :: 3.13",
     "Programming Language :: Python :: 3.14",
     "Topic :: Text Processing :: Markup :: Markdown",
 ]
-# Не [all]: его youtube-transcript-api требует Python < 3.14, из-за чего
-# pip на 3.14 молча откатывается на древний markitdown 0.0.2.
-# Потолок <1.0.0 — чтобы мажорный релиз не прилетел молча.
+# Не [all]: он тянет облачные клиенты Azure, распознавание речи и
+# YouTube, которые здесь не нужны. Потолок <1.0.0 — чтобы мажорный
+# релиз не прилетел молча.
 dependencies = [
     "charset-normalizer>=3,<4",
-    # magika 0.6.3 resolves to onnxruntime 1.20.1, which has no cp314 wheels.
-    # Keep 0.6.2 until upstream publishes a 3.14-compatible dependency graph.
-    "magika>=0.6.2,<0.6.3",
-    # onnxruntime 1.24+ dropped cp310 wheels; 1.20.1 lacks cp314 wheels.
-    "onnxruntime>=1.20.1,<1.21; python_version < '3.11'",
-    "onnxruntime>=1.26,<2; python_version >= '3.11'",
-    "markitdown[pdf,docx,pptx,xlsx,xls,outlook]>=0.1.0,<1.0.0",
+    "markitdown[pdf,docx,pptx,xlsx,xls,outlook]>=0.1.9,<1.0.0",
     # pdfplumber и pypdfium2 импортируются напрямую (извлечение PDF-таблиц
     # по геометрии и подсчёт страниц для диагностики image-only PDF).
     # Объявлены явно, а не как транзитивные через markitdown[pdf]: под

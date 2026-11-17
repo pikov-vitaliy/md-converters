@@ -111,10 +111,10 @@ except ImportError:
 
 
 def _missing_markitdown() -> None:
-    # Не [all]: на Python 3.14 pip из-за него молча откатывается на 0.0.2.
+    # Не [all]: он тянет облачные клиенты и распознавание речи.
     print("markitdown is not installed. Install it with:")
-    print('  pip install "markitdown[pdf,docx,pptx,xlsx,xls,outlook]"'
-          '>=0.1.0,<1.0.0')
+    print('  pip install "markitdown[pdf,docx,pptx,xlsx,xls,outlook]'
+          '>=0.1.9,<1.0.0"')
     sys.exit(1)
 
 # Форматы, которые берём при обходе папки/маски (по одному явному файлу
@@ -2003,7 +2003,7 @@ def _positive_float(value: str, name: str) -> float:
 
 # CGNAT / shared address space (RFC 6598). На Python <3.13 он ошибочно
 # проходит ip.is_global=True (исправлено в 3.13); отвергаем явно, чтобы
-# SSRF-проверка не зависела от версии Python (проект — 3.10..3.14).
+# SSRF-проверка не зависела от версии Python.
 _SHARED_ADDRESS_SPACE = ipaddress.ip_network("100.64.0.0/10")
 
 
