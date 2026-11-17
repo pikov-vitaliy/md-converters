@@ -1,3 +1,4 @@
+import json
 import shutil
 import subprocess
 from pathlib import Path
@@ -66,6 +67,40 @@ def test_install_reports_pip_failure(tmp_path, monkeypatch, pip_code, ok):
         assert done.returncode == 1, done.stdout + done.stderr
         assert "Комплект установлен." not in done.stdout
         assert "Не удалось установить" in done.stdout
+
+
+@pytest.mark.skipif(PWSH is None, reason="нужен pwsh")
+def test_profile_block_keeps_dollar_and_quotes_in_paths(
+    tmp_path, monkeypatch
+):
+    """c9: путь с `$имя` и кавычками доходит до команды дословно.
+
+    Пути вставлялись в профиль в двойных кавычках, и при запуске
+    профиля `$null` из «C:\\папка с $null» раскрывался повторно.
+    Исполняется только генератор $block; вызов & в функциях
+    подменяется выводом аргументов — профиль не пишется.
+    """
+    # Генератор — всё между концом цикла чистки профиля и закрытием
+    # here-string $block (граница общая для прежнего и нового кода).
+    script = (ROOT / "install.ps1").read_text(encoding="utf-8-sig")
+    start = script.index("\n}\n", script.index("$clean.Add($line)")) + 3
+    gen = script[start:script.index('\n"@', start)] + '\n"@\n'
+    assert "Set-Content" not in gen
+    kit = "C:\\папка с $null и 'апостроф’ом"
+    python = kit + "\\python.exe"
+    monkeypatch.setenv("FAKE_KIT", kit)
+    monkeypatch.setenv("FAKE_PY", python)
+    body = (
+        "$python = $env:FAKE_PY\n$kit = $env:FAKE_KIT\n" + gen
+        + "$probe = $block -replace '\\{\\s*&\\s', '{ Write-Output '\n"
+        + "Invoke-Expression $probe\n"
+        + "[Console]::Out.WriteLine((@(tomd) | ConvertTo-Json))\n"
+    )
+    done = _run_pwsh(tmp_path, body)
+    assert done.returncode == 0, done.stderr
+    assert json.loads(done.stdout) == [
+        python, kit + "\\convert_to_md.py",
+    ]
 
 
 def test_sendto_shortcut_gets_explicit_icon_location():

@@ -172,12 +172,19 @@ foreach ($line in $old) {
     $clean.Add($line)
 }
 
+# Пути в профиль — литералами в одинарных кавычках. В двойных PowerShell
+# при каждом запуске профиля заново раскрывал бы `$имя` из пути
+# («C:\папка $null» превращалась в «C:\папка »). Escape-функция удваивает
+# и ', и типографские ‘ ’ — PowerShell их тоже считает кавычками.
+$q = [System.Management.Automation.Language.CodeGeneration]
+$pyLit  = "'" + $q::EscapeSingleQuotedStringContent($python) + "'"
+$cliLit = "'" + $q::EscapeSingleQuotedStringContent("$kit\convert_to_md.py") + "'"
 $block = @"
 # >>> md-converters >>>
 # Конвертеры в Markdown (md-converters). Прописано install.ps1 — не редактируйте.
-function tomd    { & "$python" "$kit\convert_to_md.py" @args }
-function pdf2md  { & "$python" "$kit\convert_to_md.py" --only pdf @args }
-function html2md { & "$python" "$kit\convert_to_md.py" --only html,htm @args }
+function tomd    { & $pyLit $cliLit @args }
+function pdf2md  { & $pyLit $cliLit --only pdf @args }
+function html2md { & $pyLit $cliLit --only html,htm @args }
 Set-Alias pdftomd  pdf2md
 Set-Alias htmltomd html2md
 # <<< md-converters <<<
