@@ -1397,25 +1397,68 @@ def _pdf_page_texts(path: Path) -> list | None:
         return None
 
 
-def _strip_markitdown_furniture(text: str, path: Path,
-                                page_count: int) -> str:
-    """Колонтитулы и номера страниц в тексте фолбэка MarkItDown.
+def _form_page_segments(text: str, start: int, end: int,
+                        missing: list, texts: list) -> list:
+    """Границы страниц-форм `missing` в промежутке text[start:end]
+    вывода MarkItDown: список (начало, конец, страница).
+
+    MarkItDown склеивает страницы пустой строкой, но пустые строки
+    бывают и внутри формы (рабочая тетрадь: 5-8 кусков на две
+    страницы), поэтому счёт кусков ничего не даёт. Страница начинается
+    с куска, первая строка которого совпадает с первой строкой её
+    текста pdfplumber; страницы ищутся по порядку. Если какая-то не
+    нашлась или промежуток начинается не с первой из них, границы
+    неизвестны — промежуток остаётся как есть: лишний колонтитул
+    честнее потерянного текста."""
+    pieces = []
+    pos = start
+    for piece in text[start:end].split("\n\n"):
+        if piece.strip():
+            head = piece.strip().split("\n", 1)[0].strip()
+            pieces.append((pos, pos + len(piece), head))
+        pos += len(piece) + 2
+    firsts: list = []
+    k = 0
+    for q in missing:
+        head = texts[q].split("\n", 1)[0].strip()
+        while k < len(pieces) and pieces[k][2] != head:
+            k += 1
+        if k == len(pieces):
+            return []
+        firsts.append(k)
+        k += 1
+    if firsts[0] != 0:
+        return []
+    bounds = firsts + [len(pieces)]
+    return [(pieces[bounds[n]][0], pieces[bounds[n + 1] - 1][1], q)
+            for n, q in enumerate(missing)]
+
+
+def _strip_markitdown_furniture(text: str, path: Path) -> str:
+    """Колонтитулы и номера страниц в тексте фолбэка MarkItDown
+    (многостраничного, от трёх страниц).
 
     Чистке нужны границы страниц. Если MarkItDown шёл через pdfminer,
-    страницы разделены `\\f`. Иначе он склеивает текст страниц пустой
-    строкой и границы теряет; тогда текст каждой страницы (pdfplumber)
-    ищется в выводе дословно, по порядку и по границам строк.
-    Ненайденная страница (MarkItDown разобрал её как форму-таблицу)
-    остаётся как есть: лишний колонтитул честнее потерянного текста.
-    Однострочную страницу ищем только вплотную к предыдущей — короткая
-    строка легко найдётся и в чужом месте."""
+    страницы разделены `\\f` (он ставит его после каждой страницы).
+    Иначе он склеивает текст страниц пустой строкой и границы теряет;
+    тогда текст каждой страницы (pdfplumber) ищется в выводе дословно,
+    по порядку и по границам строк. Однострочную страницу ищем только
+    вплотную к предыдущей — короткая строка легко найдётся и в чужом
+    месте.
+
+    Страницу-форму (MarkItDown выводит её таблицей) так не найти — её
+    границы ищет `_form_page_segments`."""
     if "\f" in text:
+        page_count = text.count("\f")
+        if page_count < 3:
+            return text
         pages = [pg.split("\n") for pg in text.split("\f")]
         pages = _strip_pdf_furniture(pages, page_count)
         return "\f".join("\n".join(pg) for pg in pages)
     texts = _pdf_page_texts(path)
-    if not texts:
+    if not texts or len(texts) < 3:
         return text
+    page_count = len(texts)
     spans = []
     cursor = 0
     for p, chunk in enumerate(texts):
@@ -1430,13 +1473,23 @@ def _strip_markitdown_furniture(text: str, path: Path,
             continue
         spans.append((p, pos, end))
         cursor = end
+    segs = []
+    prev_p, prev_end = -1, 0
+    for p, pos, end in spans + [(len(texts), len(text), len(text))]:
+        missing = [q for q in range(prev_p + 1, p) if texts[q]]
+        if missing:
+            segs += _form_page_segments(text, prev_end, pos, missing,
+                                        texts)
+        if p < len(texts):
+            segs.append((pos, end, p))
+        prev_p, prev_end = p, end
     pages = [[] for _ in texts]
-    for p, pos, end in spans:
+    for pos, end, p in segs:
         pages[p] = text[pos:end].split("\n")
     pages = _strip_pdf_furniture(pages, page_count)
     out = []
     prev = 0
-    for p, pos, end in spans:
+    for pos, end, p in segs:
         out += [text[prev:pos], "\n".join(pages[p])]
         prev = end
     out.append(text[prev:])
@@ -2279,7 +2332,6 @@ def _convert_file_to_target(path: Path, target: Path, opts: dict,
     print(f"Converting {path.name} ...")
     result = None
     note = None
-    furniture_done = False
     # PDF: сначала пытаемся извлечь таблицы по геометрии (pdfplumber).
     # Если документ без таблиц или pdfplumber недоступен — откат на
     # штатный путь MarkItDown ниже (поведение не меняется).
@@ -2291,13 +2343,26 @@ def _convert_file_to_target(path: Path, target: Path, opts: dict,
         if pdf_result is not None:
             result = pdf_result
             note = f"{pdf_result.pdf_tables} table(s) via pdfplumber"
-            furniture_done = True  # _clean_pdf_text внутри
     if result is None:
         try:
             result, note = _convert_file_data(path)
         except Exception as exc:
             print(f"[error] Failed to convert {path.name}: {exc}")
             return "fail"
+        if suffix == ".pdf":
+            # Фолбэк MarkItDown идёт мимо _clean_pdf_text:
+            # колонтитулы и номера страниц оставались в .md
+            # (Р 71207-2024, 19 шт.), тогда как pdfplumber-путь их
+            # срезает. Применяем ТОЛЬКО чистку колонтитулов:
+            # фенсинг и экранирование настроены на pdfplumber-текст
+            # и на фолбэк не переносятся. Чистка — ДО ремонта
+            # кириллицы, как на pdfplumber-пути: страницы ищутся по
+            # дословному тексту, а ремонт его меняет («Меры по ЗИ» с
+            # --pdf-tables off не находили ни одной страницы).
+            text = result.text_content
+            kept = _strip_markitdown_furniture(text, path)
+            if kept != text:
+                result = _TextResult(result, kept)
 
     if suffix == ".pdf":
         repaired = _repair_broken_cyrillic_pdf_text(result.text_content)
@@ -2332,7 +2397,6 @@ def _convert_file_to_target(path: Path, target: Path, opts: dict,
                 clean = _clean_pdf_text(clean, page_count).strip()
                 if clean:
                     result = _TextResult(result, clean + "\n")
-                    furniture_done = True  # _clean_pdf_text выше
                     fallback_note = "text via pypdfium2"
                     note = (
                         f"{note}; {fallback_note}"
@@ -2351,17 +2415,6 @@ def _convert_file_to_target(path: Path, target: Path, opts: dict,
                     f"(requires Tesseract).",
                     file=sys.stderr,
                 )
-        if not furniture_done and page_count and page_count >= 3:
-            # Фолбэк MarkItDown идёт мимо _clean_pdf_text:
-            # колонтитулы и номера страниц оставались в .md
-            # (Р 71207-2024, 19 шт.), тогда как pdfplumber-путь их
-            # срезает. Применяем ТОЛЬКО чистку колонтитулов:
-            # фенсинг и экранирование настроены на pdfplumber-текст
-            # и на фолбэк не переносятся.
-            text = result.text_content
-            kept = _strip_markitdown_furniture(text, path, page_count)
-            if kept != text:
-                result = _TextResult(result, kept)
 
     # PDF: «Сохранить картинки» извлекает встроенные растровые
     # изображения из PDF и дописывает их (base64) в .md по страницам.

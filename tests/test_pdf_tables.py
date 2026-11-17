@@ -896,8 +896,9 @@ def _workbook_pdf(with_table: bool, form_page: bool = False) -> bytes:
     под колонтитулом), номера строк чек-листа 1..8, одиночное «6» над
     номером страницы и год «2024» на титуле.
 
-    `form_page` добавляет девятую страницу — безрамочную сетку слов:
-    MarkItDown разбирает её как форму и склеивает страницы БЕЗ `\\f`."""
+    `form_page` добавляет на шестую и седьмую страницы безрамочную
+    сетку слов: MarkItDown разбирает их как формы (таблицей) и
+    склеивает страницы БЕЗ `\\f`."""
     pages = [_text(200, 500, "Workbook of the final project")
              + _text(200, 480, "Moscow") + _text(200, 460, "2024")]
     for p in range(2, 9):
@@ -917,12 +918,12 @@ def _workbook_pdf(with_table: bool, form_page: bool = False) -> bytes:
         body.append(_text(290, 40, str(p)))
         if with_table and p == 2:
             body.append(_ruled_table(320))
+        if form_page and p in (6, 7):
+            body += [_text(x, 500 - 20 * r, f"{name}{r}")
+                     for r in range(8)
+                     for x, name in ((72, "Key"), (250, "Val"),
+                                     (430, "Unit"))]
         pages.append(b"".join(body))
-    if form_page:
-        pages.append(b"".join(
-            _text(x, 760 - 20 * r, f"{name}{r}")
-            for r in range(8)
-            for x, name in ((72, "Key"), (250, "Val"), (430, "Unit"))))
     return _pages_pdf(pages)
 
 
