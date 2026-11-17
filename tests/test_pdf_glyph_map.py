@@ -214,7 +214,8 @@ def test_same_gid_other_letter_does_not_replace(tmp_path, monkeypatch):
     cyr = [("uni0410", 0x410, 1), ("uni0412", 0x412, 2),
            ("uni0421", 0x421, 3)]
     _install(tmp_path, monkeypatch, _font_bytes(glyphs=latin + cyr))
-    src = _pdf(tmp_path / "doc.pdf", _font_bytes(glyphs=cyr + latin),
+    src = _pdf(tmp_path / "doc.pdf",
+               _no_cmap(_font_bytes(glyphs=cyr + latin)),
                _tounicode({1: "А", 2: "В", 3: "С"}))
     assert c._pdf_glyph_fixed_copy(src) is None
 
@@ -304,19 +305,20 @@ def test_indirect_identity_encoding_still_fixed(tmp_path, fonts):
     assert "мирмир" in _fixed_text(src)
 
 
-def test_embedded_cmap_beats_wrong_homoglyph(tmp_path, monkeypatch):
-    # Битая карта даёт латинские ABC для глифов русских АВС (тот же
-    # контур). Встроенный шрифт со своей картой говорит: кириллица.
+def test_embedded_cmap_picks_twin_for_broken_values(tmp_path, monkeypatch):
+    # Битая карта даёт управляющие символы для глифов русских АВС (их
+    # контур совпадает с латинскими ABC). Выбор среди двойников делает
+    # собственная карта встроенного шрифта: кириллица.
     latin = [("A", 0x41, 1), ("B", 0x42, 2), ("C", 0x43, 3)]
     cyr = [("uni0410", 0x410, 1), ("uni0412", 0x412, 2),
            ("uni0421", 0x421, 3)]
     _install(tmp_path, monkeypatch, _font_bytes(glyphs=latin + cyr + MIR))
-    broken = {1: "A", 2: "B", 3: "C", 4: "\x14", 5: "\x15", 6: "\x16"}
+    broken = {1: "\x11", 2: "\x12", 3: "\x13", 4: "\x14", 5: "\x15",
+              6: "\x16"}
     src = _pdf(tmp_path / "doc.pdf", _font_bytes(glyphs=cyr + MIR + latin),
                _tounicode(broken), cids=[1, 2, 3, 4, 5, 6] * 3)
     text = _fixed_text(src)
     assert "АВСмир" in text and "ABC" not in text
-
 
 def test_same_gid_breaks_tie_between_twins(tmp_path, monkeypatch):
     # ‒ (U+2012) и – (U+2013) одного контура; подмножество без своей
@@ -342,3 +344,49 @@ def test_multichar_values_kept(tmp_path, monkeypatch):
     assert "1/2мир" in text and "½" not in text
 
 
+
+
+# Ревью Codex (круг E3): меняется только то, что контур опровергает.
+
+def test_empty_value_does_not_abort_repair(tmp_path, monkeypatch):
+    # У четвёртого глифа (в тексте не используется) значение карты
+    # пустое; раньше ord("") ронял ремонт всего шрифта.
+    glyphs = [(n, cp, i) for i, (n, cp) in enumerate(LETTERS.items(), 1)]
+    glyphs.append(("uni0430", 0x430, 7))
+    _install(tmp_path, monkeypatch, _font_bytes(glyphs=glyphs))
+    src = _pdf(tmp_path / "doc.pdf", _font_bytes(glyphs=glyphs),
+               _tounicode_multi({**BROKEN, 4: ""}))
+    assert "мирмир" in _fixed_text(src)
+
+def test_control_sequences_are_repaired(tmp_path, fonts):
+    broken = {1: "\x14\x15", 2: "\x15\x16", 3: "\x16\x17"}
+    src = _pdf(tmp_path / "doc.pdf", _font_bytes(), _tounicode_multi(broken))
+    assert "мирмир" in _fixed_text(src)
+
+
+def test_confirmed_letters_kept_despite_own_cmap(tmp_path, monkeypatch):
+    # Своя карта подмножества даёт символы частного использования, а
+    # верная ToUnicode — русские А, О, Е, подтверждённые контуром.
+    latin = [("A", 0x41, 1), ("O", 0x4F, 2), ("E", 0x45, 3)]
+    cyr = [("uni0410", 0x410, 1), ("uni041E", 0x41E, 2),
+           ("uni0415", 0x415, 3)]
+    _install(tmp_path, monkeypatch, _font_bytes(glyphs=latin + cyr + MIR))
+    pua = [("uni0410", 0xE001, 1), ("uni041E", 0xE002, 2),
+           ("uni0415", 0xE003, 3)]
+    mapping = {1: "А", 2: "О", 3: "Е", 4: "\x14", 5: "\x15", 6: "\x16"}
+    src = _pdf(tmp_path / "doc.pdf", _font_bytes(glyphs=pua + MIR),
+               _tounicode(mapping), cids=[1, 2, 3, 4, 5, 6] * 3)
+    text = _fixed_text(src)
+    assert "АОЕмир" in text and "\ue001" not in text
+
+
+def test_nfkc_equivalent_values_kept(tmp_path, monkeypatch):
+    # «1» для надстрочной ¹ — верное текстовое значение: поиск «1»
+    # должен находить его и после ремонта соседних букв.
+    glyphs = [("onesuperior", 0xB9, 7)] + MIR
+    _install(tmp_path, monkeypatch, _font_bytes(glyphs=glyphs))
+    mapping = {1: "1", 2: "\x14", 3: "\x15", 4: "\x16"}
+    src = _pdf(tmp_path / "doc.pdf", _font_bytes(glyphs=glyphs),
+               _tounicode(mapping), cids=[1, 2, 3, 4] * 4)
+    text = _fixed_text(src)
+    assert "1мир" in text and "¹" not in text

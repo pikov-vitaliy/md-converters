@@ -814,16 +814,28 @@ def _resolve_glyphs(embedded, gids: dict, system_font) -> dict:
     return found
 
 
+def _confirmed(old: str, cps: set) -> bool:
+    """Подтверждает ли контур прежнее значение карты: та же буква или
+    эквивалентная по NFKC («fi» для ﬁ, «1» для надстрочной ¹)."""
+    if not old:
+        return False
+    flat = unicodedata.normalize("NFKC", old)
+    return any(
+        old == chr(cp) or unicodedata.normalize("NFKC", chr(cp)) == flat
+        for cp in cps
+    )
+
+
 def _choose_codepoints(found: dict, current: dict, own: dict) -> dict:
-    """Одна буква на глиф; доказательства по старшинству (ревью Codex):
-    1) многосимвольное значение карты («ffi», «1/2») — сознательное
-       раскрытие, не трогаем;
-    2) собственная Unicode-карта встроенного шрифта (own: cid -> коды);
-    3) прежнее значение, если оно среди двойников по контуру или
-       эквивалентно им (NFKC: «fi» для ﬁ);
-    4) тот же номер глифа в системном шрифте — среди двойников;
-    5) письменность глифов без двусмысленности (кириллица в русском
-       тексте), затем меньший код."""
+    """Одна буква на глиф. Правило строгое (три круга ревью Codex):
+    меняется ТОЛЬКО то, что контур опровергает.
+    1) прежнее значение, подтверждённое контуром (в том числе двойник:
+       русская А при контуре A/А, Ё при Ё/Ë, «1» для ¹), остаётся;
+    2) многосимвольное печатное значение («1/2», «ffi») — сознательное
+       раскрытие, остаётся; пустое и управляющие символы — мусор;
+    3) для опровергнутых — собственная Unicode-карта встроенного шрифта
+       среди двойников, затем тот же номер глифа среди двойников, затем
+       письменность однозначных глифов, затем меньший код."""
     votes: dict = {}
     for cps, _same in found.values():
         if len(cps) == 1:
@@ -832,22 +844,14 @@ def _choose_codepoints(found: dict, current: dict, own: dict) -> dict:
     chosen = {}
     for cid, (cps, same) in found.items():
         old = current.get(cid)
-        if old is not None and len(old) > 1:
-            chosen[cid] = old
-            continue
-        hint = own.get(cid, set())
-        if hint:
-            pick = (hint & cps) or hint
-            keep = old is not None and ord(old) in pick
-            chosen[cid] = old if keep else chr(min(pick))
-            continue
-        if old is not None and any(
-            old == chr(cp)
-            or unicodedata.normalize("NFKC", chr(cp))
-            == unicodedata.normalize("NFKC", old)
-            for cp in cps
+        if old is not None and (
+            _confirmed(old, cps) or (len(old) > 1 and old.isprintable())
         ):
             chosen[cid] = old
+            continue
+        hint = own.get(cid, set()) & cps
+        if hint:
+            chosen[cid] = chr(min(hint))
             continue
         if same:
             chosen[cid] = chr(min(same))
@@ -855,7 +859,6 @@ def _choose_codepoints(found: dict, current: dict, own: dict) -> dict:
         ranked = sorted(cps, key=lambda cp: (-votes.get(_script(cp), 0), cp))
         chosen[cid] = chr(ranked[0])
     return chosen
-
 
 def _tounicode_stream(mapping: dict) -> bytes:
     def utf16(text: str) -> str:
