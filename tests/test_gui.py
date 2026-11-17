@@ -573,6 +573,65 @@ def test_7z_upload_expands(client, tmp_path):
     assert sorted(z.namelist()) == ["c.md", "d.md"]
 
 
+def _case_clash_archive(kind, tmp_path):
+    """Архив с Report.csv и report.csv (+ точный дубликат в zip)."""
+    members = [("Report.csv", b"m,v\nFIRSTMARK,1\n"),
+               ("report.csv", b"m,v\nSECONDMARK,1\n")]
+    if kind == "zip":
+        buf = io.BytesIO()
+        with zipfile.ZipFile(buf, "w") as z:
+            for nm, data in members:
+                z.writestr(nm, data)
+            with pytest.warns(UserWarning, match="Duplicate name"):
+                z.writestr("report.csv", b"m,v\nTHIRDMARK,1\n")
+        return "bundle.zip", buf.getvalue()
+    if kind == "tar":
+        buf = io.BytesIO()
+        with tarfile.open(fileobj=buf, mode="w") as tf:
+            for nm, data in members:
+                info = tarfile.TarInfo(nm)
+                info.size = len(data)
+                tf.addfile(info, io.BytesIO(data))
+        return "bundle.tar", buf.getvalue()
+    py7zr = pytest.importorskip("py7zr")
+    arc = tmp_path / "bundle.7z"
+    with py7zr.SevenZipFile(arc, "w") as z:
+        for nm, data in members:
+            z.writef(io.BytesIO(data), nm)
+    return "bundle.7z", arc.read_bytes()
+
+
+@pytest.mark.parametrize("kind", ["zip", "tar", "7z"])
+def test_archive_case_only_names_keep_both(client, tmp_path, kind):
+    """c2: имена, различающиеся только регистром, не теряют документ.
+
+    На Windows Report.csv и report.csv — один файл: второй молча
+    затирал первый ещё при распаковке (у 7z — уже в extractall).
+    """
+    name, data = _case_clash_archive(kind, tmp_path)
+    r = client.post(
+        "/api/convert/files",
+        files={"files": (name, io.BytesIO(data), "application/x")},
+    )
+    assert r.status_code == 200
+    want = ["FIRSTMARK", "SECONDMARK"]
+    if kind == "zip":
+        want.append("THIRDMARK")
+    dones = _done_events(r.text)
+    assert len(dones) == len(want)
+    bodies = " ".join(
+        client.get(f"/api/download?dl_id={d['download_id']}").text
+        for d in dones
+    )
+    for marker in want:
+        assert marker in bodies, f"{kind}: потерян {marker}"
+    names = zipfile.ZipFile(io.BytesIO(client.get(
+        "/api/download_zip", params={"zip_id": _zip_id(r.text)}
+    ).content)).namelist()
+    # в общем .zip имена различны и без учёта регистра
+    assert len({n.lower() for n in names}) == len(want)
+
+
 def test_extract_archive_caps_uncompressed_zip(tmp_path, monkeypatch):
     """M-1: zip сверх лимита распаковки обрывается потоково в _write
     (у zip/tar заголовочной проверки нет вовсе — спасает счётчик)."""

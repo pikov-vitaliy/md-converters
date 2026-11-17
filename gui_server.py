@@ -558,10 +558,22 @@ def _extract_archive(src: Path, inner: Path) -> None:
     # temp. Это единственный надёжный предел: заголовок архива можно
     # подделать (uncompressed=0), а здесь считаются фактические байты.
     written = 0
+    used: set[str] = set()
 
     def _write(name: str, reader) -> None:
         nonlocal written
-        dest = inner / _safe_rel(name, "file")
+        # Windows не различает регистр: Report.csv и report.csv — один
+        # файл, второй молча затирал первый ещё до конвертации. Разводим
+        # суффиксом, как _unique_path, но без учёта регистра на любой ОС
+        # (общий .zip с .md тоже распакуют на Windows) — заодно и точные
+        # дубликаты имён, которые zip допускает.
+        rel = base = _safe_rel(name, "file")
+        n = 2
+        while rel.as_posix().lower() in used:
+            rel = base.with_name(f"{base.stem} ({n}){base.suffix}")
+            n += 1
+        used.add(rel.as_posix().lower())
+        dest = inner / rel
         dest.parent.mkdir(parents=True, exist_ok=True)
         with dest.open("wb") as df:
             while True:
@@ -578,11 +590,13 @@ def _extract_archive(src: Path, inner: Path) -> None:
 
     if kind == "zip":
         with zipfile.ZipFile(src) as zf:
-            for n in zf.namelist():
-                if n.endswith("/"):
+            # По ZipInfo, не по имени: open(имя) у точных дубликатов
+            # отдаёт последнюю запись дважды.
+            for info in zf.infolist():
+                if info.is_dir():
                     continue
-                with zf.open(n) as sf:
-                    _write(n, sf)
+                with zf.open(info) as sf:
+                    _write(info.filename, sf)
     elif kind == "tar":
         with tarfile.open(src) as tf:
             for m in tf.getmembers():
@@ -603,19 +617,37 @@ def _extract_archive(src: Path, inner: Path) -> None:
         # inner через _safe_rel (zip-slip-защита поверх защиты py7zr).
         with py7zr.SevenZipFile(src, "r") as zf:
             total = getattr(zf.archiveinfo(), "uncompressed", 0)
+            names = list(dict.fromkeys(
+                f.filename for f in zf.list() if not f.is_directory
+            ))
         if total and total > _MAX_UNCOMPRESSED:
             raise ValueError(
                 "архив слишком большой в распакованном виде "
                 f"({total // (1024 * 1024)} МБ)"
             )
+        # Здесь регистр губит файл ещё в extractall: Report.csv и
+        # report.csv ложатся в temp одним файлом. Раскладываем имена по
+        # «слоям» (в слое они различны и без учёта регистра), каждый
+        # слой — в свою папку; одноимённые затем разводит _write. Без
+        # коллизий слой один — как прежний extractall.
+        layers: list[list[str]] = []
+        seen: dict[str, int] = {}
+        for name in names:
+            k = seen.get(name.lower(), 0)
+            seen[name.lower()] = k + 1
+            if k == len(layers):
+                layers.append([])
+            layers[k].append(name)
         raw = Path(tempfile.mkdtemp(prefix="md_7z_"))
         try:
-            with py7zr.SevenZipFile(src, "r") as zf:
-                zf.extractall(path=raw)
-            for f in raw.rglob("*"):
-                if f.is_file():
-                    with f.open("rb") as sf:
-                        _write(f.relative_to(raw).as_posix(), sf)
+            for i, layer in enumerate(layers):
+                part = raw / str(i)
+                with py7zr.SevenZipFile(src, "r") as zf:
+                    zf.extract(path=part, targets=layer)
+                for f in sorted(part.rglob("*")):
+                    if f.is_file():
+                        with f.open("rb") as sf:
+                            _write(f.relative_to(part).as_posix(), sf)
         finally:
             shutil.rmtree(raw, ignore_errors=True)
     else:
