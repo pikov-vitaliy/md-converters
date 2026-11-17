@@ -193,6 +193,19 @@ def _safe_rel(rel_path: str, fallback: str) -> Path:
     return Path(*parts)
 
 
+def _resolves_inside(path: Path, root: Path) -> bool:
+    """Реальный путь (junction и симлинки раскрыты) не выходит за root.
+
+    resolve() раскрывает существующую часть пути по файловой системе,
+    несуществующий хвост дописывает как есть; сам конечный файл, если
+    он симлинк, тоже раскрывается.
+    """
+    try:
+        return path.resolve().is_relative_to(root.resolve())
+    except OSError:
+        return False
+
+
 # --- Port finding (BLK-3) ---
 
 def _find_free_port() -> int:
@@ -674,14 +687,25 @@ async def _convert_archive(src: Path, opts: dict, label: str):
                 _add_download(dl_id, md_path.name, full)
                 if out_dir is not None:
                     dest = out_dir / rel
-                    try:
-                        # mkdir — ОТДЕЛЬНО от записи: если компонент
-                        # пути занят файлом, он тоже кидает
-                        # FileExistsError, и в общем try это выдавалось
-                        # бы за «.md уже есть» (даже при force).
-                        dest.parent.mkdir(parents=True, exist_ok=True)
-                    except OSError as exc:
-                        error = str(exc)
+                    if not _resolves_inside(dest, out_dir):
+                        # Лексически rel внутри (_safe_rel), но подпапка
+                        # папки вывода может быть junction/симлинком
+                        # наружу — запись ушла бы по нему. Проверка ДО
+                        # mkdir: иначе снаружи появилась бы новая папка.
+                        error = (
+                            "путь уводит за пределы папки вывода "
+                            "(junction или симлинк)"
+                        )
+                    else:
+                        try:
+                            # mkdir — ОТДЕЛЬНО от записи: если компонент
+                            # пути занят файлом, он тоже кидает
+                            # FileExistsError, и в общем try это
+                            # выдавалось бы за «.md уже есть» (даже при
+                            # force).
+                            dest.parent.mkdir(parents=True, exist_ok=True)
+                        except OSError as exc:
+                            error = str(exc)
                     if not error:
                         try:
                             # Ядро без --force существующий .md не

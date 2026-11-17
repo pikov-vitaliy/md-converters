@@ -877,6 +877,49 @@ def test_archive_outdir_mkdir_conflict_is_not_skip(client, tmp_path):
     assert "FRESH" in got.text
 
 
+def _dir_link(link, target):
+    """Junction на Windows (без прав админа), симлинк — на прочих ОС."""
+    if os.name == "nt":
+        import _winapi
+        _winapi.CreateJunction(str(target), str(link))
+    else:
+        os.symlink(target, link, target_is_directory=True)
+
+
+def test_archive_outdir_does_not_follow_junction(client, tmp_path):
+    """c1: копия из архива не уходит наружу через junction в out_dir.
+
+    В папке вывода заранее лежит подпапка-junction на соседний
+    каталог; архив с sub/... писал .md туда (и создавал там папки).
+    """
+    out_dir = tmp_path / "out"
+    outside = tmp_path / "outside"
+    out_dir.mkdir()
+    outside.mkdir()
+    _dir_link(out_dir / "sub", outside)
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, "w") as z:
+        z.writestr("sub/one.csv", "m,v\nLEAKONE,1\n")
+        z.writestr("sub/deep/two.csv", "m,v\nLEAKTWO,1\n")
+    r = client.post(
+        "/api/convert/files",
+        files={"files": (
+            "bundle.zip", io.BytesIO(buf.getvalue()),
+            "application/zip",
+        )},
+        data={"out_dir": str(out_dir), "force": "true"},
+    )
+    assert r.status_code == 200
+    assert list(outside.iterdir()) == []  # ни файлов, ни папок снаружи
+    dones = _done_events(r.text)
+    assert len(dones) == 2
+    for done in dones:
+        assert done["status"] == "fail"
+        assert "за пределы папки вывода" in done["error"]
+        assert done["output"] is None
+        assert done["download_id"]
+
+
 def test_zip_folder_keeps_subfolder_structure(client):
     """A3: одинаковые имена в РАЗНЫХ подпапках не переименовываются."""
     files = [
