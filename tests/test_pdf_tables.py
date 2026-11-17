@@ -1087,6 +1087,59 @@ def test_pdf_tables_result_keeps_text_beside_table(tmp_path):
     assert text.index("| beta") < text.index("Text below")
 
 
+def test_pdf_tables_result_side_label_at_table_top_once(tmp_path):
+    """Подпись сбоку, пересекающая верхнюю границу таблицы, выводится
+    один раз. Полоса над таблицей и полоса от её верха обе захватывали
+    символы, задевающие границу (базовая линия 717 при верхней линии
+    сетки 720), и подпись дублировалась. Символ относится к одной
+    полосе — по середине своей высоты."""
+    pytest.importorskip("pdfplumber")
+    pdf = tmp_path / "edge.pdf"
+    pdf.write_bytes(_wrap_pdf(
+        _text(72, 780, "Text above the table")
+        + _ruled_table(720)
+        + _text(370, 717, "LIMIT 24 mg")
+        + _text(72, 600, "Text below the table")))
+
+    text = c._pdf_tables_result(pdf).text_content
+
+    assert text.count("LIMIT 24 mg") == 1
+    assert "| alpha | 1 |" in text
+
+
+def _stepped_table() -> bytes:
+    """Ступенчатая таблица: у двух верхних строк две ячейки, у двух
+    нижних — только левая; справа от нижних ячеек сетки нет."""
+    out = [_text(105, 705, "Name"), _text(225, 705, "Value"),
+           _text(105, 685, "alpha"), _text(225, 685, "1"),
+           _text(105, 665, "gamma"), _text(105, 645, "delta"),
+           b"0.5 w\n100 640 m 100 720 l S\n220 640 m 220 720 l S\n"
+           b"340 680 m 340 720 l S\n"]
+    for y in (720, 700, 680):
+        out.append(b"100 %d m 340 %d l S\n" % (y, y))
+    for y in (660, 640):
+        out.append(b"100 %d m 220 %d l S\n" % (y, y))
+    return b"".join(out)
+
+
+def test_pdf_tables_result_keeps_text_beside_stepped_table(tmp_path):
+    """Текст в прямоугольнике таблицы, но вне её ячеек (справа от
+    нижних строк ступенчатой таблицы) не теряется: из прозы убираются
+    только символы фактических ячеек, а не всего bbox таблицы."""
+    pytest.importorskip("pdfplumber")
+    pdf = tmp_path / "stepped.pdf"
+    pdf.write_bytes(_wrap_pdf(_stepped_table()
+                              + _text(240, 645, "NOTE_OUTSIDE")))
+
+    res = c._pdf_tables_result(pdf)
+
+    assert res is not None and res.pdf_tables == 1
+    text = res.text_content
+    assert text.count("NOTE_OUTSIDE") == 1
+    assert text.count("delta") == 1     # ячейки не продублированы
+    assert "| alpha | 1 |" in text
+
+
 def test_pdfium_fallback_strips_furniture_by_pages(tmp_path, monkeypatch,
                                                    capsys):
     """Текст pypdfium2 (когда MarkItDown вернул мусор) чистится по
