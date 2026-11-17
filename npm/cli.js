@@ -60,10 +60,17 @@ function fail(msg) {
   throw new UserError(msg);
 }
 
+// Дочерний Python пишет в кодировке консоли (cp1252, cp866): путь
+// с кириллицей ломался ещё в print(sys.executable). Явный UTF-8.
+function baseEnv() {
+  return Object.assign({}, process.env,
+    { PYTHONIOENCODING: 'utf-8', PYTHONUTF8: '1' });
+}
+
 function run(cmd, args, opts = {}) {
   const r = spawnSync(cmd, args, {
     stdio: opts.quiet ? 'pipe' : 'inherit',
-    env: opts.env || process.env,
+    env: opts.env || baseEnv(),
     windowsHide: true,
     encoding: 'utf8',
   });
@@ -80,7 +87,7 @@ function ok(cmd, args, opts) {
 function uvEnv() {
   // Корпоративные сети подменяют сертификаты: uv берёт корни из хранилища
   // системы. Python, который скачивает uv, кладём в папку обёртки.
-  const env = Object.assign({}, process.env);
+  const env = baseEnv();
   if (!('UV_NATIVE_TLS' in env)) env.UV_NATIVE_TLS = '1';
   if (!('UV_PYTHON_INSTALL_DIR' in env)) {
     env.UV_PYTHON_INSTALL_DIR = path.join(ROOT, 'python');
@@ -112,7 +119,7 @@ function findPython314() {
 function installUv() {
   say('Ставлю uv (менеджер Python от Astral) в ' +
       path.join(ROOT, 'uv'));
-  const env = Object.assign({}, process.env, {
+  const env = Object.assign(baseEnv(), {
     UV_INSTALL_DIR: path.join(ROOT, 'uv'),
     UV_NO_MODIFY_PATH: '1',
     INSTALLER_NO_MODIFY_PATH: '1',
@@ -142,21 +149,50 @@ function wheelPath() {
   return path.join(dir, w[0]);
 }
 
+function alive(pid) {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (e) {
+    return e.code === 'EPERM';
+  }
+}
+
+// Блокировка установки: папка .lock с владельцем (pid и метка). Чужая
+// снимается, только если её процесс мёртв, — возраст папки ничего не
+// доказывает (медленная сеть). Снимаем только свою.
 function lock() {
   fs.mkdirSync(HOME, { recursive: true });
   const l = path.join(HOME, '.lock');
-  try {
-    fs.mkdirSync(l);
-  } catch (e) {
-    const age = Date.now() - fs.statSync(l).mtimeMs;
-    if (age < 30 * 60 * 1000) {
-      fail('Установка уже идёт в другом окне. Дождитесь её и запустите ' +
-           `снова. Если окна нет — удалите папку ${l}`);
+  const owner = path.join(l, 'owner.json');
+  const me = { pid: process.pid, token: `${process.pid}-${Date.now()}-` +
+    Math.random().toString(36).slice(2) };
+  for (let attempt = 0; attempt < 2; attempt++) {
+    try {
+      fs.mkdirSync(l);
+      fs.writeFileSync(owner, JSON.stringify(me));
+      return () => {
+        try {
+          const cur = JSON.parse(fs.readFileSync(owner, 'utf8'));
+          if (cur.token === me.token) {
+            fs.rmSync(l, { recursive: true, force: true });
+          }
+        } catch (e) { /* уже снята */ }
+      };
+    } catch (e) {
+      let other = null;
+      try {
+        other = JSON.parse(fs.readFileSync(owner, 'utf8'));
+      } catch (e2) { /* владелец ещё не записан или файл битый */ }
+      const young = Date.now() - fs.statSync(l).mtimeMs < 2 * 60 * 1000;
+      if ((other && alive(other.pid)) || (!other && young)) {
+        fail('Установка уже идёт в другом окне. Дождитесь её и ' +
+             'запустите снова.');
+      }
+      fs.rmSync(l, { recursive: true, force: true });
     }
-    fs.rmSync(l, { recursive: true, force: true });
-    fs.mkdirSync(l);
   }
-  return () => fs.rmSync(l, { recursive: true, force: true });
+  fail(`Не удалось захватить блокировку установки: ${l}`);
 }
 
 function install() {
@@ -168,6 +204,9 @@ function install() {
   say(`Папка: ${HOME}`);
   const unlock = lock();
   try {
+    // Старый маркер не должен пережить пересборку: иначе после обрыва
+    // сети полусобранное окружение сочтётся готовым.
+    fs.rmSync(MARK, { force: true });
     fs.rmSync(VENV, { recursive: true, force: true });
     let uv = findUv();
     const sysPy = uv ? null : findPython314();
@@ -216,13 +255,25 @@ function install() {
   }
 }
 
+function older(a, b) {
+  const x = a.split('.').map(Number);
+  const y = b.split('.').map(Number);
+  for (let i = 0; i < 3; i++) if (x[i] !== y[i]) return x[i] < y[i];
+  return false;
+}
+
 function cleanupOld() {
-  // Окружения прежних версий занимают сотни мегабайт: убираем только
-  // папки вида «1.2.3» внутри своей папки данных.
+  // Окружения прежних версий занимают сотни мегабайт. Убираем только свои
+  // готовые окружения БОЛЕЕ СТАРЫХ версий (есть installed.json) и только
+  // не занятые установкой (нет .lock): более новая версия может работать
+  // из другого окна.
   for (const d of fs.readdirSync(ROOT)) {
-    if (d !== VERSION && /^\d+\.\d+\.\d+$/.test(d)) {
+    const dir = path.join(ROOT, d);
+    if (/^\d+\.\d+\.\d+$/.test(d) && older(d, VERSION) &&
+        fs.existsSync(path.join(dir, 'installed.json')) &&
+        !fs.existsSync(path.join(dir, '.lock'))) {
       try {
-        fs.rmSync(path.join(ROOT, d), { recursive: true, force: true });
+        fs.rmSync(dir, { recursive: true, force: true });
       } catch (e) { /* занято другим процессом — уберём в следующий раз */ }
     }
   }
@@ -232,7 +283,8 @@ function cleanupOld() {
 
 function main() {
   const args = process.argv.slice(2);
-  if (args[0] === '--version' || args[0] === '-V') {
+  if (args[0] === '-V') args[0] = '--version';  // tomd знает только --version
+  if (args[0] === '--version') {
     process.stdout.write(`md-converters ${VERSION} (npm)\n`);
     if (!fs.existsSync(MARK)) return 0;
   }
@@ -249,7 +301,7 @@ function main() {
   const exe = path.join(BIN, (gui ? 'tomd-gui' : 'tomd') +
     (IS_WIN ? '.exe' : ''));
   const r = spawnSync(exe, gui ? args.slice(1) : args, {
-    stdio: 'inherit', windowsHide: false,
+    stdio: 'inherit', windowsHide: false, env: baseEnv(),
   });
   if (r.error) fail(`Не запустился ${exe}: ${r.error.message}`);
   return r.status === null ? 1 : r.status;
