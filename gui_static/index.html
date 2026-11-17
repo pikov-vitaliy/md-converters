@@ -4,6 +4,16 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>md-converters</title>
+<script>
+  (function () {
+    var h = new Date().getHours(), auto = (h >= 20 || h < 7) ? "dark" : "light", t = auto;
+    try {
+      var s = JSON.parse(localStorage.getItem("mdc-theme") || "null");
+      if (s && s.until > Date.now() && (s.theme === "dark" || s.theme === "light")) t = s.theme;
+    } catch (e) {}
+    document.documentElement.setAttribute("data-theme", t);
+  })();
+</script>
 <style>
   :root{
     --mint:#46E0A0; --mint-bright:#5FF0B4; --mint-deep:#2EC78A;
@@ -18,14 +28,46 @@
     --r:16px; --r-sm:11px;
     --shadow:0 18px 44px -22px rgba(0,0,0,.7);
     --ring:0 0 0 3px rgba(124,92,245,.55);
+    --tint:rgba(255,255,255,.05); --tint-2:rgba(255,255,255,.08); --tint-3:rgba(255,255,255,.025);
+    --glow-a:rgba(70,224,160,.16); --glow-b:rgba(80,70,200,.26);
+    --code-bg:#0d0e1f; --code-text:#cfe3ff; --preview-text:#dcdef0; --run:#b3a4ff;
+    --success-ink:#0c2018;
+    color-scheme:dark;
+  }
+  /* Светлая тема: те же роли цветов, тёмный текст на светлом фоне. */
+  :root[data-theme="light"]{
+    --mint:#0d8a5c; --mint-bright:#0b7a52; --mint-deep:#13a06c;
+    --bg:#f5f6fb; --bg2:#eceef7;
+    --surface:#ffffff; --surface-2:#f3f4fa; --surface-3:#e8eaf5;
+    --line:rgba(20,24,70,.11); --line-2:rgba(20,24,70,.2);
+    --text:#1b1d3a; --dim:#454a72; --mute:#666a90; --err:#c22d47;
+    --shadow:0 18px 40px -26px rgba(30,34,80,.35);
+    --tint:rgba(20,24,70,.045); --tint-2:rgba(20,24,70,.08); --tint-3:rgba(20,24,70,.03);
+    --glow-a:rgba(70,224,160,.2); --glow-b:rgba(110,86,240,.14);
+    --code-bg:#eef1f8; --code-text:#1f2d55; --preview-text:#1f2140; --run:#5b43d6; --success-ink:#ffffff;
+    color-scheme:light;
+  }
+  @media (prefers-color-scheme: light){
+    :root:not([data-theme="dark"]){
+      --mint:#0d8a5c; --mint-bright:#0b7a52; --mint-deep:#13a06c;
+      --bg:#f5f6fb; --bg2:#eceef7;
+      --surface:#ffffff; --surface-2:#f3f4fa; --surface-3:#e8eaf5;
+      --line:rgba(20,24,70,.11); --line-2:rgba(20,24,70,.2);
+      --text:#1b1d3a; --dim:#454a72; --mute:#666a90; --err:#c22d47;
+      --shadow:0 18px 40px -26px rgba(30,34,80,.35);
+      --tint:rgba(20,24,70,.045); --tint-2:rgba(20,24,70,.08); --tint-3:rgba(20,24,70,.03);
+      --glow-a:rgba(70,224,160,.2); --glow-b:rgba(110,86,240,.14);
+      --code-bg:#eef1f8; --code-text:#1f2d55; --preview-text:#1f2140; --run:#5b43d6; --success-ink:#ffffff;
+      color-scheme:light;
+    }
   }
   *{box-sizing:border-box}
   html,body{margin:0}
   body{
     font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",system-ui,sans-serif;
     background:
-      radial-gradient(900px 540px at -8% -12%, rgba(70,224,160,.16), transparent 60%),
-      radial-gradient(1000px 620px at 112% 118%, rgba(80,70,200,.26), transparent 58%),
+      radial-gradient(900px 540px at -8% -12%, var(--glow-a), transparent 60%),
+      radial-gradient(1000px 620px at 112% 118%, var(--glow-b), transparent 58%),
       var(--bg);
     color:var(--text); line-height:1.5; min-height:100vh;
     -webkit-font-smoothing:antialiased; padding:28px 18px 64px;
@@ -73,7 +115,7 @@
   .dz-sub .pick{color:var(--mint); font-weight:600; text-decoration:underline; text-underline-offset:3px}
   .formats{display:flex; flex-wrap:wrap; gap:6px; justify-content:center; max-width:560px; margin:0 auto 10px}
   .fmt{font-size:11.5px; font-family:ui-monospace,SFMono-Regular,Menlo,monospace; color:var(--dim);
-    background:rgba(255,255,255,.05); border:1px solid var(--line); border-radius:7px; padding:3px 8px}
+    background:var(--tint); border:1px solid var(--line); border-radius:7px; padding:3px 8px}
   .dz-archive{font-size:12.5px; color:var(--mute); margin:8px auto 0; max-width:560px}
   .dz-archive code{font-family:ui-monospace,Menlo,monospace; color:var(--mint-bright); background:rgba(70,224,160,.1); padding:1px 5px; border-radius:5px}
 
@@ -117,7 +159,7 @@
   .btn:active{transform:translateY(0)}
   .btn:focus-visible{outline:none; box-shadow:var(--ring),0 0 0 5px rgba(20,21,42,.6)}
   .btn:disabled{opacity:.5; cursor:not-allowed; filter:none; transform:none; box-shadow:none}
-  .btn-success{background:linear-gradient(135deg,var(--mint-bright),var(--mint-deep)); color:#0c2018}
+  .btn-success{background:linear-gradient(135deg,var(--mint-bright),var(--mint-deep)); color:var(--success-ink)}
   .btn-success:hover{box-shadow:0 12px 26px -14px rgba(70,224,160,.85)}
   .btn-ghost{background:var(--surface-2); border-color:var(--line-2); color:var(--text)}
   .btn-ghost:hover{background:var(--surface-3); filter:none}
@@ -136,8 +178,8 @@
   .cell-name .status{width:18px; height:18px; flex:none; display:grid; place-items:center; border-radius:50%; font-size:11px; font-weight:700; line-height:1}
   .cell-name .status.ok{background:rgba(70,224,160,.16); color:var(--mint-bright)}
   .cell-name .status.err{background:rgba(255,107,122,.16); color:var(--err)}
-  .cell-name .status.skip{background:rgba(255,255,255,.08); color:var(--mute)}
-  .cell-name .status.run{background:rgba(124,92,245,.18); color:#b3a4ff; animation:pulse 1s ease-in-out infinite}
+  .cell-name .status.skip{background:var(--tint-2); color:var(--mute)}
+  .cell-name .status.run{background:rgba(124,92,245,.18); color:var(--run); animation:pulse 1s ease-in-out infinite}
   .cell-name .name{font-size:14.5px; font-weight:600; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; min-width:0}
   .cell-actions{grid-area:actions; display:flex; gap:8px; align-self:center}
   .cell-meta{grid-area:path; display:flex; align-items:center; gap:8px; min-width:0}
@@ -151,7 +193,7 @@
   /* ---------- preview (#preview — marked рендерит сюда Markdown) ---------- */
   #previewSection .card-head{justify-content:space-between}
   #previewTitle{font-family:ui-monospace,Menlo,monospace; font-size:13px; color:var(--mint-bright); text-transform:none; letter-spacing:0; font-weight:600}
-  #preview{background:var(--bg); border:1px solid var(--line); border-radius:var(--r-sm); padding:22px 26px; max-height:520px; overflow:auto; font-size:14.5px; line-height:1.62; color:#dcdef0}
+  #preview{background:var(--bg); border:1px solid var(--line); border-radius:var(--r-sm); padding:22px 26px; max-height:520px; overflow:auto; font-size:14.5px; line-height:1.62; color:var(--preview-text)}
   #preview>*:first-child{margin-top:0}
   #preview h1,#preview h2,#preview h3,#preview h4{line-height:1.3; font-weight:700; margin:1.4em 0 .5em}
   #preview h1{font-size:24px; padding-bottom:.3em; border-bottom:1px solid var(--line)}
@@ -163,17 +205,27 @@
   #preview li{margin:.25em 0}
   #preview a{color:var(--mint); text-underline-offset:2px}
   #preview code{font-family:ui-monospace,Menlo,monospace; font-size:.88em; background:var(--surface-3); padding:2px 6px; border-radius:6px; color:var(--mint-bright)}
-  #preview pre{background:#0d0e1f; border:1px solid var(--line); border-radius:10px; padding:15px 17px; overflow:auto; margin:.9em 0}
-  #preview pre code{background:none; padding:0; color:#cfe3ff; font-size:13px}
+  #preview pre{background:var(--code-bg); border:1px solid var(--line); border-radius:10px; padding:15px 17px; overflow:auto; margin:.9em 0}
+  #preview pre code{background:none; padding:0; color:var(--code-text); font-size:13px}
   #preview blockquote{margin:.9em 0; padding:6px 16px; border-left:3px solid var(--mint-deep); background:rgba(70,224,160,.07); color:var(--dim); border-radius:0 8px 8px 0}
   #preview table{border-collapse:collapse; width:100%; margin:1em 0; font-size:13.5px}
   #preview th,#preview td{border:1px solid var(--line-2); padding:8px 12px; text-align:left}
   #preview th{background:var(--surface-3); font-weight:650}
-  #preview tr:nth-child(even) td{background:rgba(255,255,255,.025)}
+  #preview tr:nth-child(even) td{background:var(--tint-3)}
   #preview img{max-width:100%; border-radius:8px}
   #preview details{margin:1em 0; background:var(--surface-2); border:1px solid var(--line); border-radius:10px; padding:4px 14px}
   #preview summary{cursor:pointer; font-weight:600; padding:8px 0; color:var(--dim)}
   #preview hr{border:none; border-top:1px solid var(--line); margin:1.3em 0}
+
+  /* ---------- тема и подвал ---------- */
+  .theme-toggle{position:fixed; top:16px; right:16px; z-index:10; width:40px; height:40px; border-radius:12px;
+    font-size:18px; line-height:1; cursor:pointer; color:var(--text); background:var(--surface-2);
+    border:1px solid var(--line-2); box-shadow:var(--shadow); transition:.15s}
+  .theme-toggle:hover{background:var(--surface-3)}
+  .theme-toggle:focus-visible{outline:2px solid var(--vio-soft); outline-offset:2px}
+  footer.app-footer{margin-top:30px; padding-top:16px; border-top:1px solid var(--line);
+    font-size:12.5px; color:var(--mute); display:flex; flex-wrap:wrap; gap:4px 14px; justify-content:space-between}
+  footer.app-footer a{color:var(--mint)}
 
   @media (max-width:560px){
     body{padding:18px 12px 48px}
@@ -218,6 +270,7 @@
       </div>
       <span class="tagline">Локальный конвертер документов в Markdown · работает офлайн</span>
     </div>
+    <button id="themeToggle" class="theme-toggle" type="button" aria-label="Переключить тему: светлая или тёмная">☾</button>
   </header>
 
   <!-- ЗОНА ЗАГРУЗКИ -->
@@ -338,6 +391,12 @@
     <div class="card-head"><span class="dot"></span><span id="previewTitle">Превью Markdown</span></div>
     <div id="preview"></div>
   </div>
+
+
+  <footer class="app-footer" lang="en">
+    <span>md-converters · &copy; 2026 Vitaly Pikov. Author and maintainer.</span>
+    <span>Released under the MIT License · <a href="https://pikov.expert" target="_blank" rel="noopener">pikov.expert</a> · <a href="https://github.com/pikov-vitaliy/md-converters" target="_blank" rel="noopener">Source on GitHub</a></span>
+  </footer>
 
 </div>
 
@@ -556,7 +615,9 @@ function flagsToForm(fd, skipOutDir) {
   const flags = getFlags();
   Object.keys(flags).forEach(k => {
     if (skipOutDir && k === "out_dir") return;
-    if (flags[k] !== null && flags[k] !== false)
+    // false тоже шлём: без поля сервер берёт свой default, а у
+    // frontmatter он True — снятая галочка не отключала YAML-шапку
+    if (flags[k] !== null)
       fd.append(k, flags[k]);
   });
   return fd;
@@ -734,6 +795,30 @@ document.addEventListener("keydown", (e) => {
 });
 
 setInterval(() => fetch("/api/heartbeat", {method: "POST"}), 5000);
+
+// Тема: выбор кнопкой помнится до ближайшей смены дня и ночи (07:00 или
+// 20:00), дальше снова действует время суток.
+(function () {
+  const btn = document.getElementById("themeToggle");
+  const root = document.documentElement;
+  const paint = () => {
+    const dark = root.getAttribute("data-theme") === "dark";
+    btn.textContent = dark ? "☀" : "☾";
+    btn.title = dark ? "Светлая тема" : "Тёмная тема";
+  };
+  btn.addEventListener("click", () => {
+    const next = root.getAttribute("data-theme") === "dark" ? "light" : "dark";
+    root.setAttribute("data-theme", next);
+    const d = new Date(), h = d.getHours(), until = new Date(d);
+    until.setHours(h >= 7 && h < 20 ? 20 : 7, 0, 0, 0);
+    if (until <= d) until.setDate(until.getDate() + 1);
+    try {
+      localStorage.setItem("mdc-theme", JSON.stringify({theme: next, until: until.getTime()}));
+    } catch (e) {}
+    paint();
+  });
+  paint();
+})();
 loadSettings();
 fetch("/api/flags").then(r => r.json()).then(d => {
   document.getElementById("ver").textContent = "v" + d.version;

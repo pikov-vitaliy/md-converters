@@ -36,6 +36,7 @@ esc, showPreview, download`.
 | `previewSection` | блок превью (показывается/скрывается) |
 | `previewTitle` | заголовок превью |
 | `preview` | контейнер, куда рендерится Markdown |
+| `themeToggle` | кнопка ☾/☀ светлой и тёмной темы (17.11.2026) |
 
 ## 4. Обработчики-атрибуты — сохранить
 - `onchange="save()"` — на 5 чекбоксах, `#only`, `#outDir`.
@@ -74,7 +75,10 @@ details/summary`.
 `getFlags()` читает id из п.3 и шлёт во `FormData` (`flagsToForm`).
 `save()`/`loadSettings()` хранят настройки в `localStorage` под ключом
 `md-conv-settings`. Имена полей флагов: `force, frontmatter, keep_images,
-pdf_tables, insecure_ssl, only, out_dir`.
+pdf_tables, insecure_ssl, only, out_dir`. Булевы флаги уходят всегда,
+и `false` тоже: без поля сервер подставляет свой default, а у
+`frontmatter` он `True` — снятая галочка иначе не отключала бы шапку.
+Не шлются только пустые `only`/`out_dir` (`null`).
 
 ## 8. Бренд
 - Палитра: зелёный `#46E0A0` → синий `#3E5FB0` → индиго `#2E2A6E`
@@ -82,3 +86,14 @@ pdf_tables, insecure_ssl, only, out_dir`.
   (`#7f7fff`-семейство), зелёный — вторичный/успех.
 - Логотип-мотив: `gui_static/logo.svg` (документ + стрелка вниз).
 - Шрифт — системный (`-apple-system, system-ui, sans-serif`).
+- Темы (17.11.2026, просьба автора): тёмная — прежняя палитра, светлая —
+  набор токенов в `:root[data-theme="light"]` (и `prefers-color-scheme`
+  без JS). Тема ставится скриптом в `<head>` до отрисовки: 20:00–07:00 —
+  тёмная, днём — светлая; выбор кнопкой `themeToggle` хранится в
+  `localStorage["mdc-theme"]` до ближайшей смены дня и ночи. Цвета — только
+  через токены; текст на цветной кнопке — парным токеном
+  (`--success-ink`), не литералом.
+- Подвал `footer.app-footer` (`lang="en"`): © и автор на английском
+  (Vitaly Pikov), лицензия MIT, ссылки на pikov.expert и GitHub.
+- Логика темы — отдельная функция в конце инлайн-скрипта; функции из
+  раздела 2 она не трогает.

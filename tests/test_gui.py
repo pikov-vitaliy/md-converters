@@ -573,6 +573,65 @@ def test_7z_upload_expands(client, tmp_path):
     assert sorted(z.namelist()) == ["c.md", "d.md"]
 
 
+def _case_clash_archive(kind, tmp_path):
+    """Архив с Report.csv и report.csv (+ точный дубликат в zip)."""
+    members = [("Report.csv", b"m,v\nFIRSTMARK,1\n"),
+               ("report.csv", b"m,v\nSECONDMARK,1\n")]
+    if kind == "zip":
+        buf = io.BytesIO()
+        with zipfile.ZipFile(buf, "w") as z:
+            for nm, data in members:
+                z.writestr(nm, data)
+            with pytest.warns(UserWarning, match="Duplicate name"):
+                z.writestr("report.csv", b"m,v\nTHIRDMARK,1\n")
+        return "bundle.zip", buf.getvalue()
+    if kind == "tar":
+        buf = io.BytesIO()
+        with tarfile.open(fileobj=buf, mode="w") as tf:
+            for nm, data in members:
+                info = tarfile.TarInfo(nm)
+                info.size = len(data)
+                tf.addfile(info, io.BytesIO(data))
+        return "bundle.tar", buf.getvalue()
+    py7zr = pytest.importorskip("py7zr")
+    arc = tmp_path / "bundle.7z"
+    with py7zr.SevenZipFile(arc, "w") as z:
+        for nm, data in members:
+            z.writef(io.BytesIO(data), nm)
+    return "bundle.7z", arc.read_bytes()
+
+
+@pytest.mark.parametrize("kind", ["zip", "tar", "7z"])
+def test_archive_case_only_names_keep_both(client, tmp_path, kind):
+    """c2: имена, различающиеся только регистром, не теряют документ.
+
+    На Windows Report.csv и report.csv — один файл: второй молча
+    затирал первый ещё при распаковке (у 7z — уже в extractall).
+    """
+    name, data = _case_clash_archive(kind, tmp_path)
+    r = client.post(
+        "/api/convert/files",
+        files={"files": (name, io.BytesIO(data), "application/x")},
+    )
+    assert r.status_code == 200
+    want = ["FIRSTMARK", "SECONDMARK"]
+    if kind == "zip":
+        want.append("THIRDMARK")
+    dones = _done_events(r.text)
+    assert len(dones) == len(want)
+    bodies = " ".join(
+        client.get(f"/api/download?dl_id={d['download_id']}").text
+        for d in dones
+    )
+    for marker in want:
+        assert marker in bodies, f"{kind}: потерян {marker}"
+    names = zipfile.ZipFile(io.BytesIO(client.get(
+        "/api/download_zip", params={"zip_id": _zip_id(r.text)}
+    ).content)).namelist()
+    # в общем .zip имена различны и без учёта регистра
+    assert len({n.lower() for n in names}) == len(want)
+
+
 def test_extract_archive_caps_uncompressed_zip(tmp_path, monkeypatch):
     """M-1: zip сверх лимита распаковки обрывается потоково в _write
     (у zip/tar заголовочной проверки нет вовсе — спасает счётчик)."""
@@ -703,6 +762,49 @@ def test_ssl_verified_by_default(client, monkeypatch):
     assert cap.get("v") is True
 
 
+def test_url_without_outdir_leaves_no_file_in_cwd(
+    client, tmp_path, monkeypatch
+):
+    """c6: URL без «Папки вывода» только скачивается.
+
+    Ядро без out_dir пишет в Path.cwd() — раньше page.md оставался в
+    рабочей папке сервера, хотя SSE показывал output=null.
+    """
+    import tempfile
+    from types import SimpleNamespace
+
+    cwd = tmp_path / "cwd"
+    cwd.mkdir()
+    monkeypatch.chdir(cwd)
+    monkeypatch.setattr(
+        gui_server.core, "_convert_url_data",
+        lambda url, opts: (
+            SimpleNamespace(text_content="PAGEMARKER\n", title=None),
+            url,
+        ),
+    )
+    made = []
+    real_mkdtemp = tempfile.mkdtemp
+
+    def spy_mkdtemp(*args, **kwargs):
+        made.append(real_mkdtemp(*args, **kwargs))
+        return made[-1]
+
+    monkeypatch.setattr(tempfile, "mkdtemp", spy_mkdtemp)
+    r = client.post(
+        "/api/convert/url", data={"url": "https://example.com/page"}
+    )
+    assert r.status_code == 200
+    done = _done_events(r.text)[0]
+    assert done["status"] == "ok"
+    assert done["output"] is None
+    assert list(cwd.iterdir()) == []
+    got = client.get(f"/api/download?dl_id={done['download_id']}")
+    assert "PAGEMARKER" in got.text
+    # временная папка убрана после ответа
+    assert made and not any(os.path.exists(p) for p in made)
+
+
 # --- A1 (workplan): ValueError из _gui_opts → 400, не голый 500 ---
 
 def _events(body):
@@ -808,7 +910,8 @@ def test_archive_outdir_mkdir_conflict_is_not_skip(client, tmp_path):
     """Занятый файлом путь — это ошибка записи, а не «уже есть».
 
     mkdir тоже кидает FileExistsError; в общем try он выдавался бы
-    за «.md не перезаписан» — даже с включённым force.
+    за «.md не перезаписан» — даже с включённым force. И не «ok»
+    с пустым output (c7): несохранённый файл выглядел сохранённым.
     """
     (tmp_path / "sub").write_text("я файл, а не папка", encoding="utf-8")
     buf = io.BytesIO()
@@ -824,9 +927,56 @@ def test_archive_outdir_mkdir_conflict_is_not_skip(client, tmp_path):
     )
     assert r.status_code == 200
     done = _done_events(r.text)[0]
-    assert done["status"] != "skip"
+    assert done["status"] == "fail"
+    assert "не сохранён в папку вывода" in done["error"]
     assert not done.get("note")
     assert done["output"] is None
+    # сам результат по-прежнему скачивается
+    got = client.get(f"/api/download?dl_id={done['download_id']}")
+    assert "FRESH" in got.text
+
+
+def _dir_link(link, target):
+    """Junction на Windows (без прав админа), симлинк — на прочих ОС."""
+    if os.name == "nt":
+        import _winapi
+        _winapi.CreateJunction(str(target), str(link))
+    else:
+        os.symlink(target, link, target_is_directory=True)
+
+
+def test_archive_outdir_does_not_follow_junction(client, tmp_path):
+    """c1: копия из архива не уходит наружу через junction в out_dir.
+
+    В папке вывода заранее лежит подпапка-junction на соседний
+    каталог; архив с sub/... писал .md туда (и создавал там папки).
+    """
+    out_dir = tmp_path / "out"
+    outside = tmp_path / "outside"
+    out_dir.mkdir()
+    outside.mkdir()
+    _dir_link(out_dir / "sub", outside)
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, "w") as z:
+        z.writestr("sub/one.csv", "m,v\nLEAKONE,1\n")
+        z.writestr("sub/deep/two.csv", "m,v\nLEAKTWO,1\n")
+    r = client.post(
+        "/api/convert/files",
+        files={"files": (
+            "bundle.zip", io.BytesIO(buf.getvalue()),
+            "application/zip",
+        )},
+        data={"out_dir": str(out_dir), "force": "true"},
+    )
+    assert r.status_code == 200
+    assert list(outside.iterdir()) == []  # ни файлов, ни папок снаружи
+    dones = _done_events(r.text)
+    assert len(dones) == 2
+    for done in dones:
+        assert done["status"] == "fail"
+        assert "за пределы папки вывода" in done["error"]
+        assert done["output"] is None
+        assert done["download_id"]
 
 
 def test_zip_folder_keeps_subfolder_structure(client):
@@ -1082,3 +1232,238 @@ def test_bad_only_returns_400_zip(client):
     )
     assert r.status_code == 400
     assert "-pdf" in r.json()["error"]
+
+
+# --- Сырой ASGI: TestClient отдаёт тело одним сообщением и не умеет
+# рвать SSE посреди ответа, поэтому разрыв и «тело кусками» — так ---
+
+def _asgi_scope(path, content_type):
+    # spec_version 2.3 — как у uvicorn: StreamingResponse тогда слушает
+    # http.disconnect и отменяет генератор (на 2.4 этой ветки нет).
+    return {
+        "type": "http", "asgi": {"version": "3.0", "spec_version": "2.3"},
+        "http_version": "1.1", "method": "POST", "scheme": "http",
+        "path": path, "raw_path": path.encode(), "query_string": b"",
+        "root_path": "", "client": ("127.0.0.1", 50000),
+        "server": ("127.0.0.1", 8765),
+        "headers": [
+            (b"host", b"127.0.0.1:8765"),
+            (b"content-type", content_type.encode()),
+        ],
+    }
+
+
+def test_sse_disconnect_keeps_lock_until_worker_ends(monkeypatch):
+    """c4: разрыв SSE не отпускает _CONVERT_LOCK, пока поток жив.
+
+    Раньше отмена ожидания освобождала лок: запрос B стартовал при
+    работающем A, ловил вывод A в свой лог, sys.stdout оставался
+    чужим StringIO.
+    """
+    import asyncio
+    import sys
+    import threading
+
+    monkeypatch.setattr(gui_server, "_CONVERT_LOCK", asyncio.Lock())
+    a_started = threading.Event()
+    release_a = threading.Event()
+    b_started = threading.Event()
+
+    def fake_convert_url(url, opts):
+        if url.endswith("/a"):
+            a_started.set()
+            print("MARKER_A")
+            release_a.wait(10)
+            print("MARKER_A_END")
+        else:
+            b_started.set()
+        return "fail"
+
+    monkeypatch.setattr(gui_server.core, "convert_url", fake_convert_url)
+    real_stdout = sys.stdout
+
+    async def request(url, disconnect, sent):
+        body = {"done": False}
+
+        async def receive():
+            if not body["done"]:
+                body["done"] = True
+                return {"type": "http.request",
+                        "body": b"url=" + url.encode()}
+            await disconnect.wait()
+            return {"type": "http.disconnect"}
+
+        async def send(message):
+            sent.append(message)
+            if message.get("type") == "http.response.body" \
+                    and not message.get("more_body"):
+                disconnect.set()
+
+        await gui_server.app(
+            _asgi_scope("/api/convert/url",
+                        "application/x-www-form-urlencoded"),
+            receive, send,
+        )
+
+    async def scenario():
+        disc_a, disc_b = asyncio.Event(), asyncio.Event()
+        sent_a, sent_b = [], []
+        task_a = asyncio.create_task(
+            request("http://a.test/a", disc_a, sent_a))
+        assert await asyncio.to_thread(a_started.wait, 5)
+        disc_a.set()  # браузер закрыл вкладку посреди конвертации A
+        await asyncio.sleep(0.2)
+        task_b = asyncio.create_task(
+            request("http://b.test/b", disc_b, sent_b))
+        # пока поток A жив, B не должен начать конвертацию
+        early = await asyncio.to_thread(b_started.wait, 0.5)
+        release_a.set()
+        await asyncio.wait_for(task_a, 10)
+        await asyncio.wait_for(task_b, 10)
+        return early, sent_b
+
+    early, sent_b = asyncio.run(scenario())
+    assert early is False, "B стартовал, пока работал поток A"
+    assert b_started.is_set()
+    body_b = b"".join(
+        m.get("body", b"") for m in sent_b
+        if m.get("type") == "http.response.body"
+    ).decode("utf-8")
+    assert "MARKER_A" not in body_b
+    assert sys.stdout is real_stdout
+
+
+@pytest.mark.parametrize("second_ctype", [False, True])
+def test_upload_limit_stops_reading_body_early(monkeypatch, second_ctype):
+    """c3: файл сверх лимита отвергается, не дочитывая тело.
+
+    Раньше Starlette принимал multipart-часть во временный файл
+    целиком, а лимит проверялся уже после: 101 МиБ ложились на диск.
+    Тело отдаётся кусками по 1 КБ при лимите 4 КБ — приложение должно
+    перестать читать задолго до конца и ответить 413 с причиной.
+    Второй заголовок Content-Type (text/plain) счётчик не выключает:
+    Starlette разбирает тело по ПЕРВОМУ.
+    """
+    import asyncio
+
+    monkeypatch.setattr(gui_server, "_MAX_UPLOAD_BYTES", 4096)
+    saved = []
+
+    async def fake_save(upload, dest):
+        saved.append(dest)
+        raise ValueError("File too large")  # прежний, поздний отказ
+
+    monkeypatch.setattr(gui_server, "_save_upload_streaming", fake_save)
+    boundary = "LIMITBOUNDARY"
+    chunks = [(
+        f"--{boundary}\r\n"
+        'Content-Disposition: form-data; name="files"; '
+        'filename="big.csv"\r\n'
+        "Content-Type: text/csv\r\n\r\n"
+    ).encode()]
+    chunks += [b"a" * 1024] * 64
+    chunks.append(f"\r\n--{boundary}--\r\n".encode())
+    state = {"read": 0}
+    sent = []
+
+    async def receive():
+        if state["read"] < len(chunks):
+            state["read"] += 1
+            return {"type": "http.request",
+                    "body": chunks[state["read"] - 1],
+                    "more_body": state["read"] < len(chunks)}
+        return {"type": "http.disconnect"}
+
+    async def send(message):
+        sent.append(message)
+
+    scope = _asgi_scope("/api/convert/files",
+                        f"multipart/form-data; boundary={boundary}")
+    if second_ctype:
+        scope["headers"].append((b"content-type", b"text/plain"))
+    asyncio.run(gui_server.app(scope, receive, send))
+    start = next(m for m in sent if m["type"] == "http.response.start")
+    assert start["status"] == 413
+    body = b"".join(m.get("body", b"") for m in sent
+                    if m["type"] == "http.response.body")
+    assert "загрузка прервана" in json.loads(body)["error"]
+    # шапка части + 4 куска до лимита + кусок, на котором он сработал
+    assert state["read"] <= 6, f"прочитано {state['read']} из {len(chunks)}"
+    assert saved == []
+
+
+def _asgi_post_chunks(boundary, body, size):
+    """POST /api/convert/files телом по `size` байт (как под uvicorn);
+    после тела receive ждёт конца ответа. → (status, текст ответа)."""
+    import asyncio
+
+    chunks = [body[i:i + size] for i in range(0, len(body), size)]
+    sent = []
+
+    async def scenario():
+        finished = asyncio.Event()
+        state = {"i": 0}
+
+        async def receive():
+            if state["i"] < len(chunks):
+                state["i"] += 1
+                return {"type": "http.request",
+                        "body": chunks[state["i"] - 1],
+                        "more_body": state["i"] < len(chunks)}
+            await finished.wait()
+            return {"type": "http.disconnect"}
+
+        async def send(message):
+            sent.append(message)
+            if message.get("type") == "http.response.body" \
+                    and not message.get("more_body"):
+                finished.set()
+
+        await gui_server.app(
+            _asgi_scope("/api/convert/files",
+                        f"multipart/form-data; boundary={boundary}"),
+            receive, send,
+        )
+
+    asyncio.run(scenario())
+    start = next(m for m in sent if m["type"] == "http.response.start")
+    text = b"".join(m.get("body", b"") for m in sent
+                    if m["type"] == "http.response.body").decode("utf-8")
+    return start["status"], text
+
+
+def _multipart_csv(boundary, data):
+    return (
+        f"--{boundary}\r\n"
+        'Content-Disposition: form-data; name="files"; '
+        'filename="x.csv"\r\n\r\n'
+    ).encode() + data + f"\r\n--{boundary}--\r\n".encode()
+
+
+def test_upload_limit_passes_chunked_legal_upload():
+    """c3: счётчик не мешает обычной загрузке, пришедшей кусками.
+
+    Под uvicorn тело всегда приходит частями; здесь куски по 7 байт,
+    так что и boundary, и шапка части разорваны между сообщениями.
+    """
+    boundary = "SPLITBOUNDARY"
+    status, text = _asgi_post_chunks(
+        boundary, _multipart_csv(boundary, b"col\nCHUNKOK\n"), 7
+    )
+    assert status == 200
+    done = _done_events(text)[0]
+    assert done["status"] == "ok"
+    assert "CHUNKOK" in done["preview"]
+
+
+def test_upload_limit_long_boundary_is_400_not_crash():
+    """c3: boundary длиннее предела python-multipart (256) — 400.
+
+    Счётчик создавал разборщик вне try, и его FormParserError вылетал
+    из приложения (500); раньше такой запрос отвергал Starlette (400).
+    """
+    boundary = "B" * 300
+    status, _ = _asgi_post_chunks(
+        boundary, _multipart_csv(boundary, b"a,b\n1,2\n"), 64
+    )
+    assert status == 400

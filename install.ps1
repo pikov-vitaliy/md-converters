@@ -125,15 +125,26 @@ Write-Host "Python найден: $python" -ForegroundColor Green
 # пакет, чтобы на машине была та же версия md-converters, что и в репозитории.
 Write-Host "`nУстанавливаю md-converters из текущей папки..." -ForegroundColor Cyan
 & $python -m pip install --upgrade pip
+# Код pip проверяем ОТДЕЛЬНО от импорта: импорт ранее стоявших модулей
+# проходил и затирал $LASTEXITCODE, так что после упавшей установки
+# печаталось «Комплект установлен.» — со старой версией пакета.
 & $python -m pip install --upgrade $kit
-& $python -c "import convert_to_md, markitdown" 2>$null
-if ($LASTEXITCODE -ne 0) {
+$installed = ($LASTEXITCODE -eq 0)
+if ($installed) {
+    & $python -c "import convert_to_md, markitdown" 2>$null
+    $installed = ($LASTEXITCODE -eq 0)
+}
+if (-not $installed) {
     # Системный Python без прав на site-packages — пробуем профиль.
     Write-Host "Не вышло в site-packages, пробую установку с --user..." -ForegroundColor Yellow
     & $python -m pip install --user --upgrade $kit
-    & $python -c "import convert_to_md, markitdown" 2>$null
+    $installed = ($LASTEXITCODE -eq 0)
+    if ($installed) {
+        & $python -c "import convert_to_md, markitdown" 2>$null
+        $installed = ($LASTEXITCODE -eq 0)
+    }
 }
-if ($LASTEXITCODE -ne 0) {
+if (-not $installed) {
     Write-Host "Не удалось установить/импортировать md-converters." -ForegroundColor Red
     Write-Host "Проверьте интернет и попробуйте вручную:" -ForegroundColor Red
     Write-Host "  `"$python`" -m pip install --upgrade `"$kit`""
@@ -161,12 +172,19 @@ foreach ($line in $old) {
     $clean.Add($line)
 }
 
+# Пути в профиль — литералами в одинарных кавычках. В двойных PowerShell
+# при каждом запуске профиля заново раскрывал бы `$имя` из пути
+# («C:\папка $null» превращалась в «C:\папка »). Escape-функция удваивает
+# и ', и типографские ‘ ’ — PowerShell их тоже считает кавычками.
+$q = [System.Management.Automation.Language.CodeGeneration]
+$pyLit  = "'" + $q::EscapeSingleQuotedStringContent($python) + "'"
+$cliLit = "'" + $q::EscapeSingleQuotedStringContent("$kit\convert_to_md.py") + "'"
 $block = @"
 # >>> md-converters >>>
 # Конвертеры в Markdown (md-converters). Прописано install.ps1 — не редактируйте.
-function tomd    { & "$python" "$kit\convert_to_md.py" @args }
-function pdf2md  { & "$python" "$kit\convert_to_md.py" --only pdf @args }
-function html2md { & "$python" "$kit\convert_to_md.py" --only html,htm @args }
+function tomd    { & $pyLit $cliLit @args }
+function pdf2md  { & $pyLit $cliLit --only pdf @args }
+function html2md { & $pyLit $cliLit --only html,htm @args }
 Set-Alias pdftomd  pdf2md
 Set-Alias htmltomd html2md
 # <<< md-converters <<<

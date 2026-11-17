@@ -28,13 +28,33 @@ from typing import AsyncGenerator
 from urllib.parse import quote
 
 import uvicorn
-from fastapi import FastAPI, Form, Request, Response, UploadFile
+from fastapi import (
+    FastAPI,
+    Form,
+    HTTPException,
+    Request,
+    Response,
+    UploadFile,
+)
+from fastapi.concurrency import run_in_threadpool
 from fastapi.responses import (
     HTMLResponse,
     JSONResponse,
     StreamingResponse,
 )
 from fastapi.staticfiles import StaticFiles
+
+# python-multipart — зависимость экстры [gui]; модуль python_multipart
+# появился в 0.0.13, нижняя граница в pyproject — 0.0.12.
+try:
+    from python_multipart.exceptions import FormParserError
+    from python_multipart.multipart import (
+        MultipartParser,
+        parse_options_header,
+    )
+except ImportError:  # pragma: no cover — python-multipart 0.0.12
+    from multipart.exceptions import FormParserError
+    from multipart.multipart import MultipartParser, parse_options_header
 
 import convert_to_md as core
 
@@ -192,6 +212,19 @@ def _safe_rel(rel_path: str, fallback: str) -> Path:
     return Path(*parts)
 
 
+def _resolves_inside(path: Path, root: Path) -> bool:
+    """Реальный путь (junction и симлинки раскрыты) не выходит за root.
+
+    resolve() раскрывает существующую часть пути по файловой системе,
+    несуществующий хвост дописывает как есть; сам конечный файл, если
+    он симлинк, тоже раскрывается.
+    """
+    try:
+        return path.resolve().is_relative_to(root.resolve())
+    except OSError:
+        return False
+
+
 # --- Port finding (BLK-3) ---
 
 def _find_free_port() -> int:
@@ -266,6 +299,87 @@ async def _open_browser_when_ready(port: int) -> None:
             return
         except (ConnectionError, OSError):
             await asyncio.sleep(0.5)
+
+
+# --- Лимит загрузки ДО приёма тела (c3) ---
+
+class _UploadTooLarge(HTTPException):
+    """Часть multipart больше _MAX_UPLOAD_BYTES. HTTPException — чтобы
+    FastAPI не подменил причину общим 400 «error parsing the body»."""
+
+
+@app.exception_handler(_UploadTooLarge)
+async def _upload_too_large(request: Request, exc: _UploadTooLarge):
+    # фронтенд читает поле error (как у _bad_request), не detail
+    return JSONResponse({"error": exc.detail}, status_code=413)
+
+
+class _UploadLimit:
+    """Обрывает приём, как только одна часть multipart больше лимита.
+
+    Starlette пишет файловую часть во временный файл целиком (его
+    max_part_size на файлы не действует), а проверка размера в
+    _save_upload_streaming шла уже после — 101 МиБ ложились на диск до
+    отказа. Здесь каждый кусок тела сначала проходит через свой
+    разборщик-счётчик и, если часть перевалила лимит, отвергается ДО
+    того, как его получит Starlette. Лимит — на часть, не на запрос:
+    несколько файлов по 100 МБ в одной загрузке допустимы, как раньше.
+    """
+
+    def __init__(self, app):
+        self.app = app
+
+    async def __call__(self, scope, receive, send):
+        if scope["type"] != "http":
+            return await self.app(scope, receive, send)
+        # ПЕРВЫЙ Content-Type, как берёт Starlette: с dict() побеждал бы
+        # последний, и второй заголовок text/plain выключал бы счётчик.
+        ctype = next(
+            (v for k, v in scope["headers"] if k == b"content-type"), b""
+        )
+        kind, params = parse_options_header(ctype)
+        boundary = params.get(b"boundary")
+        if kind != b"multipart/form-data" or not boundary:
+            return await self.app(scope, receive, send)
+        size = 0
+
+        def on_part_begin():
+            nonlocal size
+            size = 0
+
+        def on_part_data(data, start, end):
+            nonlocal size
+            size += end - start
+            if size > _MAX_UPLOAD_BYTES:
+                raise _UploadTooLarge(413, (
+                    f"Файл больше {_MAX_UPLOAD_BYTES // 1048576} МБ — "
+                    "загрузка прервана"
+                ))
+
+        try:
+            parser = MultipartParser(boundary, {
+                "on_part_begin": on_part_begin,
+                "on_part_data": on_part_data,
+            })
+        except FormParserError:
+            # boundary длиннее предела: такое тело отвергнет сам
+            # Starlette (400), а исключение отсюда стало бы 500
+            return await self.app(scope, receive, send)
+
+        async def limited_receive():
+            message = await receive()
+            if message["type"] == "http.request":
+                parser.write(message.get("body", b""))
+            return message
+
+        await self.app(scope, limited_receive, send)
+
+
+# Регистрируем ДО _check_origin — ограничитель окажется ВНУТРИ него.
+# Снаружи исключение из receive проходило бы через task group
+# BaseHTTPMiddleware, доходило до FastAPI завёрнутым в ExceptionGroup,
+# и тот отвечал общим 400 вместо 413 с причиной.
+app.add_middleware(_UploadLimit)
 
 
 # --- DNS rebinding / CSRF protection (BLK-6, S1) ---
@@ -485,7 +599,13 @@ async def _run_conversion(fn, arg, opts: dict) -> dict | None:
     None, если to_thread бросил исключение наружу.
     """
     async with _CONVERT_LOCK:
-        result = await asyncio.to_thread(fn, arg, opts)
+        # Поток не прервать: разрыв SSE отменял только ожидание, лок
+        # освобождался, а поток A ещё писал в перехваченный stdout —
+        # запрос B запускал второй перехват параллельно (вывод A в логе
+        # B, sys.stdout не восстановлен). run_in_threadpool откладывает
+        # отмену до конца потока (anyio, abandon_on_cancel=False), так
+        # что и временные файлы генераторы удаляют уже после работника.
+        result = await run_in_threadpool(fn, arg, opts)
         # last_target ставит ядро (convert_file/convert_url) —
         # точная цель записи, без угадывания по stem.
         result["md_path"] = opts.get("last_target")
@@ -538,10 +658,22 @@ def _extract_archive(src: Path, inner: Path) -> None:
     # temp. Это единственный надёжный предел: заголовок архива можно
     # подделать (uncompressed=0), а здесь считаются фактические байты.
     written = 0
+    used: set[str] = set()
 
     def _write(name: str, reader) -> None:
         nonlocal written
-        dest = inner / _safe_rel(name, "file")
+        # Windows не различает регистр: Report.csv и report.csv — один
+        # файл, второй молча затирал первый ещё до конвертации. Разводим
+        # суффиксом, как _unique_path, но без учёта регистра на любой ОС
+        # (общий .zip с .md тоже распакуют на Windows) — заодно и точные
+        # дубликаты имён, которые zip допускает.
+        rel = base = _safe_rel(name, "file")
+        n = 2
+        while rel.as_posix().lower() in used:
+            rel = base.with_name(f"{base.stem} ({n}){base.suffix}")
+            n += 1
+        used.add(rel.as_posix().lower())
+        dest = inner / rel
         dest.parent.mkdir(parents=True, exist_ok=True)
         with dest.open("wb") as df:
             while True:
@@ -558,11 +690,13 @@ def _extract_archive(src: Path, inner: Path) -> None:
 
     if kind == "zip":
         with zipfile.ZipFile(src) as zf:
-            for n in zf.namelist():
-                if n.endswith("/"):
+            # По ZipInfo, не по имени: open(имя) у точных дубликатов
+            # отдаёт последнюю запись дважды.
+            for info in zf.infolist():
+                if info.is_dir():
                     continue
-                with zf.open(n) as sf:
-                    _write(n, sf)
+                with zf.open(info) as sf:
+                    _write(info.filename, sf)
     elif kind == "tar":
         with tarfile.open(src) as tf:
             for m in tf.getmembers():
@@ -583,19 +717,37 @@ def _extract_archive(src: Path, inner: Path) -> None:
         # inner через _safe_rel (zip-slip-защита поверх защиты py7zr).
         with py7zr.SevenZipFile(src, "r") as zf:
             total = getattr(zf.archiveinfo(), "uncompressed", 0)
+            names = list(dict.fromkeys(
+                f.filename for f in zf.list() if not f.is_directory
+            ))
         if total and total > _MAX_UNCOMPRESSED:
             raise ValueError(
                 "архив слишком большой в распакованном виде "
                 f"({total // (1024 * 1024)} МБ)"
             )
+        # Здесь регистр губит файл ещё в extractall: Report.csv и
+        # report.csv ложатся в temp одним файлом. Раскладываем имена по
+        # «слоям» (в слое они различны и без учёта регистра), каждый
+        # слой — в свою папку; одноимённые затем разводит _write. Без
+        # коллизий слой один — как прежний extractall.
+        layers: list[list[str]] = []
+        seen: dict[str, int] = {}
+        for name in names:
+            k = seen.get(name.lower(), 0)
+            seen[name.lower()] = k + 1
+            if k == len(layers):
+                layers.append([])
+            layers[k].append(name)
         raw = Path(tempfile.mkdtemp(prefix="md_7z_"))
         try:
-            with py7zr.SevenZipFile(src, "r") as zf:
-                zf.extractall(path=raw)
-            for f in raw.rglob("*"):
-                if f.is_file():
-                    with f.open("rb") as sf:
-                        _write(f.relative_to(raw).as_posix(), sf)
+            for i, layer in enumerate(layers):
+                part = raw / str(i)
+                with py7zr.SevenZipFile(src, "r") as zf:
+                    zf.extract(path=part, targets=layer)
+                for f in sorted(part.rglob("*")):
+                    if f.is_file():
+                        with f.open("rb") as sf:
+                            _write(f.relative_to(part).as_posix(), sf)
         finally:
             shutil.rmtree(raw, ignore_errors=True)
     else:
@@ -660,48 +812,73 @@ async def _convert_archive(src: Path, opts: dict, label: str):
             status = res["status"]
             log = res["log"]
             note = ""
+            error = ""
             if full and md_path:
                 rel = md_path.relative_to(inner)
                 dl_id = uuid.uuid4().hex[:12]
                 _add_download(dl_id, md_path.name, full)
                 if out_dir is not None:
                     dest = out_dir / rel
-                    try:
-                        # mkdir — ОТДЕЛЬНО от записи: если компонент
-                        # пути занят файлом, он тоже кидает
-                        # FileExistsError, и в общем try это выдавалось
-                        # бы за «.md уже есть» (даже при force). При
-                        # неудаче запись ниже упадёт в except OSError —
-                        # итог тот же, но без ложного «skip».
-                        dest.parent.mkdir(parents=True, exist_ok=True)
-                    except OSError:
-                        out_path = None
-                    try:
-                        # Ядро без --force существующий .md не трогает;
-                        # копия из архива затирала его молча. Режим "x"
-                        # (эксклюзивное создание) вместо проверки
-                        # exists(): она и запись — разные шаги, между
-                        # ними два запроса успевали затереть чужой
-                        # результат (конвертацию сериализует
-                        # _CONVERT_LOCK, а копирование — уже нет).
-                        mode = "w" if opts.get("force") else "x"
-                        with dest.open(mode, encoding="utf-8") as fh:
-                            fh.write(full)
-                        out_path = str(dest)
-                    except FileExistsError:
-                        # Сам файл остаётся доступен кнопкой скачивания
-                        status = "skip"
-                        note = (
-                            f"{dest.name} уже есть в папке вывода — "
-                            "не перезаписан. Включите «Перезаписать "
-                            "существующие» или скачайте файл кнопкой."
+                    if not _resolves_inside(dest, out_dir):
+                        # Лексически rel внутри (_safe_rel), но подпапка
+                        # папки вывода может быть junction/симлинком
+                        # наружу — запись ушла бы по нему. Проверка ДО
+                        # mkdir: иначе снаружи появилась бы новая папка.
+                        error = (
+                            "путь уводит за пределы папки вывода "
+                            "(junction или симлинк)"
                         )
-                        log += (
-                            f"[skip] {dest.name} already exists "
-                            "(use -f / --force to overwrite)\n"
+                    else:
+                        try:
+                            # mkdir — ОТДЕЛЬНО от записи: если компонент
+                            # пути занят файлом, он тоже кидает
+                            # FileExistsError, и в общем try это
+                            # выдавалось бы за «.md уже есть» (даже при
+                            # force).
+                            dest.parent.mkdir(parents=True, exist_ok=True)
+                        except OSError as exc:
+                            error = str(exc)
+                    if not error:
+                        try:
+                            # Ядро без --force существующий .md не
+                            # трогает; копия из архива затирала его
+                            # молча. Режим "x" (эксклюзивное создание)
+                            # вместо проверки exists(): она и запись —
+                            # разные шаги, между ними два запроса
+                            # успевали затереть чужой результат
+                            # (конвертацию сериализует _CONVERT_LOCK,
+                            # а копирование — уже нет).
+                            mode = "w" if opts.get("force") else "x"
+                            with dest.open(
+                                mode, encoding="utf-8"
+                            ) as fh:
+                                fh.write(full)
+                            out_path = str(dest)
+                        except FileExistsError:
+                            # Сам файл остаётся доступен кнопкой
+                            # скачивания
+                            status = "skip"
+                            note = (
+                                f"{dest.name} уже есть в папке "
+                                "вывода — не перезаписан. Включите "
+                                "«Перезаписать существующие» или "
+                                "скачайте файл кнопкой."
+                            )
+                            log += (
+                                f"[skip] {dest.name} already exists "
+                                "(use -f / --force to overwrite)\n"
+                            )
+                        except OSError as exc:
+                            error = str(exc)
+                    if error:
+                        # Сохранение не удалось — это ошибка, а не «ok»
+                        # с пустым output: иначе файл выглядел бы
+                        # сохранённым. Скачать его по-прежнему можно.
+                        status = "fail"
+                        error = (
+                            f"{rel.as_posix()} не сохранён в папку "
+                            f"вывода: {error}. Скачайте файл кнопкой ⬇."
                         )
-                    except OSError:
-                        out_path = None
                 elif (len(collected) < _MAX_ARCHIVE_FILES
                       and total_bytes + _utf8_len(full)
                       <= _MAX_ARCHIVE_BYTES):
@@ -714,6 +891,7 @@ async def _convert_archive(src: Path, opts: dict, label: str):
                 "status": status,
                 "log": log,
                 "note": note,
+                "error": error,
                 "warnings": res["warnings"],
                 "preview": preview,
                 "download_id": dl_id,
@@ -929,38 +1107,49 @@ async def convert_url_endpoint(
 
     async def generate() -> AsyncGenerator[str, None]:
         yield _sse("start", {"file": url})
+        # Без «Папки вывода» результат только скачивается: ядро без
+        # out_dir пишет в Path.cwd() — рабочую папку СЕРВЕРА, где .md
+        # оставался мусором. Пишем во временную и удаляем её сами.
+        tmpdir = None
+        if not has_out_dir:
+            tmpdir = Path(tempfile.mkdtemp(prefix="md_url_"))
+            opts["out_dir"] = tmpdir
         try:
-            res = await _run_conversion(
-                _convert_url_with_capture, url, opts
-            )
-        except Exception as exc:
-            yield _sse("error", {
+            try:
+                res = await _run_conversion(
+                    _convert_url_with_capture, url, opts
+                )
+            except Exception as exc:
+                yield _sse("error", {
+                    "file": url,
+                    "error": f"{type(exc).__name__}: {exc}",
+                })
+                yield _sse("complete", {})
+                return
+
+            md_path = res["md_path"]
+            full_content, preview = _read_output(md_path)
+            dl_id = ""
+            if full_content:
+                dl_id = uuid.uuid4().hex[:12]
+                _add_download(dl_id, md_path.name, full_content)
+
+            yield _sse("done", {
                 "file": url,
-                "error": f"{type(exc).__name__}: {exc}",
+                "status": res["status"],
+                "log": res["log"],
+                "warnings": res["warnings"],
+                "preview": preview,
+                "download_id": dl_id,
+                "output": (
+                    str(md_path)
+                    if has_out_dir and md_path else None
+                ),
             })
             yield _sse("complete", {})
-            return
-
-        md_path = res["md_path"]
-        full_content, preview = _read_output(md_path)
-        dl_id = ""
-        if full_content:
-            dl_id = uuid.uuid4().hex[:12]
-            _add_download(dl_id, md_path.name, full_content)
-
-        yield _sse("done", {
-            "file": url,
-            "status": res["status"],
-            "log": res["log"],
-            "warnings": res["warnings"],
-            "preview": preview,
-            "download_id": dl_id,
-            "output": (
-                str(md_path)
-                if has_out_dir and md_path else None
-            ),
-        })
-        yield _sse("complete", {})
+        finally:
+            if tmpdir is not None:
+                shutil.rmtree(tmpdir, ignore_errors=True)
 
     return StreamingResponse(
         generate(), media_type="text/event-stream",

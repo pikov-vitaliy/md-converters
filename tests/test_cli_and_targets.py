@@ -243,3 +243,43 @@ def test_parse_version_prints_current_version(capsys):
 
     output = capsys.readouterr().out
     assert f"md-converters {convert_to_md.__version__}" in output
+
+
+def test_no_frontmatter_rerun_skips_and_force_overwrites(tmp_path):
+    """b6: без шапки повтор пропускает свой .md, --force перезаписывает.
+
+    Свой .md опознавался только по source_id из front-matter: без шапки
+    каждый повтор плодил «имя (2).md», «имя (3).md», а --force ничего
+    не перезаписывал. Чужой .md С шапкой по-прежнему не трогается.
+    """
+    src = tmp_path / "data.csv"
+    src.write_text("col\nFIRST\n", encoding="utf-8")
+    base = [str(src), "--no-frontmatter", "--no-sandbox"]
+
+    assert convert_to_md._main(base) == 0
+    target = tmp_path / "data.md"
+    assert "FIRST" in target.read_text(encoding="utf-8")
+
+    src.write_text("col\nSECOND\n", encoding="utf-8")
+    assert convert_to_md._main(base) == 0  # повтор — пропуск
+    assert "FIRST" in target.read_text(encoding="utf-8")
+    assert convert_to_md._main(base + ["--force"]) == 0
+    assert "SECOND" in target.read_text(encoding="utf-8")
+    assert sorted(p.name for p in tmp_path.glob("*.md")) == ["data.md"]
+
+    # .md с шапкой ДРУГОГО источника — не наш, его не затираем
+    other = tmp_path / "other.csv"
+    other.write_text("col\nOTHER\n", encoding="utf-8")
+    foreign = tmp_path / "other.md"
+    foreign.write_text(convert_to_md.front_matter(
+        "elsewhere.csv", None, "tomd",
+        source_id=convert_to_md._source_id_for_path(tmp_path / "x.csv"),
+    ), encoding="utf-8")
+    before = foreign.read_text(encoding="utf-8")
+    assert convert_to_md._main(
+        [str(other), "--no-frontmatter", "--no-sandbox", "--force"]
+    ) == 0
+    assert foreign.read_text(encoding="utf-8") == before
+    assert "OTHER" in (tmp_path / "other (2).md").read_text(
+        encoding="utf-8"
+    )
