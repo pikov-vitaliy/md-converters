@@ -330,7 +330,11 @@ class _UploadLimit:
     async def __call__(self, scope, receive, send):
         if scope["type"] != "http":
             return await self.app(scope, receive, send)
-        ctype = dict(scope["headers"]).get(b"content-type", b"")
+        # ПЕРВЫЙ Content-Type, как берёт Starlette: с dict() побеждал бы
+        # последний, и второй заголовок text/plain выключал бы счётчик.
+        ctype = next(
+            (v for k, v in scope["headers"] if k == b"content-type"), b""
+        )
         kind, params = parse_options_header(ctype)
         boundary = params.get(b"boundary")
         if kind != b"multipart/form-data" or not boundary:

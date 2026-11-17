@@ -1333,13 +1333,16 @@ def test_sse_disconnect_keeps_lock_until_worker_ends(monkeypatch):
     assert sys.stdout is real_stdout
 
 
-def test_upload_limit_stops_reading_body_early(monkeypatch):
+@pytest.mark.parametrize("second_ctype", [False, True])
+def test_upload_limit_stops_reading_body_early(monkeypatch, second_ctype):
     """c3: файл сверх лимита отвергается, не дочитывая тело.
 
     Раньше Starlette принимал multipart-часть во временный файл
     целиком, а лимит проверялся уже после: 101 МиБ ложились на диск.
     Тело отдаётся кусками по 1 КБ при лимите 4 КБ — приложение должно
     перестать читать задолго до конца и ответить 413 с причиной.
+    Второй заголовок Content-Type (text/plain) счётчик не выключает:
+    Starlette разбирает тело по ПЕРВОМУ.
     """
     import asyncio
 
@@ -1374,11 +1377,11 @@ def test_upload_limit_stops_reading_body_early(monkeypatch):
     async def send(message):
         sent.append(message)
 
-    asyncio.run(gui_server.app(
-        _asgi_scope("/api/convert/files",
-                    f"multipart/form-data; boundary={boundary}"),
-        receive, send,
-    ))
+    scope = _asgi_scope("/api/convert/files",
+                        f"multipart/form-data; boundary={boundary}")
+    if second_ctype:
+        scope["headers"].append((b"content-type", b"text/plain"))
+    asyncio.run(gui_server.app(scope, receive, send))
     start = next(m for m in sent if m["type"] == "http.response.start")
     assert start["status"] == 413
     body = b"".join(m.get("body", b"") for m in sent
