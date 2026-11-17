@@ -66,7 +66,7 @@ import subprocess
 import sys
 import tempfile
 import warnings
-from datetime import date
+from datetime import date, datetime
 from email.message import Message
 from pathlib import Path
 from urllib.parse import unquote, urljoin, urlparse
@@ -206,7 +206,62 @@ def _md() -> MarkItDown:
         _missing_markitdown()
     if _converter is None:
         _converter = MarkItDown()
+        xlsx = _text_cells_xlsx_converter()
+        if xlsx is not None:
+            _converter.register_converter(xlsx)
     return _converter
+
+
+def _excel_cell(value):
+    """Дата без времени — датой, как её показывал и штатный путь."""
+    if isinstance(value, datetime) and value.time() == datetime.min.time():
+        return value.date()
+    return value
+
+
+def _text_cells_xlsx_converter():
+    """XLSX без угадывания типов: текстовая ячейка остаётся текстом.
+
+    Штатный конвертер MarkItDown читает лист через pandas.read_excel с
+    выводом типов, и текст менялся: «00123» -> 123, «NA»/«NULL» -> NaN,
+    пустая ячейка -> «NaN». Здесь ячейки приходят как есть (dtype=object,
+    без списка NA-значений): числа, даты и флаги — своими типами из
+    openpyxl, текст — строкой. Регистрируется ПЕРЕД штатным: если это
+    чтение упадёт (книга, которую openpyxl открывает только после
+    ремонта MarkItDown), MarkItDown сам откатится на штатный конвертер.
+    None — если нет pandas: тогда остаётся штатный конвертер, а прочие
+    форматы работают как прежде.
+    """
+    try:
+        import pandas as pd
+        from markitdown import DocumentConverterResult
+        from markitdown.converters import XlsxConverter
+    except ImportError:
+        return None
+
+    class TextCellsXlsxConverter(XlsxConverter):
+        def convert(self, file_stream, stream_info, **kwargs):
+            sheets = pd.read_excel(
+                file_stream, sheet_name=None, engine="openpyxl",
+                dtype=object, keep_default_na=False,
+            )
+            parts = []
+            for name, frame in sheets.items():
+                # Не DataFrame.map: он заново выводит типы, и 5 рядом с
+                # 6.5 стало бы 5.0. Строки собираются с dtype=object.
+                frame = pd.DataFrame(
+                    [[_excel_cell(value) for value in row]
+                     for row in frame.itertuples(index=False, name=None)],
+                    columns=frame.columns, dtype=object,
+                )
+                html = frame.to_html(index=False)
+                table = self._html_converter.convert_string(
+                    html, **kwargs
+                ).markdown.strip()
+                parts.append(f"## {name}\n{table}")
+            return DocumentConverterResult(markdown="\n\n".join(parts))
+
+    return TextCellsXlsxConverter()
 
 
 def _is_url(token) -> bool:
