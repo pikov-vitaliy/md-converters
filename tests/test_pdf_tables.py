@@ -543,7 +543,8 @@ def test_clean_pdf_text_strips_repeated_footer_and_page_numbers():
 def test_clean_pdf_text_keeps_unique_doc_and_standalone_number():
     # Нет повторяющегося колонтитула -> одиночное число НЕ срезается
     # (защита документов вроде Предзащиты).
-    text = "Параграф один\nПараграф два\n42\nПараграф три"
+    text = c._PDF_PAGE_BREAK.join(
+        ["Параграф один", "Параграф два\n42", "Параграф три"])
     out = c._clean_pdf_text(text, page_count=10)
     assert "42" in out
     assert "Параграф один" in out and "Параграф три" in out
@@ -697,6 +698,57 @@ def test_clean_pdf_text_keeps_clustered_numbered_list():
 
     missing = [n for n in range(1, 41) if f"\n{n}\n" not in body]
     assert missing == []
+
+
+def test_strip_pdf_furniture_keeps_list_crossing_pages():
+    """Нумерованный перечень, перетекающий через страницы, — не номера
+    страниц. Конец перечня внизу страницы и начало вверху следующей
+    дают одинаковый сдвиг «значение минус индекс страницы», но стоят в
+    разных зонах; пункт «1» в начале первой страницы совпадает по
+    сдвигу с номерами страниц, но они внизу. Настоящие номера страниц
+    при этом срезаются."""
+    pages = []
+    for p in range(12):
+        lines = []
+        for n in range(5 * p + 1, 5 * p + 6):
+            lines += [str(n), f"Пункт перечня {n} о мерах защиты."]
+        lines.append(str(p + 1))  # номер страницы
+        pages.append(lines)
+
+    kept = [ln for page in c._strip_pdf_furniture(pages, 12)
+            for ln in page]
+
+    assert [ln for ln in kept if ln.isdigit()] == [
+        str(n) for n in range(1, 61)]
+
+
+def test_strip_pdf_furniture_keeps_number_next_to_page_number():
+    """Число того же значения прямо над номером страницы (последняя
+    строка таблицы «5» на пятой странице) — содержание: на странице
+    срезается только крайний номер зоны."""
+    pages = [[f"Строка {k} страницы {p + 1}." for k in range(6)]
+             + [str(p + 1)] for p in range(12)]
+    pages[4].insert(6, "5")
+
+    kept = c._strip_pdf_furniture(pages, 12)
+
+    assert kept[4][-1] == "5" and len(kept[4]) == 7
+    assert all(len(page) == 6 for i, page in enumerate(kept) if i != 4)
+
+
+def test_strip_pdf_furniture_short_pages_keep_top_number():
+    """На короткой странице (слайд) зоны перекрываются, и номер внизу
+    попадал бы и в верхнюю зону. Строка относится к ближнему краю,
+    поэтому крупное «3» в начале третьего слайда остаётся, а номера
+    слайдов внизу срезаются."""
+    pages = [[f"Слайд {p + 1}: тема занятия", str(p + 1)]
+             for p in range(12)]
+    pages[2].insert(0, "3")
+
+    kept = c._strip_pdf_furniture(pages, 12)
+
+    assert kept[2] == ["3", "Слайд 3: тема занятия"]
+    assert all(len(page) == 1 for i, page in enumerate(kept) if i != 2)
 
 
 def test_clean_pdf_text_protects_table_rows():
