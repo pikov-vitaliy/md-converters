@@ -1787,16 +1787,22 @@ def _existing_source_id(target: Path) -> str | None:
 def _plan_target(stem: str, dest_dir: Path, planned: set[str],
                  source: str | None = None,
                  source_id: str | None = None,
-                 allow_legacy_source_match: bool = False) -> Path:
+                 allow_legacy_source_match: bool = False,
+                 match_unmarked: bool = False) -> Path:
     """Путь к .md; совпадения имён (report.docx и report.pdf рядом)
     разводит суффиксами (2), (3)..., чтобы не затирать друг друга.
     Сверяет и план текущего запуска, и source в уже лежащих на диске
-    .md — чтобы повторный прогон части файлов попал в «свои» цели."""
+    .md — чтобы повторный прогон части файлов попал в «свои» цели.
+    match_unmarked (запуск без front-matter): .md без шапки считается
+    своим — опознать его больше нечем, а без этого каждый повтор
+    плодил «имя (2).md» и --force ничего не перезаписывал."""
     target = dest_dir / (stem + ".md")
     n = 2
     while True:
         if str(target).lower() not in planned:
             if not target.exists():
+                break
+            if match_unmarked and not _existing_frontmatter(target):
                 break
             existing_id = _existing_source_id(target)
             if _source_id_matches(existing_id, source_id):
@@ -1828,6 +1834,7 @@ def _plan_file_target(path: Path, opts: dict,
         path.name,
         source_id,
         allow_legacy_source_match=opts.get("out_dir") is None,
+        match_unmarked=not opts.get("frontmatter", True),
     )
     return target, source_id
 
@@ -1842,6 +1849,7 @@ def _plan_url_target(url: str, opts: dict,
         url,
         source_id,
         allow_legacy_source_match=True,
+        match_unmarked=not opts.get("frontmatter", True),
     )
     return target, source_id
 
