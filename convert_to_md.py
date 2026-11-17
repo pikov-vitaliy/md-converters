@@ -1978,7 +1978,7 @@ def _apply_outside_fences(text: str, fn) -> str:
 
 
 def tidy(text: str, keep_images: bool, phantom_images: bool = False,
-         safe_markdown: bool = True) -> str:
+         safe_markdown: bool = True, data_fence: bool = False) -> str:
     """Прибирает вывод: чистит управляющие символы, конвертирует
     псевдографику таблиц в GFM, убирает хвостовые пробелы, схлопывает
     пустые строки, обрезает края и (по умолчанию) сворачивает base64-
@@ -1992,6 +1992,10 @@ def tidy(text: str, keep_images: bool, phantom_images: bool = False,
     text = text.replace("\r\n", "\n").replace("\r", "\n")
     text = _CTRL_TO_SPACE.sub(" ", text)
     text = _CTRL_DROP.sub("", text)
+    if data_fence:
+        # Весь текст — ограда с JSON/XML (_fence_data): пробелы в концах
+        # строк и пустые строки внутри — значения, их не трогаем.
+        return text.strip("\n") + "\n"
 
     def _transform_prose(seg: str) -> str:
         seg = _convert_box_tables(seg)
@@ -2131,6 +2135,7 @@ def _emit(target: Path, result, source: str, frontmatter: bool,
         keep_images,
         phantom_images,
         safe_markdown=safe_markdown,
+        data_fence=getattr(result, "data_fence", False),
     )
     if frontmatter:
         title = getattr(result, "title", None)
@@ -2322,7 +2327,26 @@ def _data_language(suffix: str | None,
     return None
 
 
-def _fence_data(result, language: str):
+_XML_DECL_ENCODING = re.compile(
+    rb"""^<\?xml[^>]*?\sencoding\s*=\s*["']([A-Za-z][A-Za-z0-9._-]*)""")
+
+
+def _decode_data(raw: bytes) -> str | None:
+    """Исходник JSON/XML так, как его читает парсер: BOM, затем
+    encoding из объявления XML, иначе UTF-8. None — не декодируется."""
+    for bom, encoding in ((b"\xef\xbb\xbf", "utf-8-sig"),
+                          (b"\xff\xfe\x00\x00", "utf-32"),
+                          (b"\x00\x00\xfe\xff", "utf-32"),
+                          (b"\xff\xfe", "utf-16"), (b"\xfe\xff", "utf-16")):
+        if raw.startswith(bom):
+            return _decode_with(raw, encoding)
+    declared = _XML_DECL_ENCODING.match(raw)
+    if declared:
+        return _decode_with(raw, declared.group(1).decode("ascii"))
+    return _decode_with(raw, "utf-8")
+
+
+def _fence_data(result, language: str, raw: bytes | None = None):
     """Сырой JSON/XML -> ограда кода с языком.
 
     MarkItDown отдаёт их сырым текстом, а это данные, не проза:
@@ -2331,13 +2355,23 @@ def _fence_data(result, language: str):
     схлопывался в абзац. В ограде они инертны и сохраняют вид. XML,
     разобранный MarkItDown как RSS/Atom, уже Markdown — его не трогаем.
     Ограда длиннее любого прогона ` внутри, чтобы данные её не закрыли.
+
+    В ограду идёт исходник (raw), а не текст MarkItDown: тот срезает
+    пробелы в концах строк и сжимает пустые строки, а в значениях
+    (CDATA, xml:space) это данные. Не декодируется — текст MarkItDown.
+    tidy() внутри такой ограды пробелы тоже не трогает (data_fence).
     """
     text = result.text_content.strip("\n")
     if language == "xml" and not text.lstrip().startswith("<"):
         return result
+    source = _decode_data(raw) if raw is not None else None
+    if source is not None:
+        text = source.strip("\r\n")
     ticks = max((len(run) for run in re.findall(r"`+", text)), default=0)
     fence = "`" * max(3, ticks + 1)
-    return _TextResult(result, f"{fence}{language}\n{text}\n{fence}\n")
+    fenced = _TextResult(result, f"{fence}{language}\n{text}\n{fence}\n")
+    fenced.data_fence = True
+    return fenced
 
 
 def _convert_file_data(path: Path) -> tuple:
@@ -2352,7 +2386,7 @@ def _convert_file_data(path: Path) -> tuple:
     result = _md().convert(str(path))
     language = _data_language(path.suffix)
     if language:
-        result = _fence_data(result, language)
+        result = _fence_data(result, language, path.read_bytes())
     return result, None
 
 
@@ -2540,7 +2574,7 @@ def _convert_url_data(url: str, opts: dict) -> tuple:
         )
     language = None if is_html else _data_language(suffix, mimetype)
     if language:
-        result = _fence_data(result, language)
+        result = _fence_data(result, language, data)
     return result, final_url
 
 
