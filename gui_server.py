@@ -667,6 +667,7 @@ async def _convert_archive(src: Path, opts: dict, label: str):
             status = res["status"]
             log = res["log"]
             note = ""
+            error = ""
             if full and md_path:
                 rel = md_path.relative_to(inner)
                 dl_id = uuid.uuid4().hex[:12]
@@ -677,38 +678,51 @@ async def _convert_archive(src: Path, opts: dict, label: str):
                         # mkdir — ОТДЕЛЬНО от записи: если компонент
                         # пути занят файлом, он тоже кидает
                         # FileExistsError, и в общем try это выдавалось
-                        # бы за «.md уже есть» (даже при force). При
-                        # неудаче запись ниже упадёт в except OSError —
-                        # итог тот же, но без ложного «skip».
+                        # бы за «.md уже есть» (даже при force).
                         dest.parent.mkdir(parents=True, exist_ok=True)
-                    except OSError:
-                        out_path = None
-                    try:
-                        # Ядро без --force существующий .md не трогает;
-                        # копия из архива затирала его молча. Режим "x"
-                        # (эксклюзивное создание) вместо проверки
-                        # exists(): она и запись — разные шаги, между
-                        # ними два запроса успевали затереть чужой
-                        # результат (конвертацию сериализует
-                        # _CONVERT_LOCK, а копирование — уже нет).
-                        mode = "w" if opts.get("force") else "x"
-                        with dest.open(mode, encoding="utf-8") as fh:
-                            fh.write(full)
-                        out_path = str(dest)
-                    except FileExistsError:
-                        # Сам файл остаётся доступен кнопкой скачивания
-                        status = "skip"
-                        note = (
-                            f"{dest.name} уже есть в папке вывода — "
-                            "не перезаписан. Включите «Перезаписать "
-                            "существующие» или скачайте файл кнопкой."
+                    except OSError as exc:
+                        error = str(exc)
+                    if not error:
+                        try:
+                            # Ядро без --force существующий .md не
+                            # трогает; копия из архива затирала его
+                            # молча. Режим "x" (эксклюзивное создание)
+                            # вместо проверки exists(): она и запись —
+                            # разные шаги, между ними два запроса
+                            # успевали затереть чужой результат
+                            # (конвертацию сериализует _CONVERT_LOCK,
+                            # а копирование — уже нет).
+                            mode = "w" if opts.get("force") else "x"
+                            with dest.open(
+                                mode, encoding="utf-8"
+                            ) as fh:
+                                fh.write(full)
+                            out_path = str(dest)
+                        except FileExistsError:
+                            # Сам файл остаётся доступен кнопкой
+                            # скачивания
+                            status = "skip"
+                            note = (
+                                f"{dest.name} уже есть в папке "
+                                "вывода — не перезаписан. Включите "
+                                "«Перезаписать существующие» или "
+                                "скачайте файл кнопкой."
+                            )
+                            log += (
+                                f"[skip] {dest.name} already exists "
+                                "(use -f / --force to overwrite)\n"
+                            )
+                        except OSError as exc:
+                            error = str(exc)
+                    if error:
+                        # Сохранение не удалось — это ошибка, а не «ok»
+                        # с пустым output: иначе файл выглядел бы
+                        # сохранённым. Скачать его по-прежнему можно.
+                        status = "fail"
+                        error = (
+                            f"{rel.as_posix()} не сохранён в папку "
+                            f"вывода: {error}. Скачайте файл кнопкой ⬇."
                         )
-                        log += (
-                            f"[skip] {dest.name} already exists "
-                            "(use -f / --force to overwrite)\n"
-                        )
-                    except OSError:
-                        out_path = None
                 elif (len(collected) < _MAX_ARCHIVE_FILES
                       and total_bytes + _utf8_len(full)
                       <= _MAX_ARCHIVE_BYTES):
@@ -721,6 +735,7 @@ async def _convert_archive(src: Path, opts: dict, label: str):
                 "status": status,
                 "log": log,
                 "note": note,
+                "error": error,
                 "warnings": res["warnings"],
                 "preview": preview,
                 "download_id": dl_id,

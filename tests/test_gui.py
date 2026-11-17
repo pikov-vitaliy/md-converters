@@ -851,7 +851,8 @@ def test_archive_outdir_mkdir_conflict_is_not_skip(client, tmp_path):
     """Занятый файлом путь — это ошибка записи, а не «уже есть».
 
     mkdir тоже кидает FileExistsError; в общем try он выдавался бы
-    за «.md не перезаписан» — даже с включённым force.
+    за «.md не перезаписан» — даже с включённым force. И не «ok»
+    с пустым output (c7): несохранённый файл выглядел сохранённым.
     """
     (tmp_path / "sub").write_text("я файл, а не папка", encoding="utf-8")
     buf = io.BytesIO()
@@ -867,9 +868,13 @@ def test_archive_outdir_mkdir_conflict_is_not_skip(client, tmp_path):
     )
     assert r.status_code == 200
     done = _done_events(r.text)[0]
-    assert done["status"] != "skip"
+    assert done["status"] == "fail"
+    assert "не сохранён в папку вывода" in done["error"]
     assert not done.get("note")
     assert done["output"] is None
+    # сам результат по-прежнему скачивается
+    got = client.get(f"/api/download?dl_id={done['download_id']}")
+    assert "FRESH" in got.text
 
 
 def test_zip_folder_keeps_subfolder_structure(client):
