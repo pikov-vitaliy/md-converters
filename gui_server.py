@@ -29,6 +29,7 @@ from urllib.parse import quote
 
 import uvicorn
 from fastapi import FastAPI, Form, Request, Response, UploadFile
+from fastapi.concurrency import run_in_threadpool
 from fastapi.responses import (
     HTMLResponse,
     JSONResponse,
@@ -485,7 +486,13 @@ async def _run_conversion(fn, arg, opts: dict) -> dict | None:
     None, если to_thread бросил исключение наружу.
     """
     async with _CONVERT_LOCK:
-        result = await asyncio.to_thread(fn, arg, opts)
+        # Поток не прервать: разрыв SSE отменял только ожидание, лок
+        # освобождался, а поток A ещё писал в перехваченный stdout —
+        # запрос B запускал второй перехват параллельно (вывод A в логе
+        # B, sys.stdout не восстановлен). run_in_threadpool откладывает
+        # отмену до конца потока (anyio, abandon_on_cancel=False), так
+        # что и временные файлы генераторы удаляют уже после работника.
+        result = await run_in_threadpool(fn, arg, opts)
         # last_target ставит ядро (convert_file/convert_url) —
         # точная цель записи, без угадывания по stem.
         result["md_path"] = opts.get("last_target")

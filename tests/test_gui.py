@@ -1082,3 +1082,102 @@ def test_bad_only_returns_400_zip(client):
     )
     assert r.status_code == 400
     assert "-pdf" in r.json()["error"]
+
+
+# --- Сырой ASGI: TestClient отдаёт тело одним сообщением и не умеет
+# рвать SSE посреди ответа, поэтому разрыв и «тело кусками» — так ---
+
+def _asgi_scope(path, content_type):
+    # spec_version 2.3 — как у uvicorn: StreamingResponse тогда слушает
+    # http.disconnect и отменяет генератор (на 2.4 этой ветки нет).
+    return {
+        "type": "http", "asgi": {"version": "3.0", "spec_version": "2.3"},
+        "http_version": "1.1", "method": "POST", "scheme": "http",
+        "path": path, "raw_path": path.encode(), "query_string": b"",
+        "root_path": "", "client": ("127.0.0.1", 50000),
+        "server": ("127.0.0.1", 8765),
+        "headers": [
+            (b"host", b"127.0.0.1:8765"),
+            (b"content-type", content_type.encode()),
+        ],
+    }
+
+
+def test_sse_disconnect_keeps_lock_until_worker_ends(monkeypatch):
+    """c4: разрыв SSE не отпускает _CONVERT_LOCK, пока поток жив.
+
+    Раньше отмена ожидания освобождала лок: запрос B стартовал при
+    работающем A, ловил вывод A в свой лог, sys.stdout оставался
+    чужим StringIO.
+    """
+    import asyncio
+    import sys
+    import threading
+
+    monkeypatch.setattr(gui_server, "_CONVERT_LOCK", asyncio.Lock())
+    a_started = threading.Event()
+    release_a = threading.Event()
+    b_started = threading.Event()
+
+    def fake_convert_url(url, opts):
+        if url.endswith("/a"):
+            a_started.set()
+            print("MARKER_A")
+            release_a.wait(10)
+            print("MARKER_A_END")
+        else:
+            b_started.set()
+        return "fail"
+
+    monkeypatch.setattr(gui_server.core, "convert_url", fake_convert_url)
+    real_stdout = sys.stdout
+
+    async def request(url, disconnect, sent):
+        body = {"done": False}
+
+        async def receive():
+            if not body["done"]:
+                body["done"] = True
+                return {"type": "http.request",
+                        "body": b"url=" + url.encode()}
+            await disconnect.wait()
+            return {"type": "http.disconnect"}
+
+        async def send(message):
+            sent.append(message)
+            if message.get("type") == "http.response.body" \
+                    and not message.get("more_body"):
+                disconnect.set()
+
+        await gui_server.app(
+            _asgi_scope("/api/convert/url",
+                        "application/x-www-form-urlencoded"),
+            receive, send,
+        )
+
+    async def scenario():
+        disc_a, disc_b = asyncio.Event(), asyncio.Event()
+        sent_a, sent_b = [], []
+        task_a = asyncio.create_task(
+            request("http://a.test/a", disc_a, sent_a))
+        assert await asyncio.to_thread(a_started.wait, 5)
+        disc_a.set()  # браузер закрыл вкладку посреди конвертации A
+        await asyncio.sleep(0.2)
+        task_b = asyncio.create_task(
+            request("http://b.test/b", disc_b, sent_b))
+        # пока поток A жив, B не должен начать конвертацию
+        early = await asyncio.to_thread(b_started.wait, 0.5)
+        release_a.set()
+        await asyncio.wait_for(task_a, 10)
+        await asyncio.wait_for(task_b, 10)
+        return early, sent_b
+
+    early, sent_b = asyncio.run(scenario())
+    assert early is False, "B стартовал, пока работал поток A"
+    assert b_started.is_set()
+    body_b = b"".join(
+        m.get("body", b"") for m in sent_b
+        if m.get("type") == "http.response.body"
+    ).decode("utf-8")
+    assert "MARKER_A" not in body_b
+    assert sys.stdout is real_stdout
