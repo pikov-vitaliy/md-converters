@@ -253,13 +253,13 @@ def test_convert_file_pdf_tables_off_skips_pdfplumber(tmp_path, monkeypatch):
 
 # --- реальный PDF: покрываем pdfplumber-glue (без моков) -------------------
 
-def _wrap_pdf(content: bytes) -> bytes:
+def _wrap_pdf(content: bytes, media: bytes = b"0 0 595 842") -> bytes:
     """Оборачивает поток содержимого в минимальный валидный PDF (1 стр.,
     шрифт Helvetica). Используется для side-by-side фикстуры."""
     objs = [
         b"<< /Type /Catalog /Pages 2 0 R >>",
         b"<< /Type /Pages /Kids [3 0 R] /Count 1 >>",
-        b"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 595 842] "
+        b"<< /Type /Page /Parent 2 0 R /MediaBox [%s] " % media +
         b"/Resources << /Font << /F1 5 0 R >> >> /Contents 4 0 R >>",
         b"<< /Length %d >>\nstream\n%s\nendstream" % (len(content), content),
         b"<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>",
@@ -1069,6 +1069,42 @@ def test_pdf_tables_result_keeps_text_beside_stepped_table(tmp_path):
     assert text.count("NOTE_OUTSIDE") == 1
     assert text.count("delta") == 1     # ячейки не продублированы
     assert "| alpha | 1 |" in text
+
+
+def test_pdf_tables_result_keeps_mixed_size_label_whole(tmp_path):
+    """Строка сбоку от таблицы из частей разного кегля на общей базовой
+    линии («LIMIT» 11 пт и «24 mg» 10 пт, база 716.9 при верхней линии
+    сетки 720) выводится целиком и один раз. По середине символа части
+    попадали в разные полосы: «LIMIT», затем таблица, затем «24 mg»."""
+    pytest.importorskip("pdfplumber")
+    pdf = tmp_path / "mixed.pdf"
+    pdf.write_bytes(_wrap_pdf(
+        _ruled_table(720)
+        + b"BT /F1 11 Tf 370 716.9 Td (LIMIT ) Tj "
+          b"/F1 10 Tf (24 mg) Tj ET\n"))
+
+    text = c._pdf_tables_result(pdf).text_content
+
+    assert "LIMIT 24 mg" in text
+    assert text.count("LIMIT") == 1 and text.count("24 mg") == 1
+
+
+def test_pdf_tables_result_keeps_text_on_offset_mediabox(tmp_path):
+    """Страница со смещённым MediaBox [0 -100 595 742]: в координатах
+    pdfplumber её низ 942 при высоте 842. Нижняя полоса шла до высоты,
+    и подписи у нижнего края (838..849 и целиком ниже 842) терялись."""
+    pytest.importorskip("pdfplumber")
+    pdf = tmp_path / "offset.pdf"
+    pdf.write_bytes(_wrap_pdf(
+        _ruled_table(620) + _text(72, -5, "OFFSET LABEL")
+        + _text(72, -95, "BOTTOM LABEL"),
+        media=b"0 -100 595 742"))
+
+    res = c._pdf_tables_result(pdf)
+
+    assert res is not None and res.pdf_tables == 1
+    assert res.text_content.count("OFFSET LABEL") == 1
+    assert res.text_content.count("BOTTOM LABEL") == 1
 
 
 def test_pdfium_fallback_strips_furniture_by_pages(tmp_path, monkeypatch,

@@ -1028,15 +1028,34 @@ def _outside_tables(page, boxes: list):
     return page.filter(keep)
 
 
-def _band_text(page, top0: float, top1: float) -> str:
-    """Текст полосы [top0; top1): символ входит в полосу по середине
-    своей высоты. Полосы стыкуются у верхних краёв таблиц, и символ,
-    задевающий стык (подпись сбоку у верхней линии сетки), иначе вошёл
-    бы в обе соседние полосы."""
+def _line_middles(page) -> dict:
+    """id символа → середина высоты его строки.
+
+    Строки собираются так же, как у `extract_text`: по `top` с допуском
+    3 пт. Полосе строка достаётся целиком: по середине символа части
+    строки разного кегля на общей базовой линии («LIMIT» 11 пт и «24
+    mg» 10 пт) попадали в разные полосы, и таблица разрывала строку."""
+    mids: dict = {}
+    for line in pdfplumber.utils.cluster_objects(page.chars, "top", 3):
+        mid = (min(ch["top"] for ch in line)
+               + max(ch["bottom"] for ch in line)) / 2
+        for ch in line:
+            mids[id(ch)] = mid
+    return mids
+
+
+def _band_text(page, top0: float, top1: float, mids: dict) -> str:
+    """Текст полосы [top0; top1): строка входит в полосу по середине
+    своей высоты (`_line_middles`). Полосы стыкуются у верхних краёв
+    таблиц, и строка, задевающая стык (подпись сбоку у верхней линии
+    сетки), иначе вошла бы в обе соседние полосы."""
     def inside(obj) -> bool:
         if obj.get("object_type") != "char":
             return True
-        return top0 <= (obj["top"] + obj["bottom"]) / 2 < top1
+        mid = mids.get(id(obj))
+        if mid is None:
+            mid = (obj["top"] + obj["bottom"]) / 2
+        return top0 <= mid < top1
     return _crop_text(page.filter(inside), top0, top1)
 
 
@@ -1115,15 +1134,20 @@ def _page_blocks(page) -> list:
     # (подпись справа, пометка слева), а символы самих таблиц в неё
     # теперь не попадают и не дублируются.
     outside = _outside_tables(page, cells)
+    mids = _line_middles(outside)
     blocks: list = []
-    cursor = 0.0
+    # Внешние края полос открыты: страницу ограничивает её настоящий
+    # bbox (`_crop_text`), а не 0 и page.height — при смещённом
+    # MediaBox ([0 -100 595 742]) низ страницы 942 при высоте 842, и
+    # подпись у нижнего края терялась.
+    cursor = float("-inf")
     for bbox, rows in emitted:
-        above = _band_text(outside, cursor, bbox[1])
+        above = _band_text(outside, cursor, bbox[1], mids)
         if above:
             blocks.append(("text", above))
         blocks.extend(_region_to_blocks(rows))
         cursor = max(cursor, bbox[1])
-    below = _band_text(outside, cursor, page.height)
+    below = _band_text(outside, cursor, float("inf"), mids)
     if below:
         blocks.append(("text", below))
     return blocks
