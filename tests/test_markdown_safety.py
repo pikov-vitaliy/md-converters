@@ -262,3 +262,64 @@ def test_xml_data_fence_keeps_whitespace_of_values(tmp_path):
     assert body("cdata") == f"```xml\n{cdata}\n```\n"
     assert body("cp1251") == f"```xml\n{cp1251}\n```\n"
     assert body("utf16") == f"```xml\n{cdata}\n```\n"
+
+
+def _convert_xml(tmp_path, files: dict) -> dict:
+    out = tmp_path / "out"
+    opts = {
+        "force": True, "frontmatter": False, "keep_images": False,
+        "unsafe_raw_markdown": False, "out_dir": out, "sandbox": False,
+        "scan": {".xml"}, "tool": "tomd", "planned": set(),
+    }
+    for name, data in files.items():
+        (tmp_path / name).write_bytes(data)
+        assert convert_to_md.convert_file(tmp_path / name, opts) == "ok"
+    return {name: (out / name.replace(".xml", ".md")).read_text(
+        encoding="utf-8") for name in files}
+
+
+def test_xml_data_fence_reads_utf16_without_bom(tmp_path):
+    # UTF-16 без BOM: порядок байтов — по началу «<?xml» (XML 1.0,
+    # приложение F). Раньше такой файл проходил как UTF-8 с NUL, и
+    # кириллица вычищалась вместе с ними: в ограде оставалось «<r></r>».
+    def xml(encoding):
+        return (f'<?xml version="1.0" encoding="{encoding}"?>\n'
+                "<r><![CDATA[АБВ  \n\n\n\nГД]]></r>")
+
+    bodies = _convert_xml(tmp_path, {
+        "le.xml": xml("UTF-16LE").encode("utf-16-le"),
+        "be.xml": xml("UTF-16BE").encode("utf-16-be"),
+        "bare.xml": "<r>АБВ</r>".encode("utf-16-le"),
+    })
+
+    assert bodies["le.xml"] == f"```xml\n{xml('UTF-16LE')}\n```\n"
+    assert bodies["be.xml"] == f"```xml\n{xml('UTF-16BE')}\n```\n"
+    # Без объявления порядок байтов не определить — текст MarkItDown.
+    assert "АБВ" in bodies["bare.xml"]
+
+
+def test_xml_data_fence_survives_invisible_characters(tmp_path):
+    # tidy() вырезает ZWSP; если длину ограды выбрать до этого, «```»,
+    # ZWSP и «`» внутри данных становятся «````» — длиннее любой
+    # видимой серии, — и закрывают ограду, а остаток выходит прозой.
+    # Ограда выбирается по уже очищенному тексту — данные остаются
+    # одним блоком кода.
+    xml = ("<r><![CDATA[пример:\n```\u200b`\n"
+           "Пояснение [x](data:field)\n```\n]]></r>")
+    body = _convert_xml(tmp_path, {"zwsp.xml": xml.encode("utf-8")})[
+        "zwsp.xml"]
+
+    markdown_it = pytest.importorskip("markdown_it")
+    html = markdown_it.MarkdownIt("commonmark").render(body)
+    assert html.count("<pre>") == 1 and "<p>" not in html
+    assert "Пояснение [x](data:field)" in html
+
+
+def test_tidy_data_fence_does_not_disable_sanitizing():
+    # Флаг data_fence бережёт только содержимое самой ограды: если
+    # данные её всё же закрыли, текст после неё санитизируется.
+    text = "```xml\n<r>\n```\nПояснение [x](javascript:alert(1)) data:x\n"
+
+    out = convert_to_md.tidy(text, keep_images=False, data_fence=True)
+
+    assert "javascript:" not in out and "data:x" not in out

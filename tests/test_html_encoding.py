@@ -120,3 +120,18 @@ def test_decode_html_labels_follow_whatwg():
     text, encoding = convert_to_md.decode_html_bytes(
         raw + b"\x81", http_charset="iso-8859-1")
     assert text == page + "\x81" and encoding == "windows-1252"
+
+
+def test_decode_single_byte_html_like_browser():
+    # Любая однобайтовая кодировка WHATWG читается до конца: незанятый
+    # 0x80..0x9F — U+0080..U+009F, прочий — U+FFFD. Раньше тайская
+    # страница с одним 0x81 уходила в угадывание и становилась koi8-r.
+    thai = "ราคา 20 บาท"
+    raw = b"<meta charset=tis-620><p>" + thai.encode("cp874")
+    text, encoding = convert_to_md.decode_html_bytes(raw + b"\x81\xdb</p>")
+    assert text == f"<meta charset=tis-620><p>{thai}\x81\ufffd</p>"
+    assert encoding == "windows-874"
+
+    text, encoding = convert_to_md.decode_html_bytes(
+        "Привет".encode("cp1251") + b"\x98", http_charset="windows-1251")
+    assert text == "Привет\x98" and encoding == "windows-1251"

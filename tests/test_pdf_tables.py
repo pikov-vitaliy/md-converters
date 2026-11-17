@@ -417,6 +417,35 @@ def test_pdf_table_cells_keep_literal_backticks(tmp_path):
     assert "<td>x\\`y</td>" in html
 
 
+def test_pdf_table_cells_keep_literal_markup(tmp_path):
+    # Без кода-в-кавычках ячейка разбиралась как Markdown: «`[x](y)`»
+    # давал ссылку, звёздочки и тильды пропадали в курсиве и
+    # зачёркивании. Литерал — вся встроенная разметка ячейки.
+    pytest.importorskip("pdfplumber")
+    src = tmp_path / "markup.pdf"
+    src.write_bytes(_ruled_pdf_with_cells([
+        ("Name", "Value"),
+        ("`[x](y)`", "1"),
+        ("a*b* _c_ ~~d~~", "2"),
+    ], b"/Encoding /WinAnsiEncoding "))
+    out = tmp_path / "out"
+    out.mkdir()
+    opts = _pdf_opts(out)
+    opts["sandbox"] = False
+    assert c.convert_file(src, opts) == "ok"
+    body = (out / "markup.md").read_text(encoding="utf-8")
+    assert "| \\`&#91;x&#93;(y)\\` | 1 |" in body
+    assert "| a\\*b\\* \\_c\\_ \\~\\~d\\~\\~ | 2 |" in body
+
+    markdown_it = pytest.importorskip("markdown_it")
+    html = markdown_it.MarkdownIt(
+        "commonmark", {"html": True}
+    ).enable(["table", "strikethrough"]).render(body)
+    assert "<td>`[x](y)`</td>" in html
+    assert "<td>a*b* _c_ ~~d~~</td>" in html
+    assert "<a " not in html and "<em>" not in html and "<s>" not in html
+
+
 def test_pdf_table_cells_escaped_after_cyrillic_repair(tmp_path, monkeypatch):
     # В сломанном шрифте «>» в ячейке — буква «о»: экранирование до
     # ремонта превратило бы «м>4C;59» в мусор вместо «модулей».

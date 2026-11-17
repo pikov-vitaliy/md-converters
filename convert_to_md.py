@@ -1488,26 +1488,36 @@ def _escape_html_text(value: str) -> str:
     return value.replace("<", "&lt;").replace(">", "&gt;")
 
 
-# Обратная кавычка в ячейке с предшествующими `\`: их удваиваем и
-# добавляем свою, иначе `\` экранировал бы уже не кавычку, а себя.
-_BACKTICK_RE = re.compile(r"(\\*)`")
+# Ячейка — литеральный текст, но без обратных кавычек-кода её
+# содержимое разбирается как Markdown: «`[x](y)`» стал бы ссылкой,
+# «`a*b*`» — курсивом без звёздочек. Поэтому литералом становится вся
+# встроенная разметка: ` * _ ~ — через `\`, скобки — сущностями
+# (`\[` санитизация ссылок приняла бы за начало ссылки и испортила).
+# `\` перед ASCII-пунктуацией (кроме нашей `\|`) удваивается, иначе он
+# экранировал бы следующий знак, а сам пропал.
+_CELL_BACKSLASH_RE = re.compile(r"\\(?=[!-/:-@\[-`{-~])(?!\|)")
+_CELL_MARKUP_RE = re.compile(r"[`*_~\[\]]")
+_CELL_MARKUP = {"[": "&#91;", "]": "&#93;"}
 
 
 def _escape_table_cell_text(line: str) -> str:
     line = _escape_html_text(line)
-    return _BACKTICK_RE.sub(lambda m: m.group(1) * 2 + "\\`", line)
+    line = _CELL_BACKSLASH_RE.sub(r"\\\\", line)
+    return _CELL_MARKUP_RE.sub(
+        lambda m: _CELL_MARKUP.get(m.group(), "\\" + m.group()), line)
 
 
 def _escape_table_rows(text: str) -> str:
-    """Экранирует HTML-символы и обратные кавычки в строках GFM-таблиц.
+    """Экранирует HTML-символы и разметку в строках GFM-таблиц.
 
     Ячейка PDF — литеральный текст: «<script>x</script>» санитизация
     вырезала целиком, а «List<T>» просмотрщик рендерил как «List».
     Обратные кавычки — тоже литерал: «`List<T>`» без экранирования
     становился кодом, а в коде сущности не раскрываются, и было видно
-    «List&lt;T&gt;». Вызывается ПОСЛЕ ремонта кириллицы: в сломанном
-    шрифте «<» и «>» — буквы «м» и «о», и раннее экранирование испортило
-    бы их ремонт.
+    «List&lt;T&gt;»; а раз кода больше нет, литералом становится и
+    прочая встроенная разметка. Вызывается ПОСЛЕ ремонта кириллицы: в
+    сломанном шрифте «<» и «>» — буквы «м» и «о», и раннее
+    экранирование испортило бы их ремонт.
     """
     return "\n".join(
         _escape_table_cell_text(ln) if _GFM_ROW_RE.match(ln) else ln
@@ -2587,6 +2597,35 @@ def _apply_outside_fences(text: str, fn) -> str:
     return "\n".join(out)
 
 
+def _normalize_controls(text: str) -> str:
+    """Переводы строк и управляющие символы — как их видит tidy().
+
+    Переводы строк — до разбора кода: с «\\r» на конце закрывающая
+    ограда не узнавалась, а одиночный «\\r» прятал границу строки от
+    правил кода и HTML-блоков, хотя просмотрщик видит там две строки."""
+    text = text.replace("\r\n", "\n").replace("\r", "\n")
+    text = _CTRL_TO_SPACE.sub(" ", text)
+    return _CTRL_DROP.sub("", text)
+
+
+def _is_single_fence(text: str) -> bool:
+    """Весь текст — одна ограда кода: первая строка её открывает, а
+    закрывает только последняя (по тем же правилам CommonMark, что и
+    _apply_outside_fences для ограды без отступа)."""
+    lines = text.split("\n")
+    opened = _FENCE_OPEN_RE.match(lines[0])
+    if not opened or opened.group("indent") or len(lines) < 2:
+        return False
+    run = opened.group("fence")
+    for index, line in enumerate(lines[1:], 1):
+        close = _FENCE_CLOSE_RE.match(line)
+        if (close and close.group("fence")[0] == run[0]
+                and len(close.group("fence")) >= len(run)
+                and _indent_width(close.group("indent")) <= 3):
+            return index == len(lines) - 1
+    return False
+
+
 def tidy(text: str, keep_images: bool, phantom_images: bool = False,
          safe_markdown: bool = True, data_fence: bool = False) -> str:
     """Прибирает вывод: чистит управляющие символы, конвертирует
@@ -2596,15 +2635,12 @@ def tidy(text: str, keep_images: bool, phantom_images: bool = False,
     сворачивание картинок и санитизация применяются только ВНЕ кода
     (ограды ```/~~~ и встроенный `код`), чтобы не искажать технический
     контент в примерах кода."""
-    # Переводы строк — до разбора кода: с «\r» на конце закрывающая
-    # ограда не узнавалась, а одиночный «\r» прятал границу строки от
-    # правил кода и HTML-блоков, хотя просмотрщик видит там две строки.
-    text = text.replace("\r\n", "\n").replace("\r", "\n")
-    text = _CTRL_TO_SPACE.sub(" ", text)
-    text = _CTRL_DROP.sub("", text)
-    if data_fence:
+    text = _normalize_controls(text)
+    if data_fence and _is_single_fence(text.strip("\n")):
         # Весь текст — ограда с JSON/XML (_fence_data): пробелы в концах
-        # строк и пустые строки внутри — значения, их не трогаем.
+        # строк и пустые строки внутри — значения, их не трогаем. Если
+        # данные всё же закрыли ограду раньше, текст после неё —
+        # обычная проза и проходит всю санитизацию ниже.
         return text.strip("\n") + "\n"
 
     def _transform_prose(seg: str) -> str:
@@ -2845,22 +2881,44 @@ def _html_encoding(label: str) -> str:
     return _WHATWG_LABELS.get(label.strip().lower(), label)
 
 
+# Однобайтовые кодировки WHATWG (имена кодеков Python). Браузер такую
+# страницу читает всегда: незанятый байт 0x80..0x9F — управляющий
+# U+0080..U+009F, прочий — U+FFFD. Кодек Python на нём падает, и
+# документ уходил в угадывание кодировки (тайский текст в windows-874
+# с одним 0x81 становился кашей koi8-r).
+_WHATWG_SINGLE_BYTE = frozenset(
+    codecs.lookup(name).name for name in (
+        "cp866", "iso8859-2", "iso8859-3", "iso8859-4", "iso8859-5",
+        "iso8859-6", "iso8859-7", "iso8859-8", "iso8859-10",
+        "iso8859-13", "iso8859-14", "iso8859-15", "iso8859-16",
+        "koi8-r", "koi8-u", "mac-roman", "mac-cyrillic", "cp874",
+        "cp1250", "cp1251", "cp1252", "cp1253", "cp1254", "cp1255",
+        "cp1256", "cp1257", "cp1258",
+    )
+)
+
+
 def _decode_html_label(raw: bytes, encoding: str) -> str | None:
-    """Декодирует по метке HTML. У windows-1252/1254 незанятые байты
-    (0x81, 0x8D…) по WHATWG — управляющие U+0081…: без этого страница
-    с таким байтом, прежде читавшаяся как latin-1, падала бы в эвристики
-    и могла стать кириллической кашей."""
-    if encoding in ("windows-1252", "windows-1254"):
-        return raw.decode(encoding, errors="whatwg-c1")
+    """Декодирует по метке HTML; однобайтовые кодировки — как браузер,
+    без отказа на незанятых байтах (см. _WHATWG_SINGLE_BYTE)."""
+    try:
+        name = codecs.lookup(encoding).name
+    except LookupError:
+        return None
+    if name in _WHATWG_SINGLE_BYTE:
+        return raw.decode(encoding, errors="whatwg-single-byte")
     return _decode_with(raw, encoding)
 
 
-def _c1_fallback(error: UnicodeDecodeError) -> tuple[str, int]:
+def _whatwg_single_byte(error: UnicodeDecodeError) -> tuple[str, int]:
     chunk = error.object[error.start:error.end]
-    return chunk.decode("latin-1"), error.end
+    text = "".join(
+        chr(byte) if 0x80 <= byte <= 0x9F else "\ufffd" for byte in chunk
+    )
+    return text, error.end
 
 
-codecs.register_error("whatwg-c1", _c1_fallback)
+codecs.register_error("whatwg-single-byte", _whatwg_single_byte)
 
 
 def decode_html_bytes(raw: bytes,
@@ -2950,18 +3008,30 @@ _XML_DECL_ENCODING = re.compile(
 
 
 def _decode_data(raw: bytes) -> str | None:
-    """Исходник JSON/XML так, как его читает парсер: BOM, затем
-    encoding из объявления XML, иначе UTF-8. None — не декодируется."""
-    for bom, encoding in ((b"\xef\xbb\xbf", "utf-8-sig"),
-                          (b"\xff\xfe\x00\x00", "utf-32"),
-                          (b"\x00\x00\xfe\xff", "utf-32"),
-                          (b"\xff\xfe", "utf-16"), (b"\xfe\xff", "utf-16")):
-        if raw.startswith(bom):
-            return _decode_with(raw, encoding)
-    declared = _XML_DECL_ENCODING.match(raw)
-    if declared:
-        return _decode_with(raw, declared.group(1).decode("ascii"))
-    return _decode_with(raw, "utf-8")
+    """Исходник JSON/XML так, как его читает парсер: BOM, порядок байтов
+    по началу «<?xml» (XML 1.0, приложение F: UTF-16/32 без BOM), затем
+    encoding из объявления, иначе UTF-8. None — не декодируется."""
+    for start, encoding in ((b"\xef\xbb\xbf", "utf-8-sig"),
+                            (b"\xff\xfe\x00\x00", "utf-32"),
+                            (b"\x00\x00\xfe\xff", "utf-32"),
+                            (b"\xff\xfe", "utf-16"), (b"\xfe\xff", "utf-16"),
+                            (b"<\0\0\0?\0\0\0", "utf-32-le"),
+                            (b"\0\0\0<\0\0\0?", "utf-32-be"),
+                            (b"<\0?\0x\0", "utf-16-le"),
+                            (b"\0<\0?\0x", "utf-16-be")):
+        if raw.startswith(start):
+            text = _decode_with(raw, encoding)
+            break
+    else:
+        declared = _XML_DECL_ENCODING.match(raw)
+        encoding = declared.group(1).decode("ascii") if declared else "utf-8"
+        text = _decode_with(raw, encoding)
+    # NUL в JSON/XML недопустим: он значит, что кодировка угадана неверно
+    # (UTF-16 без «<?xml» формально проходит как UTF-8, и кириллица
+    # вычищалась вместе с NUL). Тогда — текст MarkItDown.
+    if text is None or "\0" in text:
+        return None
+    return text
 
 
 def _fence_data(result, language: str, raw: bytes | None = None):
@@ -2978,13 +3048,19 @@ def _fence_data(result, language: str, raw: bytes | None = None):
     пробелы в концах строк и сжимает пустые строки, а в значениях
     (CDATA, xml:space) это данные. Не декодируется — текст MarkItDown.
     tidy() внутри такой ограды пробелы тоже не трогает (data_fence).
+
+    Управляющие символы нормализуются ДО выбора длины ограды: tidy()
+    всё равно вырежет, например, ZWSP, и две кавычки, ZWSP и третья
+    кавычка внутри данных стали бы «```», закрыли бы ограду, а остаток
+    вышел бы прозой мимо санитизации.
     """
     text = result.text_content.strip("\n")
     if language == "xml" and not text.lstrip().startswith("<"):
         return result
     source = _decode_data(raw) if raw is not None else None
     if source is not None:
-        text = source.strip("\r\n")
+        text = source
+    text = _normalize_controls(text).strip("\n")
     ticks = max((len(run) for run in re.findall(r"`+", text)), default=0)
     fence = "`" * max(3, ticks + 1)
     fenced = _TextResult(result, f"{fence}{language}\n{text}\n{fence}\n")
