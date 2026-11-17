@@ -66,6 +66,7 @@ import socket
 import subprocess
 import sys
 import tempfile
+import unicodedata
 import warnings
 from datetime import date
 from pathlib import Path
@@ -713,13 +714,24 @@ def _script(cp: int) -> str:
 
 
 def _resolve_glyphs(embedded, gids: dict, system_font) -> dict:
-    """cid -> множество кодов Unicode по совпадению контура."""
+    """cid -> (коды Unicode с тем же контуром, коды на том же номере
+    глифа в системном шрифте, если они среди кандидатов)."""
     reverse: dict = {}
     for cp, name in system_font.getBestCmap().items():
         reverse.setdefault(system_font.getGlyphID(name), set()).add(cp)
     sys_order = system_font.getGlyphOrder()
     emb_order = embedded.getGlyphOrder()
-    by_shape = None
+    # Кандидаты — ВСЕ буквы системного шрифта с тем же контуром и шириной.
+    # Номер глифа не доказательство: в другой версии шрифта на том же
+    # номере может стоять латинская A с контуром русской А (ревью Codex).
+    by_shape: dict = {}
+    for sgid, codes in reverse.items():
+        try:
+            skey = _glyph_key(system_font, sys_order[sgid])
+        except Exception:
+            continue
+        if skey is not None:
+            by_shape.setdefault(skey, set()).update(codes)
     found = {}
     for cid, gid in gids.items():
         if gid >= len(emb_order):
@@ -730,45 +742,53 @@ def _resolve_glyphs(embedded, gids: dict, system_font) -> dict:
             continue
         if key is None:
             continue
-        cps = None
-        # Подмножество обычно сохраняет номера глифов: тот же номер и тот
-        # же контур — буква определена без двусмысленности.
-        if gid < len(sys_order) and gid in reverse:
-            try:
-                if _glyph_key(system_font, sys_order[gid]) == key:
-                    cps = reverse[gid]
-            except Exception:
-                cps = None
-        if cps is None:
-            if by_shape is None:
-                by_shape = {}
-                for sgid, codes in reverse.items():
-                    try:
-                        skey = _glyph_key(system_font, sys_order[sgid])
-                    except Exception:
-                        continue
-                    if skey is not None:
-                        by_shape.setdefault(skey, set()).update(codes)
-            cps = by_shape.get(key)
+        cps = {cp for cp in by_shape.get(key, ()) if cp >= 0x20}
         if cps:
-            found[cid] = {cp for cp in cps if cp >= 0x20}
-    return {cid: cps for cid, cps in found.items() if cps}
+            # Тот же номер глифа — подсказка ВЫБОРА среди двойников по
+            # контуру (‒ и – в Times), но не доказательство сам по себе.
+            same = (reverse.get(gid, set()) & cps
+                    if gid < len(sys_order) else set())
+            found[cid] = (cps, same)
+    return found
 
 
-def _choose_codepoints(found: dict, current: dict) -> dict:
-    """Одна буква на глиф. Двойники по контуру (латинская A и русская А
-    в одном начертании) решаются письменностью шрифта: берётся та, что
-    у глифов без двусмысленности, а при равенстве — прежняя карта."""
+def _choose_codepoints(found: dict, current: dict, own: dict) -> dict:
+    """Одна буква на глиф; доказательства по старшинству (ревью Codex):
+    1) многосимвольное значение карты («ffi», «1/2») — сознательное
+       раскрытие, не трогаем;
+    2) собственная Unicode-карта встроенного шрифта (own: cid -> коды);
+    3) прежнее значение, если оно среди двойников по контуру или
+       эквивалентно им (NFKC: «fi» для ﬁ);
+    4) тот же номер глифа в системном шрифте — среди двойников;
+    5) письменность глифов без двусмысленности (кириллица в русском
+       тексте), затем меньший код."""
     votes: dict = {}
-    for cps in found.values():
+    for cps, _same in found.values():
         if len(cps) == 1:
             s = _script(next(iter(cps)))
             votes[s] = votes.get(s, 0) + 1
     chosen = {}
-    for cid, cps in found.items():
+    for cid, (cps, same) in found.items():
         old = current.get(cid)
-        if old is not None and len(old) == 1 and ord(old) in cps:
+        if old is not None and len(old) > 1:
             chosen[cid] = old
+            continue
+        hint = own.get(cid, set())
+        if hint:
+            pick = (hint & cps) or hint
+            keep = old is not None and ord(old) in pick
+            chosen[cid] = old if keep else chr(min(pick))
+            continue
+        if old is not None and any(
+            old == chr(cp)
+            or unicodedata.normalize("NFKC", chr(cp))
+            == unicodedata.normalize("NFKC", old)
+            for cp in cps
+        ):
+            chosen[cid] = old
+            continue
+        if same:
+            chosen[cid] = chr(min(same))
             continue
         ranked = sorted(cps, key=lambda cp: (-votes.get(_script(cp), 0), cp))
         chosen[cid] = chr(ranked[0])
@@ -832,6 +852,13 @@ def _fix_type0_font(font, writer) -> int:
     from pypdf.generic import NameObject, StreamObject
     if font.get("/Subtype") != "/Type0" or "/ToUnicode" not in font:
         return 0
+    # Ключи ToUnicode — коды символов; CID они равны только при Identity.
+    # Другая кодировка (CMap «код -> CID») переставила бы буквы.
+    encoding = font.get("/Encoding")
+    if hasattr(encoding, "get_object"):  # бывает косвенной ссылкой
+        encoding = encoding.get_object()
+    if str(encoding) not in ("/Identity-H", "/Identity-V"):
+        return 0
     desc = font["/DescendantFonts"][0].get_object()
     if desc.get("/Subtype") != "/CIDFontType2":
         return 0
@@ -865,7 +892,13 @@ def _fix_type0_font(font, writer) -> int:
             best = found
     if not best:
         return 0
-    chosen = _choose_codepoints(best, current)
+    own: dict = {}
+    if "cmap" in embedded:  # у подмножества шрифта своей карты обычно нет
+        by_gid: dict = {}
+        for cp, name in (embedded.getBestCmap() or {}).items():
+            by_gid.setdefault(embedded.getGlyphID(name), set()).add(cp)
+        own = {cid: by_gid[gid] for cid, gid in gids.items() if gid in by_gid}
+    chosen = _choose_codepoints(best, current, own)
     wrong = {cid: ch for cid, ch in chosen.items() if current.get(cid) != ch}
     # Несколько расхождений бывают и в исправном PDF (лигатуры, двойники):
     # чиним, только если карта неверна у заметной доли глифов.
@@ -896,8 +929,12 @@ def _pdf_glyph_fixed_copy(path: Path) -> tuple[Path, int] | None:
             return None
         folder = Path(tempfile.mkdtemp(prefix="md-converters-pdf-"))
         out = folder / path.name
-        with open(out, "wb") as handle:
-            writer.write(handle)
+        try:
+            with open(out, "wb") as handle:
+                writer.write(handle)
+        except Exception:
+            shutil.rmtree(folder, ignore_errors=True)
+            raise
         return out, fixed
     except Exception:
         return None

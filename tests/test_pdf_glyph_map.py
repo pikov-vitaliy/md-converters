@@ -18,22 +18,29 @@ LETTERS = {"uni043C": 0x043C, "uni0438": 0x0438, "uni0440": 0x0440}
 WORD = [1, 2, 3] * 6  # «мирмир…», CID = GID
 
 
-def _font_bytes(family="MdcTestSerif"):
-    order = [".notdef"] + list(LETTERS)
+def _font_bytes(family="MdcTestSerif", glyphs=None):
+    """glyphs: [(имя глифа, код Unicode, номер формы)]; одинаковый номер
+    формы — одинаковый контур (двойники вроде латинской A и русской А)."""
+    if glyphs is None:
+        glyphs = [(n, cp, i) for i, (n, cp) in enumerate(LETTERS.items(), 1)]
+    order = [".notdef"] + [g[0] for g in glyphs]
     fb = FontBuilder(1000, isTTF=True)
     fb.setupGlyphOrder(order)
-    fb.setupCharacterMap(dict((cp, n) for n, cp in LETTERS.items()))
-    glyphs = {}
-    for i, name in enumerate(order):
+    fb.setupCharacterMap({cp: n for n, cp, _ in glyphs})
+    shapes = {".notdef": 0}
+    shapes.update({n: k for n, _, k in glyphs})
+    outlines = {}
+    for name in order:
         pen = TTGlyphPen(None)
-        if i:  # у каждой буквы свой прямоугольник — свой контур
+        k = shapes[name]
+        if k:  # у каждой формы свой прямоугольник — свой контур
             pen.moveTo((50, 0))
-            pen.lineTo((50, 200 + 100 * i))
-            pen.lineTo((400 + 50 * i, 200 + 100 * i))
-            pen.lineTo((400 + 50 * i, 0))
+            pen.lineTo((50, 200 + 100 * k))
+            pen.lineTo((400 + 50 * k, 200 + 100 * k))
+            pen.lineTo((400 + 50 * k, 0))
             pen.closePath()
-        glyphs[name] = pen.glyph()
-    fb.setupGlyf(glyphs)
+        outlines[name] = pen.glyph()
+    fb.setupGlyf(outlines)
     fb.setupHorizontalMetrics({n: (600, 50) for n in order})
     fb.setupHorizontalHeader(ascent=800, descent=-200)
     fb.setupNameTable({"familyName": family, "styleName": "Regular"})
@@ -57,8 +64,9 @@ def _tounicode(mapping):
     ).encode("ascii")
 
 
-def _pdf(path, font, tounicode):
-    text = "".join(f"{cid:04X}" for cid in WORD)
+def _pdf(path, font, tounicode, encoding=b"/Identity-H", cids=None,
+         extra=()):
+    text = "".join(f"{cid:04X}" for cid in (cids or WORD))
     content = f"BT /F1 24 Tf 72 700 Td <{text}> Tj ET".encode("ascii")
     objs = [
         b"<< /Type /Catalog /Pages 2 0 R >>",
@@ -66,7 +74,7 @@ def _pdf(path, font, tounicode):
         b"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 595 842] "
         b"/Resources << /Font << /F1 4 0 R >> >> /Contents 5 0 R >>",
         b"<< /Type /Font /Subtype /Type0 /BaseFont /ABCDEF+MdcTestSerif "
-        b"/Encoding /Identity-H /DescendantFonts [6 0 R] "
+        b"/Encoding " + encoding + b" /DescendantFonts [6 0 R] "
         b"/ToUnicode 8 0 R >>",
         None,  # 5: содержимое
         b"<< /Type /Font /Subtype /CIDFontType2 "
@@ -79,6 +87,7 @@ def _pdf(path, font, tounicode):
         b"/FontFile2 9 0 R >>",
         None,  # 8: ToUnicode
         None,  # 9: шрифт
+        *extra,  # 10…: доп. объекты теста
     ]
     streams = {5: content, 8: tounicode, 9: zlib.compress(font)}
     out = bytearray(b"%PDF-1.4\n")
@@ -184,3 +193,152 @@ def test_other_family_installed_is_not_used(tmp_path, monkeypatch):
     monkeypatch.setattr(c, "_SYSTEM_FONTS", None)
     src = _pdf(tmp_path / "doc.pdf", _font_bytes(), _tounicode(BROKEN))
     assert c._pdf_glyph_fixed_copy(src) is None
+
+
+def _install(tmp_path, monkeypatch, font):
+    folder = tmp_path / "fonts"
+    folder.mkdir()
+    (folder / "sys.ttf").write_bytes(font)
+    monkeypatch.setenv("MD_CONVERTERS_FONT_DIRS", str(folder))
+    monkeypatch.setattr(c, "_SYSTEM_FONTS", None)
+    monkeypatch.setattr(c, "_pdf_glyph_fix_needed", lambda path: True)
+
+
+# Ревью Codex (круг E): три способа испортить ИСПРАВНЫЙ PDF.
+
+def test_same_gid_other_letter_does_not_replace(tmp_path, monkeypatch):
+    # Латинские ABC и русские АВС одной формы; в системном шрифте на
+    # номерах 1-3 латиница, во встроенном — кириллица. Верная карта
+    # (кириллица) не должна смениться латиницей.
+    latin = [("A", 0x41, 1), ("B", 0x42, 2), ("C", 0x43, 3)]
+    cyr = [("uni0410", 0x410, 1), ("uni0412", 0x412, 2),
+           ("uni0421", 0x421, 3)]
+    _install(tmp_path, monkeypatch, _font_bytes(glyphs=latin + cyr))
+    src = _pdf(tmp_path / "doc.pdf", _font_bytes(glyphs=cyr + latin),
+               _tounicode({1: "А", 2: "В", 3: "С"}))
+    assert c._pdf_glyph_fixed_copy(src) is None
+
+
+def test_non_identity_encoding_left_alone(tmp_path, monkeypatch):
+    # Коды ToUnicode равны CID только при Identity-H/V.
+    _install(tmp_path, monkeypatch, _font_bytes())
+    src = _pdf(tmp_path / "doc.pdf", _font_bytes(), _tounicode(BROKEN),
+               encoding=b"/UniGB-UCS2-H")
+    assert c._pdf_glyph_fixed_copy(src) is None
+
+
+def test_ligature_expansions_kept(tmp_path, monkeypatch):
+    # Верное раскрытие «ffi» для глифа ﬃ — не ошибка карты.
+    ligs = [("uniFB03", 0xFB03, 1), ("uniFB01", 0xFB01, 2),
+            ("uniFB00", 0xFB00, 3)]
+    _install(tmp_path, monkeypatch, _font_bytes(glyphs=ligs))
+    src = _pdf(tmp_path / "doc.pdf", _font_bytes(glyphs=ligs),
+               _tounicode_multi({1: "ffi", 2: "fi", 3: "ff"}))
+    assert c._pdf_glyph_fixed_copy(src) is None
+
+
+def test_failed_write_leaves_no_temp(tmp_path, fonts, monkeypatch):
+    import pypdf
+    made = []
+
+    def mkdtemp(prefix=""):
+        made.append(tmp_path / f"{prefix}{len(made)}")
+        made[-1].mkdir()
+        return str(made[-1])
+
+    def broken_write(self, stream):
+        stream.write(b"%PDF-")
+        raise OSError("диск заполнен")
+
+    monkeypatch.setattr(c.tempfile, "mkdtemp", mkdtemp)
+    monkeypatch.setattr(pypdf.PdfWriter, "write", broken_write)
+    src = _pdf(tmp_path / "doc.pdf", _font_bytes(), _tounicode(BROKEN))
+    assert c._pdf_glyph_fixed_copy(src) is None
+    assert made and not any(p.exists() for p in made)
+
+
+def _tounicode_multi(mapping):
+    body = "\n".join(
+        f"<{cid:04X}> <{text.encode('utf-16-be').hex().upper()}>"
+        for cid, text in mapping.items())
+    return (
+        "/CIDInit /ProcSet findresource begin 12 dict begin begincmap\n"
+        "/CMapName /T def /CMapType 2 def\n"
+        "1 begincodespacerange <0000> <FFFF> endcodespacerange\n"
+        f"{len(mapping)} beginbfchar\n{body}\nendbfchar\n"
+        "endcmap CMapName currentdict /CMap defineresource pop end end"
+    ).encode("ascii")
+
+
+def _no_cmap(font_bytes):
+    """Подмножество шрифта в PDF обычно без своей Unicode-карты."""
+    import io
+
+    from fontTools.ttLib import TTFont
+    font = TTFont(io.BytesIO(font_bytes))
+    del font["cmap"]
+    buf = io.BytesIO()
+    font.save(buf)
+    return buf.getvalue()
+
+
+def _fixed_text(src):
+    fixed = c._pdf_glyph_fixed_copy(src)
+    assert fixed is not None
+    path, _count = fixed
+    try:
+        return _text(path)
+    finally:
+        import shutil
+        shutil.rmtree(path.parent, ignore_errors=True)
+
+
+MIR = [("uni043C", 0x43C, 4), ("uni0438", 0x438, 5), ("uni0440", 0x440, 6)]
+
+
+# Ревью Codex (круг E2): выбор одной буквы среди двойников по контуру.
+
+def test_indirect_identity_encoding_still_fixed(tmp_path, fonts):
+    src = _pdf(tmp_path / "doc.pdf", _font_bytes(), _tounicode(BROKEN),
+               encoding=b"10 0 R", extra=[b"/Identity-H"])
+    assert "мирмир" in _fixed_text(src)
+
+
+def test_embedded_cmap_beats_wrong_homoglyph(tmp_path, monkeypatch):
+    # Битая карта даёт латинские ABC для глифов русских АВС (тот же
+    # контур). Встроенный шрифт со своей картой говорит: кириллица.
+    latin = [("A", 0x41, 1), ("B", 0x42, 2), ("C", 0x43, 3)]
+    cyr = [("uni0410", 0x410, 1), ("uni0412", 0x412, 2),
+           ("uni0421", 0x421, 3)]
+    _install(tmp_path, monkeypatch, _font_bytes(glyphs=latin + cyr + MIR))
+    broken = {1: "A", 2: "B", 3: "C", 4: "\x14", 5: "\x15", 6: "\x16"}
+    src = _pdf(tmp_path / "doc.pdf", _font_bytes(glyphs=cyr + MIR + latin),
+               _tounicode(broken), cids=[1, 2, 3, 4, 5, 6] * 3)
+    text = _fixed_text(src)
+    assert "АВСмир" in text and "ABC" not in text
+
+
+def test_same_gid_breaks_tie_between_twins(tmp_path, monkeypatch):
+    # ‒ (U+2012) и – (U+2013) одного контура; подмножество без своей
+    # карты, номера глифов сохранены. Нужен знак с того же номера.
+    glyphs = [("figuredash", 0x2012, 1), ("endash", 0x2013, 1)] + MIR
+    _install(tmp_path, monkeypatch, _font_bytes(glyphs=glyphs))
+    broken = {2: "3", 3: "\x14", 4: "\x15", 5: "\x16"}
+    src = _pdf(tmp_path / "doc.pdf", _no_cmap(_font_bytes(glyphs=glyphs)),
+               _tounicode(broken), cids=[3, 4, 5, 2] * 4)
+    text = _fixed_text(src)
+    assert "мир–" in text and "‒" not in text
+
+
+def test_multichar_values_kept(tmp_path, monkeypatch):
+    # «1/2» для глифа ½ — сознательное раскрытие: поиск «1/2» должен
+    # находить значение и после ремонта соседних букв.
+    glyphs = [("onehalf", 0xBD, 1)] + MIR
+    _install(tmp_path, monkeypatch, _font_bytes(glyphs=glyphs))
+    mapping = {1: "1/2", 2: "\x14", 3: "\x15", 4: "\x16"}
+    src = _pdf(tmp_path / "doc.pdf", _font_bytes(glyphs=glyphs),
+               _tounicode_multi(mapping), cids=[1, 2, 3, 4] * 4)
+    text = _fixed_text(src)
+    assert "1/2мир" in text and "½" not in text
+
+
