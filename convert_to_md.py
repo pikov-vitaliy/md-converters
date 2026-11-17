@@ -1003,6 +1003,23 @@ def _ranges_overlap(a0: float, a1: float, b0: float, b1: float) -> bool:
     return a0 < b1 and b0 < a1
 
 
+def _outside_tables(page, boxes: list):
+    """Страница без символов принятых таблиц.
+
+    Символ относится к таблице по своей середине — тем же правилом
+    pdfplumber раскладывает символы по ячейкам. Поэтому ни один символ
+    не попадает и в таблицу, и в текст, а текст сбоку от таблицы (на её
+    высоте, слева или справа) остаётся в полосах `_crop_text`."""
+    def keep(obj) -> bool:
+        if obj.get("object_type") != "char":
+            return True
+        cx = (obj["x0"] + obj["x1"]) / 2
+        cy = (obj["top"] + obj["bottom"]) / 2
+        return not any(b[0] <= cx < b[2] and b[1] <= cy < b[3]
+                       for b in boxes)
+    return page.filter(keep)
+
+
 def _region_to_blocks(rows: list) -> list:
     """Сегментирует строки региона-таблицы в блоки ("table", rows) /
     ("text", str): псевдо-таблицы из прозы демотятся в текст."""
@@ -1050,15 +1067,14 @@ def _page_blocks(page) -> list:
         return [("text", text)] if text else []
 
     regions.sort(key=lambda r: r[0][1])
-    blocks: list = []
     cursor = 0.0
     processed: list = []  # bbox уже выведенных регионов
+    emitted: list = []
     for bbox, rows in regions:
         x0, top, x1, bottom = bbox[0], bbox[1], bbox[2], bbox[3]
         if top < cursor - 1:  # перекрытие по вертикали с предыдущим
             # Вложение/дубль (пересечение и по X) — пропускаем; таблицы
-            # рядом по горизонтали (side-by-side) — выводим без band-текста,
-            # чтобы не потерять контент (M-PDF-02).
+            # рядом по горизонтали (side-by-side) выводим (M-PDF-02).
             nested = any(
                 _ranges_overlap(top, bottom, b[1], b[3])
                 and _ranges_overlap(x0, x1, b[0], b[2])
@@ -1066,16 +1082,26 @@ def _page_blocks(page) -> list:
             )
             if nested:
                 continue
-            blocks.extend(_region_to_blocks(rows))
-            processed.append(bbox)
-            continue
-        above = _crop_text(page, cursor, top)
+        else:
+            cursor = max(cursor, bottom)
+        processed.append(bbox)
+        emitted.append((bbox, rows))
+
+    # Полосы текста режутся со страницы БЕЗ символов таблиц, и каждая
+    # идёт от верха предыдущей таблицы, а не от её низа: полоса на всю
+    # ширину страницы между таблицами теряла текст сбоку от таблицы
+    # (подпись справа, пометка слева), а символы самих таблиц в неё
+    # теперь не попадают и не дублируются.
+    outside = _outside_tables(page, processed)
+    blocks: list = []
+    cursor = 0.0
+    for bbox, rows in emitted:
+        above = _crop_text(outside, cursor, bbox[1])
         if above:
             blocks.append(("text", above))
         blocks.extend(_region_to_blocks(rows))
-        processed.append(bbox)
-        cursor = max(cursor, bottom)
-    below = _crop_text(page, cursor, page.height)
+        cursor = max(cursor, bbox[1])
+    below = _crop_text(outside, cursor, page.height)
     if below:
         blocks.append(("text", below))
     return blocks

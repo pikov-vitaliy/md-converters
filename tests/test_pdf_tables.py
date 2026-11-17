@@ -778,3 +778,48 @@ def test_strip_pdf_furniture_keeps_pure_punctuation_lines():
 
     assert kept.count("}") == 12          # код цел
     assert "ГОСТ Р 00000—2024" not in kept  # колонтитул срезан
+
+# --- колонтитулы по зонам страниц и текст сбоку от таблицы ---------------
+
+def _text(x: int, y: int, s: str) -> bytes:
+    lit = s.encode().replace(b"(", b"\\(").replace(b")", b"\\)")
+    return b"BT /F1 11 Tf %d %d Td (%s) Tj ET\n" % (x, y, lit)
+
+
+def _ruled_table(top: int) -> bytes:
+    """Разлинованная таблица 2x3 (x 100..340), верхний край на `top`."""
+    out = [_text(105, top - 15, "Name"), _text(225, top - 15, "Value"),
+           _text(105, top - 35, "alpha"), _text(225, top - 35, "1"),
+           _text(105, top - 55, "beta"), _text(225, top - 55, "2"),
+           b"0.5 w\n"]
+    for x in (100, 220, 340):
+        out.append(b"%d %d m %d %d l S\n" % (x, top - 60, x, top))
+    for y in (top, top - 20, top - 40, top - 60):
+        out.append(b"100 %d m 340 %d l S\n" % (y, y))
+    return b"".join(out)
+
+
+def test_pdf_tables_result_keeps_text_beside_table(tmp_path):
+    """Текст сбоку от таблицы (на её высоте, слева или справа) не
+    теряется: раньше извлекались только полосы выше и ниже таблицы на
+    всю ширину страницы. Символы самой таблицы в текст не попадают."""
+    pytest.importorskip("pdfplumber")
+    pdf = tmp_path / "side.pdf"
+    pdf.write_bytes(_wrap_pdf(
+        _text(72, 780, "Text above the table")
+        + _ruled_table(720)
+        + _text(20, 685, "LEFT_NOTE")
+        + _text(370, 685, "SIDE_NOTE_KEEP")
+        + _text(72, 600, "Text below the table")))
+
+    res = c._pdf_tables_result(pdf)
+
+    assert res is not None and res.pdf_tables == 1
+    text = res.text_content
+    assert "SIDE_NOTE_KEEP" in text
+    assert "LEFT_NOTE" in text
+    assert "| alpha | 1 |" in text
+    assert text.count("alpha") == 1     # таблица не продублирована
+    assert text.index("Text above") < text.index("| Name")
+    assert text.index("| beta") < text.index("Text below")
+
