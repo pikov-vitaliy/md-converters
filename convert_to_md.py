@@ -67,6 +67,7 @@ import sys
 import tempfile
 import warnings
 from datetime import date
+from email.message import Message
 from pathlib import Path
 from urllib.parse import unquote, urljoin, urlparse
 
@@ -2082,8 +2083,13 @@ def _best_cyrillic_decode(raw: bytes) -> tuple[str, str] | None:
     return None
 
 
-def decode_html_bytes(raw: bytes) -> tuple[str, str]:
-    """Декодирует HTML с приоритетом BOM/meta и русскоязычных кодировок."""
+def decode_html_bytes(raw: bytes,
+                      http_charset: str | None = None) -> tuple[str, str]:
+    """Декодирует HTML с приоритетом BOM/meta и русскоязычных кодировок.
+
+    http_charset — кодировка из заголовка Content-Type (HTML по URL). По
+    HTML-стандарту она важнее <meta>, но уступает BOM — так читает и
+    браузер."""
     if raw.startswith(b"\xef\xbb\xbf"):
         text = _decode_with(raw, "utf-8-sig")
         if text is not None:
@@ -2098,6 +2104,11 @@ def decode_html_bytes(raw: bytes) -> tuple[str, str]:
         text = _decode_with(raw, "utf-16")
         if text is not None:
             return text, "utf-16"
+
+    if http_charset:
+        text = _decode_with(raw, http_charset)
+        if text is not None:
+            return text, http_charset
 
     declared = _meta_charset(raw)
     if declared:
@@ -2268,7 +2279,8 @@ def _read_limited_response(response, max_bytes: int) -> bytes:
 def _download_url(url: str, timeout: float, max_bytes: int,
                   allow_private: bool,
                   verify_ssl: bool = True
-                  ) -> tuple[bytes, str, str | None]:
+                  ) -> tuple[bytes, str, str | None, str | None]:
+    """(тело, итоговый URL, расширение пути, заголовок Content-Type)."""
     try:
         import requests
     except ImportError as exc:
@@ -2312,7 +2324,8 @@ def _download_url(url: str, timeout: float, max_bytes: int,
                 _check_url_allowed(final_url, allow_private)
                 data = _read_limited_response(response, max_bytes)
                 suffix = Path(urlparse(final_url).path).suffix or None
-                return data, final_url, suffix
+                content_type = response.headers.get("content-type")
+                return data, final_url, suffix, content_type
             finally:
                 response.close()
         raise ValueError("too many redirects")
@@ -2320,19 +2333,50 @@ def _download_url(url: str, timeout: float, max_bytes: int,
         session.close()
 
 
+def _content_type(header: str | None) -> tuple[str | None, str | None]:
+    """(MIME-тип, charset) из заголовка Content-Type."""
+    if not header:
+        return None, None
+    message = Message()
+    message["content-type"] = header
+    return message.get_content_type(), message.get_content_charset()
+
+
 def _convert_url_data(url: str, opts: dict) -> tuple:
-    data, final_url, suffix = _download_url(
+    data, final_url, suffix, content_type = _download_url(
         url,
         timeout=opts["url_timeout"],
         max_bytes=opts["max_url_bytes"],
         allow_private=opts["allow_private_url"],
         verify_ssl=opts.get("verify_ssl", True),
     )
-    result = _md().convert_stream(
-        io.BytesIO(data),
-        file_extension=suffix,
-        url=final_url,
-    )
+    mimetype, charset = _content_type(content_type)
+    if mimetype:
+        is_html = mimetype in ("text/html", "application/xhtml+xml")
+    else:
+        is_html = (suffix or "").lower() in (".html", ".htm")
+    if is_html and (charset or _decode_with(data, "utf-8") is None):
+        # Кодировка из заголовка до MarkItDown не доходила: он угадывал
+        # её по байтам, и страница в windows-1251 становилась кашей
+        # («Ďđčâĺň»). Декодируем как локальный HTML (BOM, затем
+        # заголовок, затем <meta>) и отдаём UTF-8 с явной кодировкой.
+        text, _ = decode_html_bytes(data, http_charset=charset)
+        md = _md()
+        from markitdown import StreamInfo
+        result = md.convert_stream(
+            io.BytesIO(text.encode("utf-8")),
+            stream_info=StreamInfo(mimetype="text/html", charset="utf-8",
+                                   extension=".html", url=final_url),
+        )
+    else:
+        result = _md().convert_stream(
+            io.BytesIO(data),
+            file_extension=suffix,
+            url=final_url,
+        )
+    language = None if is_html else _data_language(suffix, mimetype)
+    if language:
+        result = _fence_data(result, language)
     return result, final_url
 
 
