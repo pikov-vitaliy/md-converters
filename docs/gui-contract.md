@@ -74,7 +74,10 @@ details/summary`.
 `getFlags()` читает id из п.3 и шлёт во `FormData` (`flagsToForm`).
 `save()`/`loadSettings()` хранят настройки в `localStorage` под ключом
 `md-conv-settings`. Имена полей флагов: `force, frontmatter, keep_images,
-pdf_tables, insecure_ssl, only, out_dir`.
+pdf_tables, insecure_ssl, only, out_dir`. Булевы флаги уходят всегда,
+и `false` тоже: без поля сервер подставляет свой default, а у
+`frontmatter` он `True` — снятая галочка иначе не отключала бы шапку.
+Не шлются только пустые `only`/`out_dir` (`null`).
 
 ## 8. Бренд
 - Палитра: зелёный `#46E0A0` → синий `#3E5FB0` → индиго `#2E2A6E`

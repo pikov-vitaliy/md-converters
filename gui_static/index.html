@@ -556,7 +556,9 @@ function flagsToForm(fd, skipOutDir) {
   const flags = getFlags();
   Object.keys(flags).forEach(k => {
     if (skipOutDir && k === "out_dir") return;
-    if (flags[k] !== null && flags[k] !== false)
+    // false тоже шлём: без поля сервер берёт свой default, а у
+    // frontmatter он True — снятая галочка не отключала YAML-шапку
+    if (flags[k] !== null)
       fd.append(k, flags[k]);
   });
   return fd;
