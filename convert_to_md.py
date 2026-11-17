@@ -966,7 +966,13 @@ def _fix_type0_font(font, writer) -> int:
         by_gid: dict = {}
         for cp, name in (embedded.getBestCmap() or {}).items():
             by_gid.setdefault(embedded.getGlyphID(name), set()).add(cp)
-        own = {cid: by_gid[gid] for cid, gid in gids.items() if gid in by_gid}
+        # Управляющие коды в своей карте подмножества — такая же порча,
+        # как в ToUnicode, а не подтверждение (ревью Codex).
+        own = {
+            cid: {cp for cp in by_gid[gid]
+                  if cp >= 0x20 and not 0x7F <= cp < 0xA0}
+            for cid, gid in gids.items() if gid in by_gid
+        }
     chosen = _choose_codepoints(best, current, own)
     wrong = {cid: ch for cid, ch in chosen.items() if current.get(cid) != ch}
     # Несколько расхождений бывают и в исправном PDF (лигатуры, двойники):

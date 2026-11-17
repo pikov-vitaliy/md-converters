@@ -363,6 +363,17 @@ def test_own_cmap_confirms_value_missing_in_system_font(tmp_path,
     assert "АВСмир" in text and "ABC" not in text
 
 
+def test_control_codes_in_own_cmap_do_not_confirm(tmp_path, monkeypatch):
+    # Своя карта подмножества тоже бывает испорчена: управляющие коды в
+    # ней совпадают с битой ToUnicode, но подтверждением не считаются.
+    _install(tmp_path, monkeypatch, _font_bytes())
+    broken_own = [("uni043C", 0x14, 1), ("uni0438", 0x15, 2),
+                  ("uni0440", 0x16, 3)]
+    src = _pdf(tmp_path / "doc.pdf", _font_bytes(glyphs=broken_own),
+               _tounicode(BROKEN))
+    assert "мирмир" in _fixed_text(src)
+
+
 # Ревью Codex (круг E3): меняется только то, что контур опровергает.
 
 def test_empty_value_does_not_abort_repair(tmp_path, monkeypatch):
