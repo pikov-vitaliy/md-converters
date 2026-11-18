@@ -3039,6 +3039,10 @@ def _decode_data(raw: bytes) -> str | None:
         # incomplete»), и файл windows-1251 читался как UTF-8 (ревью
         # Codex).
         declared = _XML_DECL_ENCODING.search(raw[:1024])
+        # Только до начала разметки: пример объявления внутри CDATA —
+        # не объявление документа, и UTF-8 читался как windows-1251.
+        if declared and b"<" in raw[:declared.start()]:
+            declared = None
         encoding = declared.group(1).decode("ascii") if declared else "utf-8"
         text = _decode_with(raw, encoding)
     # NUL в JSON/XML недопустим: он значит, что кодировка угадана неверно
@@ -3103,7 +3107,8 @@ def _convert_file_data(path: Path) -> tuple:
     return _md().convert(str(path)), None
 
 
-def _convert_data(raw: bytes, language: str, convert):
+def _convert_data(raw: bytes, language: str, convert,
+                  url: str | None = None):
     """JSON/XML: лента RSS/Atom — в Markdown через MarkItDown, всё
     остальное — исходник дословно в ограде.
 
@@ -3117,7 +3122,7 @@ def _convert_data(raw: bytes, language: str, convert):
     """
     if language == "xml" and _is_feed(raw):
         try:
-            result = convert()
+            result = _feed_markdown(raw, url)
         except Exception:
             result = None
         if result is not None and (result.text_content or "").strip():
@@ -3135,6 +3140,25 @@ class _RawResult:
 
     def __init__(self, text: str) -> None:
         self.text_content = text
+
+
+def _feed_markdown(raw: bytes, url: str | None):
+    """Лента -> Markdown самим RssConverter MarkItDown, с той же
+    нормализацией строк, что делает MarkItDown после конвертера.
+
+    Без повторного выбора конвертера: по URL «news.txt» с типом
+    application/rss+xml MarkItDown брал текстовый конвертер, и сырой XML
+    уходил прозой мимо ограды (ревью Codex).
+    """
+    from markitdown import StreamInfo
+    from markitdown.converters import RssConverter
+
+    result = RssConverter().convert(
+        io.BytesIO(raw), StreamInfo(extension=".xml", url=url))
+    lines = re.split(r"\r?\n", result.text_content)
+    text = "\n".join(line.rstrip() for line in lines)
+    result.text_content = re.sub(r"\n{3,}", "\n\n", text)
+    return result
 
 
 def _is_feed(raw: bytes) -> bool:
@@ -3172,8 +3196,11 @@ def _is_feed(raw: bytes) -> bool:
                     or node.hasAttribute("src")):
                 continue
             media = node.getAttribute("type").split(";")[0].strip().lower()
-            if ("/" in media and not media.startswith("text/")
-                    and media != "application/xhtml+xml"):
+            if media == "application/xhtml+xml":
+                continue
+            # text/xml — тоже XML: проверка раньше общего text/*.
+            if media.endswith(("/xml", "+xml")) or (
+                    "/" in media and not media.startswith("text/")):
                 return False
     return True
 
@@ -3366,7 +3393,7 @@ def _convert_url_data(url: str, opts: dict) -> tuple:
         # зависит от MIME-таблицы системы.
         return _convert_data(data, language, lambda: _md().convert_stream(
             io.BytesIO(data), file_extension=suffix, url=final_url,
-        )), final_url
+        ), url=final_url), final_url
     if is_html and (charset or _decode_with(data, "utf-8") is None):
         # Кодировка из заголовка до MarkItDown не доходила: он угадывал
         # её по байтам, и страница в windows-1251 становилась кашей

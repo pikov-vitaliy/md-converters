@@ -339,7 +339,8 @@ def test_raw_xml_fenced_without_markitdown(tmp_path, monkeypatch):
     monkeypatch.setattr(convert_to_md, "_md", lambda: Linuxish())
     xml = '<?xml version="1.0"?>\n<root><k>v</k></root>'
     (tmp_path / "data.xml").write_text(xml, encoding="utf-8")
-    rss = '<?xml version="1.0"?>\n<rss version="2.0"><channel/></rss>'
+    rss = ('<?xml version="1.0"?>\n<rss version="2.0"><channel>'
+           "<title>Лента</title></channel></rss>")
     (tmp_path / "rss.xml").write_text(rss, encoding="utf-8")
     out = tmp_path / "out"
     out.mkdir()
@@ -404,12 +405,18 @@ def test_feeds_go_to_markitdown(tmp_path, name, xml, heading):
     ("empty-atom", f'<?xml version="1.0"?>\n<feed xmlns="{_ATOM}">'
                    "<id>urn:x</id><title>Подписка</title></feed>"),
     # OData: поля в content с XML-типом, MarkItDown склеил бы их в «7125».
-    ("odata", f'<?xml version="1.0"?>\n<a:feed xmlns:a="{_ATOM}" '
-              'xmlns:m="urn:m" xmlns:d="urn:d"><a:title>T</a:title>'
-              '<a:entry><a:content type="application/xml"><m:properties>'
-              "<d:ProductID>7</d:ProductID><d:UnitsInStock>12"
-              "</d:UnitsInStock><d:ReorderLevel>5</d:ReorderLevel>"
-              "</m:properties></a:content></a:entry></a:feed>"),
+    *((f"odata-{kind.replace('/', '-')}",
+       f'<?xml version="1.0"?>\n<a:feed xmlns:a="{_ATOM}" '
+       'xmlns:m="urn:m" xmlns:d="urn:d"><a:title>T</a:title>'
+       f'<a:entry><a:content type="{kind}"><m:properties>'
+       "<d:ProductID>7</d:ProductID><d:UnitsInStock>12"
+       "</d:UnitsInStock><d:ReorderLevel>5</d:ReorderLevel>"
+       "</m:properties></a:content></a:entry></a:feed>")
+      for kind in ("application/xml", "text/xml")),
+    # Пример объявления windows-1251 внутри CDATA — документ в UTF-8.
+    ("cdata-decl", '<?xml version="1.0"?>\n<r>Привет<s><![CDATA[\n'
+                   '<?xml version="1.0" encoding="windows-1251"?>\n'
+                   "]]></s></r>"),
 ])
 def test_xml_data_stays_fenced_verbatim(tmp_path, name, xml):
     md = _xml_to_md(tmp_path, name, xml.encode("utf-8"))
@@ -443,6 +450,19 @@ def test_url_feed_and_data_same_as_file(monkeypatch):
     result, _ = convert_to_md._convert_url_data(
         "https://example.com/feed", dict(_URL_OPTS))
     assert result.text_content == f"```xml\n{empty}\n```\n"
+
+    # Лента по URL «.txt» с типом ленты: Markdown, а не сырой XML прозой.
+    news = ('<?xml version="1.0"?>\n<rss version="2.0"><channel>'
+            "<title>Канал</title><item><title>Новость</title><description>"
+            "&lt;code&gt;data:field&lt;/code&gt;</description></item>"
+            "</channel></rss>")
+    with monkeypatch.context() as patch:
+        patch.setattr(convert_to_md, "_download_url", lambda url, **kw: (
+            news.encode("utf-8"), url, ".txt", "application/rss+xml"))
+        result, _ = convert_to_md._convert_url_data(
+            "https://example.com/news.txt", dict(_URL_OPTS))
+    assert result.text_content.startswith("# Канал")
+    assert "`data:field`" in result.text_content
 
     # RDF-карточка: application/rdf+xml, BOM — данные целиком (ревью Codex).
     rdf = ('<?xml version="1.0"?>\n<r:RDF xmlns:r='
