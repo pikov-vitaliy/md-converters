@@ -323,3 +323,32 @@ def test_tidy_data_fence_does_not_disable_sanitizing():
     out = convert_to_md.tidy(text, keep_images=False, data_fence=True)
 
     assert "javascript:" not in out and "data:x" not in out
+
+
+def test_raw_xml_fenced_without_markitdown(tmp_path, monkeypatch):
+    # CI 2.0.1 на Linux: MarkItDown выбирает конвертер XML по MIME-таблице
+    # системы и отдавал .xml HTML-конвертеру (теги вырезались) или не
+    # брал вовсе; на Windows — текстовому. Сырые данные огораживаются
+    # без MarkItDown, на любой ОС.
+    class Linuxish:
+        def convert(self, path):
+            if str(path).endswith(".xml") and "rss" not in str(path):
+                return SimpleNamespace(title=None, text_content="v\n")
+            return SimpleNamespace(title=None, text_content="# Лента\n")
+
+    monkeypatch.setattr(convert_to_md, "_md", lambda: Linuxish())
+    xml = '<?xml version="1.0"?>\n<root><k>v</k></root>'
+    (tmp_path / "data.xml").write_text(xml, encoding="utf-8")
+    rss = '<?xml version="1.0"?>\n<rss version="2.0"><channel/></rss>'
+    (tmp_path / "rss.xml").write_text(rss, encoding="utf-8")
+    out = tmp_path / "out"
+    out.mkdir()
+    opts = {
+        "force": True, "frontmatter": False, "keep_images": False,
+        "unsafe_raw_markdown": False, "out_dir": out,
+        "scan": {".xml"}, "tool": "tomd", "planned": set(),
+    }
+    assert convert_to_md.convert_file(tmp_path / "data.xml", opts) == "ok"
+    assert convert_to_md.convert_file(tmp_path / "rss.xml", opts) == "ok"
+    assert (out / "data.md").read_text("utf-8") == f"```xml\n{xml}\n```\n"
+    assert "Лента" in (out / "rss.md").read_text("utf-8")

@@ -3085,11 +3085,38 @@ def _convert_file_data(path: Path) -> tuple:
             raw.decode("utf-8")
         except UnicodeDecodeError:
             return _convert_reencoded(raw)
-    result = _md().convert(str(path))
     language = _data_language(path.suffix)
     if language:
-        result = _fence_data(result, language, path.read_bytes())
-    return result, None
+        raw = path.read_bytes()
+        source = _decode_data(raw)
+        # MarkItDown выбирает конвертер XML по MIME-типу системы: на Linux
+        # .xml уходил в HTML-конвертер (теги вырезались) или не брался
+        # вовсе (UTF-16 без BOM), на Windows — в текстовый (CI 2.0.1).
+        # Сырые данные огораживаем сами; MarkItDown — только для лент.
+        if source is not None and not (
+                language == "xml" and _is_feed(source)):
+            return _fence_data(_RawResult(source), language, raw), None
+        result = _md().convert(str(path))
+        return _fence_data(result, language, raw), None
+    return _md().convert(str(path)), None
+
+
+class _RawResult:
+    """Результат без MarkItDown: исходный текст данных."""
+
+    title = None
+
+    def __init__(self, text: str) -> None:
+        self.text_content = text
+
+
+_ROOT_TAG = re.compile(r"<(?![?!])([A-Za-z_][\w:.-]*)")
+
+
+def _is_feed(source: str) -> bool:
+    """Лента RSS/Atom (MarkItDown превращает её в Markdown)."""
+    match = _ROOT_TAG.search(source)
+    return bool(match) and match.group(1) in ("rss", "feed", "rdf:RDF")
 
 
 def _positive_float(value: str, name: str) -> float:
@@ -3274,6 +3301,12 @@ def _convert_url_data(url: str, opts: dict) -> tuple:
         is_html = mimetype in ("text/html", "application/xhtml+xml")
     else:
         is_html = (suffix or "").lower() in (".html", ".htm")
+    language = None if is_html else _data_language(suffix, mimetype)
+    source = _decode_data(data) if language else None
+    if source is not None and not (language == "xml" and _is_feed(source)):
+        # Сырые JSON/XML — без MarkItDown, как для файлов: его выбор
+        # конвертера зависит от MIME-таблицы системы (_convert_file_data).
+        return _fence_data(_RawResult(source), language, data), final_url
     if is_html and (charset or _decode_with(data, "utf-8") is None):
         # Кодировка из заголовка до MarkItDown не доходила: он угадывал
         # её по байтам, и страница в windows-1251 становилась кашей
