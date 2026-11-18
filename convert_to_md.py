@@ -3012,7 +3012,7 @@ def _data_language(suffix: str | None,
 
 
 _XML_DECL_ENCODING = re.compile(
-    rb"""^<\?xml[^>]*?\sencoding\s*=\s*["']([A-Za-z][A-Za-z0-9._-]*)""")
+    rb"""(?m)^<\?xml[^>]*?\sencoding\s*=\s*["']([A-Za-z][A-Za-z0-9._-]*)""")
 
 
 def _decode_data(raw: bytes) -> str | None:
@@ -3034,7 +3034,11 @@ def _decode_data(raw: bytes) -> str | None:
             text = _decode_with(raw, encoding)
             break
     else:
-        declared = _XML_DECL_ENCODING.match(raw)
+        # Объявление ищется и в начале строки в первом килобайте: перед
+        # выгрузкой бывает строка диагностики («Warning: export
+        # incomplete»), и файл windows-1251 читался как UTF-8 (ревью
+        # Codex).
+        declared = _XML_DECL_ENCODING.search(raw[:1024])
         encoding = declared.group(1).decode("ascii") if declared else "utf-8"
         text = _decode_with(raw, encoding)
     # NUL в JSON/XML недопустим: он значит, что кодировка угадана неверно
@@ -3094,18 +3098,34 @@ def _convert_file_data(path: Path) -> tuple:
             return _convert_reencoded(raw)
     language = _data_language(path.suffix)
     if language:
-        raw = path.read_bytes()
-        source = _decode_data(raw)
-        # MarkItDown выбирает конвертер XML по MIME-типу системы: на Linux
-        # .xml уходил в HTML-конвертер (теги вырезались) или не брался
-        # вовсе (UTF-16 без BOM), на Windows — в текстовый (CI 2.0.1).
-        # Сырые данные огораживаем сами; MarkItDown — только для лент.
-        if source is not None and not (
-                language == "xml" and _is_feed(source)):
-            return _fence_data(_RawResult(source), language, raw), None
-        result = _md().convert(str(path))
-        return _fence_data(result, language, raw), None
+        return _convert_data(path.read_bytes(), language,
+                             lambda: _md().convert(str(path))), None
     return _md().convert(str(path)), None
+
+
+def _convert_data(raw: bytes, language: str, convert):
+    """JSON/XML: лента RSS/Atom — в Markdown через MarkItDown, всё
+    остальное — исходник дословно в ограде.
+
+    MarkItDown выбирает конвертер XML по MIME-таблице системы: на Linux
+    .xml уходил в HTML-конвертер (теги вырезались) или не брался вовсе
+    (CI 2.0.1), на Windows — в текстовый. Поэтому решение принимается
+    здесь, один раз: лентой считается то, что принимает RssConverter
+    самого MarkItDown (_is_feed). Лента, которую MarkItDown не смог
+    превратить в текст, тоже идёт в ограду. Исходник не декодируется —
+    текст MarkItDown, как раньше.
+    """
+    if language == "xml" and _is_feed(raw):
+        try:
+            result = convert()
+        except Exception:
+            result = None
+        if result is not None and (result.text_content or "").strip():
+            return result
+    source = _decode_data(raw)
+    if source is not None:
+        return _fence_data(_RawResult(source), language, raw)
+    return _fence_data(convert(), language, raw)
 
 
 class _RawResult:
@@ -3117,32 +3137,45 @@ class _RawResult:
         self.text_content = text
 
 
-_ROOT_TAG = re.compile(r"<(?:[A-Za-z_][\w.-]*:)?([A-Za-z_][\w.-]*)")
+def _is_feed(raw: bytes) -> bool:
+    """Лента — то, что принимает RssConverter MarkItDown: корень <rss>
+    или Atom <feed> хотя бы с одной <entry> (с префиксом, комментариями
+    и DOCTYPE — это решает XML-парсер). RDF и Atom без записей — данные.
 
+    Atom, у записей которого content — XML или другой не текстовый
+    формат (OData: поля m:properties), тоже данные: MarkItDown сводит
+    такие поля в одну строку («7125»), имена и границы пропадают (ревью
+    Codex). Внешний content (атрибут src) на это не влияет.
+    """
+    from defusedxml import minidom
+    from markitdown import StreamInfo
+    from markitdown.converters import RssConverter
 
-def _is_feed(source: str) -> bool:
-    """Лента RSS/Atom/RDF (MarkItDown превращает её в Markdown).
-
-    Корневой элемент — после объявления, комментариев, инструкций и
-    DOCTYPE; имя — локальное, без префикса пространства имён
-    («a:feed»). Комментарий перед корнем может содержать «<item>»
-    (ревью Codex), поэтому первый «<» в тексте не годится."""
-    rest = source.lstrip("\ufeff \t\r\n")
-    for _ in range(1000):
-        if rest.startswith("<?"):
-            end = rest.find("?>")
-            rest = rest[end + 2:] if end >= 0 else ""
-        elif rest.startswith("<!--"):
-            end = rest.find("-->")
-            rest = rest[end + 3:] if end >= 0 else ""
-        elif rest.startswith("<!"):
-            end = rest.find(">")
-            rest = rest[end + 1:] if end >= 0 else ""
-        else:
-            break
-        rest = rest.lstrip()
-    match = _ROOT_TAG.match(rest)
-    return bool(match) and match.group(1) in ("rss", "feed", "RDF")
+    try:
+        if not RssConverter().accepts(io.BytesIO(raw),
+                                      StreamInfo(extension=".xml")):
+            return False
+        root = minidom.parse(io.BytesIO(raw)).documentElement
+    except Exception:
+        return False
+    if root.localName != "feed":
+        return True
+    for entry in root.childNodes:
+        if (entry.nodeType != entry.ELEMENT_NODE
+                or entry.localName != "entry"
+                or entry.namespaceURI != root.namespaceURI):
+            continue
+        for node in entry.childNodes:
+            if (node.nodeType != node.ELEMENT_NODE
+                    or node.localName != "content"
+                    or node.namespaceURI != root.namespaceURI
+                    or node.hasAttribute("src")):
+                continue
+            media = node.getAttribute("type").split(";")[0].strip().lower()
+            if ("/" in media and not media.startswith("text/")
+                    and media != "application/xhtml+xml"):
+                return False
+    return True
 
 
 def _positive_float(value: str, name: str) -> float:
@@ -3328,11 +3361,12 @@ def _convert_url_data(url: str, opts: dict) -> tuple:
     else:
         is_html = (suffix or "").lower() in (".html", ".htm")
     language = None if is_html else _data_language(suffix, mimetype)
-    source = _decode_data(data) if language else None
-    if source is not None and not (language == "xml" and _is_feed(source)):
-        # Сырые JSON/XML — без MarkItDown, как для файлов: его выбор
-        # конвертера зависит от MIME-таблицы системы (_convert_file_data).
-        return _fence_data(_RawResult(source), language, data), final_url
+    if language:
+        # JSON/XML — как файл (_convert_data): выбор конвертера MarkItDown
+        # зависит от MIME-таблицы системы.
+        return _convert_data(data, language, lambda: _md().convert_stream(
+            io.BytesIO(data), file_extension=suffix, url=final_url,
+        )), final_url
     if is_html and (charset or _decode_with(data, "utf-8") is None):
         # Кодировка из заголовка до MarkItDown не доходила: он угадывал
         # её по байтам, и страница в windows-1251 становилась кашей
@@ -3352,9 +3386,6 @@ def _convert_url_data(url: str, opts: dict) -> tuple:
             file_extension=suffix,
             url=final_url,
         )
-    language = None if is_html else _data_language(suffix, mimetype)
-    if language:
-        result = _fence_data(result, language, data)
     return result, final_url
 
 

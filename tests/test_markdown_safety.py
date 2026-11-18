@@ -354,29 +354,106 @@ def test_raw_xml_fenced_without_markitdown(tmp_path, monkeypatch):
     assert "Лента" in (out / "rss.md").read_text("utf-8")
 
 
-@pytest.mark.parametrize("name, xml", [
-    ("prefixed", '<?xml version="1.0"?>\n'
-                 '<a:feed xmlns:a="http://www.w3.org/2005/Atom">'
-                 '<a:title>T</a:title></a:feed>'),
-    ("comment", '<?xml version="1.0"?>\n<!-- Прежний формат: <item> -->\n'
-                '<rss version="2.0"><channel/></rss>'),
-])
-def test_feeds_recognized_by_root_element(tmp_path, monkeypatch, name, xml):
-    # Ревью Codex: лента Atom с префиксом и RSS с комментарием перед
-    # корнем принимались за сырой XML и уходили в ограду.
-    monkeypatch.setattr(convert_to_md, "_md", lambda: SimpleNamespace(
-        convert=lambda path: SimpleNamespace(
-            title=None, text_content="# Лента\n")))
-    (tmp_path / f"{name}.xml").write_text(xml, encoding="utf-8")
+_ATOM = "http://www.w3.org/2005/Atom"
+_XML_OPTS = {
+    "force": True, "frontmatter": False, "keep_images": False,
+    "unsafe_raw_markdown": False, "scan": {".xml"}, "tool": "tomd",
+}
+
+
+def _xml_to_md(tmp_path, name, raw: bytes) -> str:
+    (tmp_path / f"{name}.xml").write_bytes(raw)
     out = tmp_path / "out"
-    out.mkdir()
-    opts = {
-        "force": True, "frontmatter": False, "keep_images": False,
-        "unsafe_raw_markdown": False, "out_dir": out,
-        "scan": {".xml"}, "tool": "tomd", "planned": set(),
-    }
+    out.mkdir(exist_ok=True)
+    opts = dict(_XML_OPTS, out_dir=out, planned=set())
     assert convert_to_md.convert_file(tmp_path / f"{name}.xml", opts) == "ok"
-    assert (out / f"{name}.md").read_text("utf-8") == "# Лента\n"
+    return (out / f"{name}.md").read_text("utf-8")
+
+
+# Настоящий MarkItDown, без подмены: правило «лента или данные» должно
+# совпадать с его RssConverter на любой ОС (ревью Codex, CI 2.0.1).
+@pytest.mark.parametrize("name, xml, heading", [
+    ("prefixed",
+     f'<?xml version="1.0"?>\n<a:feed xmlns:a="{_ATOM}">'
+     "<a:title>Лента</a:title><a:entry><a:title>Запись</a:title>"
+     '<a:content type="html">&lt;p&gt;Текст&lt;/p&gt;</a:content>'
+     "</a:entry></a:feed>", "# Лента"),
+    ("comment",
+     '<?xml version="1.0"?>\n<!-- Прежний формат: <item> -->\n'
+     '<rss version="2.0"><channel><title>Канал</title>'
+     "<item><title>Новость</title></item></channel></rss>", "# Канал"),
+    ("doctype",
+     '<?xml version="1.0"?>\n'
+     '<!DOCTYPE rss [<!ATTLIST rss version CDATA "2.0">]>\n'
+     "<rss><channel><title>Канал</title>"
+     "<item><title>Новость</title></item></channel></rss>", "# Канал"),
+])
+def test_feeds_go_to_markitdown(tmp_path, name, xml, heading):
+    md = _xml_to_md(tmp_path, name, xml.encode("utf-8"))
+    assert md.startswith(heading)
+    assert "```" not in md
+
+
+@pytest.mark.parametrize("name, xml", [
+    # RDF — не лента для MarkItDown: карточка остаётся данными целиком.
+    ("rdf", '<?xml version="1.0"?>\n<r:RDF xmlns:r='
+            '"http://www.w3.org/1999/02/22-rdf-syntax-ns#">'
+            '<r:Description><d xml:space="preserve">Поле data:field  \n'
+            "\n\n\nконец</d></r:Description></r:RDF>"),
+    # Atom без записей.
+    ("empty-atom", f'<?xml version="1.0"?>\n<feed xmlns="{_ATOM}">'
+                   "<id>urn:x</id><title>Подписка</title></feed>"),
+    # OData: поля в content с XML-типом, MarkItDown склеил бы их в «7125».
+    ("odata", f'<?xml version="1.0"?>\n<a:feed xmlns:a="{_ATOM}" '
+              'xmlns:m="urn:m" xmlns:d="urn:d"><a:title>T</a:title>'
+              '<a:entry><a:content type="application/xml"><m:properties>'
+              "<d:ProductID>7</d:ProductID><d:UnitsInStock>12"
+              "</d:UnitsInStock><d:ReorderLevel>5</d:ReorderLevel>"
+              "</m:properties></a:content></a:entry></a:feed>"),
+])
+def test_xml_data_stays_fenced_verbatim(tmp_path, name, xml):
+    md = _xml_to_md(tmp_path, name, xml.encode("utf-8"))
+    assert md == f"```xml\n{xml}\n```\n"
+
+
+def test_cp1251_xml_after_diagnostic_line_fenced(tmp_path):
+    # Объявление кодировки на второй строке, после строки диагностики.
+    xml = ("Warning: export incomplete\n"
+           '<?xml version="1.0" encoding="windows-1251"?>\n'
+           "<rows><row>Поле data:field  \n\n\n\nконец</row></rows>")
+    md = _xml_to_md(tmp_path, "cp1251", xml.encode("cp1251"))
+    assert md == f"```xml\n{xml}\n```\n"
+
+
+def test_url_feed_and_data_same_as_file(monkeypatch):
+    # По URL без расширения — то же правило, что для файла.
+    from test_url_policy import _URL_OPTS, _serve_once
+
+    rss = ('<?xml version="1.0"?>\n<rss version="2.0"><channel>'
+           "<title>Канал</title><item><title>Новость</title></item>"
+           "</channel></rss>")
+    _serve_once(monkeypatch, rss.encode("utf-8"), "application/rss+xml")
+    result, _ = convert_to_md._convert_url_data(
+        "https://example.com/feed", dict(_URL_OPTS))
+    assert result.text_content.startswith("# Канал")
+
+    empty = (f'<?xml version="1.0"?>\n<feed xmlns="{_ATOM}">'
+             "<title>Подписка</title></feed>")
+    _serve_once(monkeypatch, empty.encode("utf-8"), "application/atom+xml")
+    result, _ = convert_to_md._convert_url_data(
+        "https://example.com/feed", dict(_URL_OPTS))
+    assert result.text_content == f"```xml\n{empty}\n```\n"
+
+    # RDF-карточка: application/rdf+xml, BOM — данные целиком (ревью Codex).
+    rdf = ('<?xml version="1.0"?>\n<r:RDF xmlns:r='
+           '"http://www.w3.org/1999/02/22-rdf-syntax-ns#"><r:Description>'
+           '<d xml:space="preserve">Поле data:field  \n\n\n\nконец</d>'
+           "</r:Description></r:RDF>")
+    _serve_once(monkeypatch, b"\xef\xbb\xbf" + rdf.encode("utf-8"),
+                "application/rdf+xml")
+    result, _ = convert_to_md._convert_url_data(
+        "https://example.com/metadata.rdf", dict(_URL_OPTS))
+    assert result.text_content == f"```xml\n{rdf}\n```\n"
 
 
 def test_raw_xml_with_leading_line_still_fenced(tmp_path):
