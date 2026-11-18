@@ -3066,7 +3066,11 @@ def _fence_data(result, language: str, raw: bytes | None = None):
     вышел бы прозой мимо санитизации.
     """
     text = result.text_content.strip("\n")
-    if language == "xml" and not text.lstrip().startswith("<"):
+    # Не «<» в начале — лента, которую MarkItDown уже превратил в
+    # Markdown. Исходник (_RawResult) огораживается всегда: строка
+    # диагностики перед XML не повод отдавать данные без ограды.
+    if (language == "xml" and not isinstance(result, _RawResult)
+            and not text.lstrip().startswith("<")):
         return result
     source = _decode_data(raw) if raw is not None else None
     if source is not None:
@@ -3113,13 +3117,32 @@ class _RawResult:
         self.text_content = text
 
 
-_ROOT_TAG = re.compile(r"<(?![?!])([A-Za-z_][\w:.-]*)")
+_ROOT_TAG = re.compile(r"<(?:[A-Za-z_][\w.-]*:)?([A-Za-z_][\w.-]*)")
 
 
 def _is_feed(source: str) -> bool:
-    """Лента RSS/Atom (MarkItDown превращает её в Markdown)."""
-    match = _ROOT_TAG.search(source)
-    return bool(match) and match.group(1) in ("rss", "feed", "rdf:RDF")
+    """Лента RSS/Atom/RDF (MarkItDown превращает её в Markdown).
+
+    Корневой элемент — после объявления, комментариев, инструкций и
+    DOCTYPE; имя — локальное, без префикса пространства имён
+    («a:feed»). Комментарий перед корнем может содержать «<item>»
+    (ревью Codex), поэтому первый «<» в тексте не годится."""
+    rest = source.lstrip("\ufeff \t\r\n")
+    for _ in range(1000):
+        if rest.startswith("<?"):
+            end = rest.find("?>")
+            rest = rest[end + 2:] if end >= 0 else ""
+        elif rest.startswith("<!--"):
+            end = rest.find("-->")
+            rest = rest[end + 3:] if end >= 0 else ""
+        elif rest.startswith("<!"):
+            end = rest.find(">")
+            rest = rest[end + 1:] if end >= 0 else ""
+        else:
+            break
+        rest = rest.lstrip()
+    match = _ROOT_TAG.match(rest)
+    return bool(match) and match.group(1) in ("rss", "feed", "RDF")
 
 
 def _positive_float(value: str, name: str) -> float:

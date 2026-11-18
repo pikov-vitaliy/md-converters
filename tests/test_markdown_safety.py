@@ -352,3 +352,44 @@ def test_raw_xml_fenced_without_markitdown(tmp_path, monkeypatch):
     assert convert_to_md.convert_file(tmp_path / "rss.xml", opts) == "ok"
     assert (out / "data.md").read_text("utf-8") == f"```xml\n{xml}\n```\n"
     assert "Лента" in (out / "rss.md").read_text("utf-8")
+
+
+@pytest.mark.parametrize("name, xml", [
+    ("prefixed", '<?xml version="1.0"?>\n'
+                 '<a:feed xmlns:a="http://www.w3.org/2005/Atom">'
+                 '<a:title>T</a:title></a:feed>'),
+    ("comment", '<?xml version="1.0"?>\n<!-- Прежний формат: <item> -->\n'
+                '<rss version="2.0"><channel/></rss>'),
+])
+def test_feeds_recognized_by_root_element(tmp_path, monkeypatch, name, xml):
+    # Ревью Codex: лента Atom с префиксом и RSS с комментарием перед
+    # корнем принимались за сырой XML и уходили в ограду.
+    monkeypatch.setattr(convert_to_md, "_md", lambda: SimpleNamespace(
+        convert=lambda path: SimpleNamespace(
+            title=None, text_content="# Лента\n")))
+    (tmp_path / f"{name}.xml").write_text(xml, encoding="utf-8")
+    out = tmp_path / "out"
+    out.mkdir()
+    opts = {
+        "force": True, "frontmatter": False, "keep_images": False,
+        "unsafe_raw_markdown": False, "out_dir": out,
+        "scan": {".xml"}, "tool": "tomd", "planned": set(),
+    }
+    assert convert_to_md.convert_file(tmp_path / f"{name}.xml", opts) == "ok"
+    assert (out / f"{name}.md").read_text("utf-8") == "# Лента\n"
+
+
+def test_raw_xml_with_leading_line_still_fenced(tmp_path):
+    # Строка диагностики перед выгрузкой: данные всё равно в ограде, с
+    # пробелами в концах строк и пустыми строками внутри значений.
+    xml = "Warning: export incomplete\n<rows><row>a  \n\n\n\nb</row></rows>"
+    (tmp_path / "dump.xml").write_text(xml, encoding="utf-8")
+    out = tmp_path / "out"
+    out.mkdir()
+    opts = {
+        "force": True, "frontmatter": False, "keep_images": False,
+        "unsafe_raw_markdown": False, "out_dir": out,
+        "scan": {".xml"}, "tool": "tomd", "planned": set(),
+    }
+    assert convert_to_md.convert_file(tmp_path / "dump.xml", opts) == "ok"
+    assert (out / "dump.md").read_text("utf-8") == f"```xml\n{xml}\n```\n"
