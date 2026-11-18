@@ -3026,7 +3026,10 @@ def _decode_data(raw: bytes) -> str | None:
                             (b"<\0\0\0?\0\0\0", "utf-32-le"),
                             (b"\0\0\0<\0\0\0?", "utf-32-be"),
                             (b"<\0?\0x\0", "utf-16-le"),
-                            (b"\0<\0?\0x", "utf-16-be")):
+                            (b"\0<\0?\0x", "utf-16-be"),
+                            # без объявления: корневой «<» в UTF-16
+                            # (на Linux MarkItDown такой файл не берёт)
+                            (b"<\0", "utf-16-le"), (b"\0<", "utf-16-be")):
         if raw.startswith(start):
             text = _decode_with(raw, encoding)
             break
