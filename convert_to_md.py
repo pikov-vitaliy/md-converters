@@ -2999,17 +2999,23 @@ def _convert_reencoded(raw: bytes) -> tuple:
 
 def _data_language(suffix: str | None,
                    mimetype: str | None = None) -> str | None:
-    """'json' | 'xml' для форматов-данных, иначе None."""
+    """'json' | 'xml' для форматов-данных, иначе None.
+
+    Тип ответа сервера главнее расширения пути: news.json с
+    application/rss+xml — лента, а не JSON (ревью Codex).
+    """
     suffix = (suffix or "").lower()
     mimetype = (mimetype or "").lower()
-    if (suffix == ".json" or mimetype in ("application/json", "text/json")
-            or mimetype.endswith("+json")):
-        return "json"
-    if (suffix == ".xml" or mimetype in ("application/xml", "text/xml")
-            or mimetype.endswith("+xml")):
-        return "xml"
-    return None
+    for kind in ("json", "xml"):
+        if (mimetype in (f"application/{kind}", f"text/{kind}")
+                or mimetype.endswith(f"+{kind}")):
+            return kind
+    return {".json": "json", ".xml": "xml"}.get(suffix)
 
+
+# Начало разметки: «<» перед именем, «!», «?» или «/». Знак сравнения
+# в строке диагностики («row count 7 < 12») разметкой не считается.
+_MARKUP_START = re.compile(rb"<[A-Za-z_:!?/]")
 
 _XML_DECL_ENCODING = re.compile(
     rb"""(?m)^<\?xml[^>]*?\sencoding\s*=\s*["']([A-Za-z][A-Za-z0-9._-]*)""")
@@ -3041,7 +3047,7 @@ def _decode_data(raw: bytes) -> str | None:
         declared = _XML_DECL_ENCODING.search(raw[:1024])
         # Только до начала разметки: пример объявления внутри CDATA —
         # не объявление документа, и UTF-8 читался как windows-1251.
-        if declared and b"<" in raw[:declared.start()]:
+        if declared and _MARKUP_START.search(raw, 0, declared.start()):
             declared = None
         encoding = declared.group(1).decode("ascii") if declared else "utf-8"
         text = _decode_with(raw, encoding)
@@ -3166,10 +3172,10 @@ def _is_feed(raw: bytes) -> bool:
     или Atom <feed> хотя бы с одной <entry> (с префиксом, комментариями
     и DOCTYPE — это решает XML-парсер). RDF и Atom без записей — данные.
 
-    Atom, у записей которого content — XML или другой не текстовый
-    формат (OData: поля m:properties), тоже данные: MarkItDown сводит
-    такие поля в одну строку («7125»), имена и границы пропадают (ревью
-    Codex). Внешний content (атрибут src) на это не влияет.
+    Atom, у записей которого content не текст (_ATOM_TEXT_CONTENT) или
+    ссылается на ресурс (src), тоже данные: MarkItDown сводит поля OData
+    m:properties в одну строку («7125»), дробь MathML — в «12», а адрес
+    src теряет (ревью Codex).
     """
     from defusedxml import minidom
     from markitdown import StreamInfo
@@ -3192,17 +3198,21 @@ def _is_feed(raw: bytes) -> bool:
         for node in entry.childNodes:
             if (node.nodeType != node.ELEMENT_NODE
                     or node.localName != "content"
-                    or node.namespaceURI != root.namespaceURI
-                    or node.hasAttribute("src")):
+                    or node.namespaceURI != root.namespaceURI):
                 continue
             media = node.getAttribute("type").split(";")[0].strip().lower()
-            if media == "application/xhtml+xml":
-                continue
-            # text/xml — тоже XML: проверка раньше общего text/*.
-            if media.endswith(("/xml", "+xml")) or (
-                    "/" in media and not media.startswith("text/")):
+            if (node.hasAttribute("src")
+                    or media not in _ATOM_TEXT_CONTENT):
                 return False
     return True
+
+
+# Типы content записи Atom, которые MarkItDown передаёт текстом или
+# разметкой без потерь. Белый список, а не чёрный: каждый новый тип
+# (XML, MathML в application/xhtml+xml, медиа по src рядом с полями
+# OData) давал новую потерю (круги Codex K–N).
+_ATOM_TEXT_CONTENT = frozenset(
+    ("", "text", "html", "xhtml", "text/plain", "text/html"))
 
 
 def _positive_float(value: str, name: str) -> float:

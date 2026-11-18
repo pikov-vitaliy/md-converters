@@ -413,6 +413,20 @@ def test_feeds_go_to_markitdown(tmp_path, name, xml, heading):
        "</d:UnitsInStock><d:ReorderLevel>5</d:ReorderLevel>"
        "</m:properties></a:content></a:entry></a:feed>")
       for kind in ("application/xml", "text/xml")),
+    # OData со ссылкой на медиа (src) и полями рядом: адрес и поля.
+    ("odata-media", f'<?xml version="1.0"?>\n<a:feed xmlns:a="{_ATOM}" '
+                    'xmlns:m="urn:m" xmlns:d="urn:d"><a:title>T</a:title>'
+                    '<a:entry><a:content type="image/jpeg" '
+                    'src="Products(7)/$value"/><m:properties><d:ID>7</d:ID>'
+                    "<d:UnitsInStock>12</d:UnitsInStock></m:properties>"
+                    "</a:entry></a:feed>"),
+    # MathML в application/xhtml+xml: дробь 1/2 стала бы «12».
+    ("mathml", f'<?xml version="1.0"?>\n<feed xmlns="{_ATOM}"><title>T'
+               '</title><entry><title>E</title><content type='
+               '"application/xhtml+xml"><div xmlns="http://www.w3.org/1999/'
+               'xhtml">Доля: <math xmlns="http://www.w3.org/1998/Math/'
+               'MathML"><mfrac><mn>1</mn><mn>2</mn></mfrac></math></div>'
+               "</content></entry></feed>"),
     # Пример объявления windows-1251 внутри CDATA — документ в UTF-8.
     ("cdata-decl", '<?xml version="1.0"?>\n<r>Привет<s><![CDATA[\n'
                    '<?xml version="1.0" encoding="windows-1251"?>\n'
@@ -423,9 +437,13 @@ def test_xml_data_stays_fenced_verbatim(tmp_path, name, xml):
     assert md == f"```xml\n{xml}\n```\n"
 
 
-def test_cp1251_xml_after_diagnostic_line_fenced(tmp_path):
+@pytest.mark.parametrize("line", [
+    "Warning: export incomplete",
+    "Warning: row count 7 < 12 expected",  # «<» — не разметка
+])
+def test_cp1251_xml_after_diagnostic_line_fenced(tmp_path, line):
     # Объявление кодировки на второй строке, после строки диагностики.
-    xml = ("Warning: export incomplete\n"
+    xml = (f"{line}\n"
            '<?xml version="1.0" encoding="windows-1251"?>\n'
            "<rows><row>Поле data:field  \n\n\n\nконец</row></rows>")
     md = _xml_to_md(tmp_path, "cp1251", xml.encode("cp1251"))
@@ -463,6 +481,14 @@ def test_url_feed_and_data_same_as_file(monkeypatch):
             "https://example.com/news.txt", dict(_URL_OPTS))
     assert result.text_content.startswith("# Канал")
     assert "`data:field`" in result.text_content
+
+    # Тип ответа главнее расширения: news.json с application/rss+xml.
+    with monkeypatch.context() as patch:
+        patch.setattr(convert_to_md, "_download_url", lambda url, **kw: (
+            news.encode("utf-8"), url, ".json", "application/rss+xml"))
+        result, _ = convert_to_md._convert_url_data(
+            "https://example.com/news.json", dict(_URL_OPTS))
+    assert result.text_content.startswith("# Канал")
 
     # RDF-карточка: application/rdf+xml, BOM — данные целиком (ревью Codex).
     rdf = ('<?xml version="1.0"?>\n<r:RDF xmlns:r='
