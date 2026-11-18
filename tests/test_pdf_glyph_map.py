@@ -363,6 +363,18 @@ def test_own_cmap_confirms_value_missing_in_system_font(tmp_path,
     assert "АВСмир" in text and "ABC" not in text
 
 
+def test_c1_control_codes_start_repair(tmp_path, fonts):
+    # Проба считала только коды ниже U+0020: на C1 (U+0080..U+009F)
+    # ремонт не запускался, и в .md уходили управляющие символы.
+    broken_own = [("uni043C", 0x81, 1), ("uni0438", 0x82, 2),
+                  ("uni0440", 0x83, 3)]
+    c1 = {1: "\x81", 2: "\x82", 3: "\x83"}
+    src = _pdf(tmp_path / "doc.pdf", _font_bytes(glyphs=broken_own),
+               _tounicode(c1))
+    assert c._pdf_glyph_fix_needed(src)
+    assert "мирмир" in _fixed_text(src)
+
+
 def test_control_codes_in_own_cmap_do_not_confirm(tmp_path, monkeypatch):
     # Своя карта подмножества тоже бывает испорчена: управляющие коды в
     # ней совпадают с битой ToUnicode, но подтверждением не считаются.

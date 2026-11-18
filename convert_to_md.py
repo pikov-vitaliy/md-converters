@@ -671,7 +671,11 @@ def _pdf_glyph_fix_needed(path: Path) -> bool:
     finally:
         _close_pdfium(doc)
     text = "\n".join(parts)
-    ctrl = sum(1 for ch in text if ch < " " and ch not in "\t\n\r\f")
+    # Управляющие коды C0 и C1 (U+007F..U+009F): битая карта даёт и те и
+    # другие (ревью Codex: на C1 ремонт не запускался вовсе).
+    ctrl = sum(1 for ch in text
+               if (ch < " " and ch not in "\t\n\r\f")
+               or "\x7f" <= ch <= "\x9f")
     broken = sum(
         1 for m in _BROKEN_RUN.finditer(text)
         if len(m.group()) >= 3 and _run_looks_broken(m.group())
