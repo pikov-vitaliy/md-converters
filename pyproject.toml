@@ -44,14 +44,14 @@ dependencies = [
     # fontTools читает встроенный и системный шрифты, pypdf пишет
     # исправленную ToUnicode во временную копию PDF. MIT / BSD-3.
     "fonttools>=4.50,<5",
-    "pypdf>=5,<7",
+    "pypdf>=5,<8",
 ]
 
 [dependency-groups]
 dev = [
     "pip-audit>=2.9,<3",
     "pytest>=9,<10",
-    "ruff>=0.13,<0.14",
+    "ruff>=0.13,<0.18",
     "httpx>=0.28,<1.0",
 ]
 
