@@ -288,7 +288,7 @@ source_name: "sample-report.html"
 source_path: "examples\\sample-report.html"
 source_id: "path:..."
 converted: 2026-06-10
-generator: tomd 2.0.1 (MarkItDown)
+generator: tomd 2.0.2 (MarkItDown)
 ---
 
 # Отчёт об уязвимостях — demo-project
@@ -387,7 +387,7 @@ source_name: "имя-исходного-файла.docx"
 source_path: "путь\\к\\имя-исходного-файла.docx"
 source_id: "path:короткий-хэш-источника"
 converted: 2026-06-10
-generator: tomd 2.0.1 (MarkItDown)
+generator: tomd 2.0.2 (MarkItDown)
 ---
 ```
 
