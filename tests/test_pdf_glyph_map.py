@@ -375,6 +375,15 @@ def test_c1_control_codes_start_repair(tmp_path, fonts):
     assert "мирмир" in _fixed_text(src)
 
 
+def test_letter_with_control_separator_kept(tmp_path, fonts):
+    # «м» + NEL (U+0085): NEL разделяет слова; проба по C1 запускает
+    # проверку, но буква подтверждена контуром — карта не переписывается.
+    nel = {1: "м\x85", 2: "и\x85", 3: "р\x85"}
+    src = _pdf(tmp_path / "doc.pdf", _font_bytes(), _tounicode_multi(nel))
+    assert c._pdf_glyph_fix_needed(src)
+    assert c._pdf_glyph_fixed_copy(src) is None
+
+
 def test_control_codes_in_own_cmap_do_not_confirm(tmp_path, monkeypatch):
     # Своя карта подмножества тоже бывает испорчена: управляющие коды в
     # ней совпадают с битой ToUnicode, но подтверждением не считаются.

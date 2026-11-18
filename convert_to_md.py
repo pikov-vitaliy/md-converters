@@ -851,9 +851,13 @@ def _choose_codepoints(found: dict, current: dict, own: dict) -> dict:
     chosen = {}
     for cid, (cps, same) in found.items():
         old = current.get(cid)
+        # Буква плюс управляющий разделитель («d» + NEL U+0085) — тоже
+        # подтверждённое значение: NEL там разделяет слова (ревью Codex).
+        core = "".join(ch for ch in old or "" if ch.isprintable())
         if old is not None and (
             _confirmed(old, cps) or _confirmed(old, own.get(cid, set()))
             or (len(old) > 1 and old.isprintable())
+            or (core and core != old and _confirmed(core, cps))
         ):
             chosen[cid] = old
             continue
