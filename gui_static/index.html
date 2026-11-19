@@ -302,7 +302,7 @@
       <div class="formats">
         <span class="fmt">.pdf</span><span class="fmt">.docx</span><span class="fmt">.pptx</span>
         <span class="fmt">.xlsx</span><span class="fmt">.html</span><span class="fmt">.epub</span>
-        <span class="fmt">.csv</span><span class="fmt">.json</span><span class="fmt">.png</span><span class="fmt">.jpg</span>
+        <span class="fmt">.csv</span><span class="fmt">.json</span>
       </div>
       <p class="dz-archive">Архив <code>.zip</code> / <code>.7z</code> / <code>.tar</code> → получите <code>.zip</code> со всеми <code>.md</code></p>
       <input type="file" id="fileInput" multiple style="display:none">
@@ -326,7 +326,7 @@
           <option value="">Все поддерживаемые</option>
           <option value="pdf">PDF</option><option value="docx">Word (.docx)</option>
           <option value="pptx">PowerPoint (.pptx)</option><option value="xlsx">Excel (.xlsx)</option>
-          <option value="html">HTML</option><option value="img">Изображения</option>
+          <option value="html">HTML</option>
         </select>
       </div>
       <div class="field">
@@ -421,8 +421,12 @@ function loadSettings() {
       document.getElementById("pdfTables").checked = s.pdfTables;
     if (s.insecureSsl !== undefined)
       document.getElementById("insecureSsl").checked = s.insecureSsl;
-    if (s.only)
-      document.getElementById("only").value = s.only;
+    if (s.only) {
+      const only = document.getElementById("only");
+      only.value = s.only;
+      // сохранённого пункта может уже не быть в списке (пункт «Изображения» убран 19.11.2026)
+      if (only.selectedIndex < 0) only.value = "";
+    }
     if (s.outDir)
       document.getElementById("outDir").value = s.outDir;
   } catch(e) {}

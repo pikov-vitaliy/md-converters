@@ -20,6 +20,18 @@ RAG-системы) и хранить в git.
 Нужен только [Node.js](https://nodejs.org/) 18 или новее. Python ставить не
 нужно: при первом запуске пакет сам подготовит Python 3.14 и библиотеки.
 
+Node.js на Windows ставится одной командой в PowerShell:
+
+```powershell
+winget install OpenJS.NodeJS.LTS
+```
+
+Если Windows спросит разрешение на изменения, ответьте «Да». После установки
+закройте окно терминала и откройте новое, иначе команды `node` и `npm` не
+найдутся. Проверка: `node -v`. Если winget на компьютере отключён, скачайте
+установщик LTS с [nodejs.org](https://nodejs.org/) и пройдите его с настройками
+по умолчанию.
+
 ```powershell
 npm install -g md-converters
 md-converters
