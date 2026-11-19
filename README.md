@@ -290,7 +290,7 @@ tomd-gui          # старт сервера + авто-открытие бра
 
 ---
 
-## Что получится (фрагмент `examples\sample-report.md`)
+## Что получится (пример вывода для `examples\sample-report.html`)
 
 ```markdown
 ---

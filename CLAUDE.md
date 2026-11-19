@@ -80,5 +80,5 @@ Excel, PowerPoint, CSV, JSON, XML, EPUB, Outlook `.msg`, Jupyter,
 - docs/gui-guide.md — руководство GUI; README.md — CLI-флаги.
 - `.claude/workplan.md` (локальный, в git не входит) — бэклог находок.
 
-Проект считается завершённым и рабочим. Текущая версия — 2.0.0,
+Проект считается завершённым и рабочим. Текущая версия – в `pyproject.toml`,
 только Python 3.14 (3.15 не поддерживает MarkItDown).
